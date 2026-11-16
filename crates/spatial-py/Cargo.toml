@@ -1,0 +1,15 @@
+[package]
+name = "spatial-spur-rust"
+version = "0.2.0"
+edition = "2021"
+description = "Shared PyO3 Rust backend for scpc-python and spur-python"
+license = "MIT"
+
+[lib]
+name = "spatial_spur_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }
+numpy = "0.22"
+spatial-core = { path = "../spatial-core" }

@@ -1,0 +1,144 @@
+{
+  "200": {
+    "python": {
+      "rust_4t": {
+        "cold_ms": 15.87,
+        "warm_median_ms": 10.9,
+        "warm_min_ms": 10.81,
+        "q": 19,
+        "backend": "rust"
+      },
+      "rust_1t": {
+        "cold_ms": 26.22,
+        "warm_median_ms": 23.5,
+        "warm_min_ms": 23.38,
+        "q": 19,
+        "backend": "rust"
+      },
+      "fallback": {
+        "cold_ms": 131.05,
+        "warm_median_ms": 125.41,
+        "warm_min_ms": 124.96,
+        "q": 19,
+        "backend": "fallback"
+      }
+    },
+    "r": {
+      "rust_4t": {
+        "cold_ms": 38,
+        "warm_median_ms": 11,
+        "warm_min_ms": 11,
+        "q": 19,
+        "backend": "rust"
+      },
+      "rust_1t": {
+        "cold_ms": 42,
+        "warm_median_ms": 24,
+        "warm_min_ms": 24,
+        "q": 19,
+        "backend": "rust"
+      },
+      "fallback": {
+        "cold_ms": 463,
+        "warm_median_ms": 131,
+        "warm_min_ms": 130,
+        "q": 19,
+        "backend": "fallback"
+      }
+    },
+    "stata": {
+      "rust_4t": {
+        "cold_ms": 22.0,
+        "warm_median_ms": 12.0,
+        "warm_min_ms": 12.0,
+        "q": 19,
+        "backend": "rust"
+      },
+      "rust_1t": {
+        "cold_ms": 32.0,
+        "warm_median_ms": 25.0,
+        "warm_min_ms": 25.0,
+        "q": 19,
+        "backend": "rust"
+      },
+      "fallback": {
+        "cold_ms": 212.0,
+        "warm_median_ms": 188.0,
+        "warm_min_ms": 185.0,
+        "q": 19,
+        "backend": "fallback"
+      }
+    }
+  },
+  "1000": {
+    "python": {
+      "rust_4t": {
+        "cold_ms": 56.32,
+        "warm_median_ms": 51.97,
+        "warm_min_ms": 51.77,
+        "q": 8,
+        "backend": "rust"
+      },
+      "rust_1t": {
+        "cold_ms": 160.51,
+        "warm_median_ms": 137.96,
+        "warm_min_ms": 136.55,
+        "q": 8,
+        "backend": "rust"
+      },
+      "fallback": {
+        "cold_ms": 576.35,
+        "warm_median_ms": 572.24,
+        "warm_min_ms": 560.62,
+        "q": 8,
+        "backend": "fallback"
+      }
+    },
+    "r": {
+      "rust_4t": {
+        "cold_ms": 73,
+        "warm_median_ms": 53,
+        "warm_min_ms": 52,
+        "q": 8,
+        "backend": "rust"
+      },
+      "rust_1t": {
+        "cold_ms": 163,
+        "warm_median_ms": 138,
+        "warm_min_ms": 136,
+        "q": 8,
+        "backend": "rust"
+      },
+      "fallback": {
+        "cold_ms": 1457,
+        "warm_median_ms": 1146,
+        "warm_min_ms": 1137,
+        "q": 8,
+        "backend": "fallback"
+      }
+    },
+    "stata": {
+      "rust_4t": {
+        "cold_ms": 67.0,
+        "warm_median_ms": 53.0,
+        "warm_min_ms": 52.0,
+        "q": 8,
+        "backend": "rust"
+      },
+      "rust_1t": {
+        "cold_ms": 144.0,
+        "warm_median_ms": 136.0,
+        "warm_min_ms": 135.0,
+        "q": 8,
+        "backend": "rust"
+      },
+      "fallback": {
+        "cold_ms": 1149.0,
+        "warm_median_ms": 1120.0,
+        "warm_min_ms": 1115.0,
+        "q": 8,
+        "backend": "fallback"
+      }
+    }
+  }
+}

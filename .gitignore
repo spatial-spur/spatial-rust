@@ -1,0 +1,8 @@
+/target*
+/dist/
+/.proto_ref/
+*.whl
+*.pyc
+__pycache__/
+.DS_Store
+*.log
