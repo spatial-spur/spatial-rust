@@ -1,0 +1,63 @@
+{
+  "spec_version": "0.1.0",
+  "absolute_tolerance": 1e-11,
+  "conditional_scpc": {
+    "sites": [0, 1, 2, 3],
+    "regressor": [-2, -1, 1, 2],
+    "outcome": [-1, -2, 0, 3],
+    "q": 1,
+    "max_average_correlation": 0.3541666666666667,
+    "alpha": 0.05,
+    "null_coefficient": 0,
+    "expected": {
+      "decay": 0.6931471805599453,
+      "coefficient": 1,
+      "se": 0.3794733192202055,
+      "t": 2.63523138347365,
+      "location_covariance": [[2.0625, 0], [0, 1]],
+      "conditional_covariance": [[4.5, 0], [0, 0.39375]],
+      "historical_covariance_at_c_min": [[4.5, 0], [0, 0.15]],
+      "location_p": 0.31765967607705115,
+      "conditional_p": 0.5784795418841093,
+      "historical_conditional_p_at_c_min": 0.714517989950016,
+      "location_critical_value": 18.24789727667345,
+      "conditional_critical_value": 42.95481197691872,
+      "interval": [-15.300205077361184, 17.300205077361184]
+    }
+  },
+  "scpc_component_selection": {
+    "distance_matrix": [[0, 1, 1], [1, 0, 1], [1, 1, 0]],
+    "outcome": [1, 2, 3],
+    "max_average_correlation": 0.25,
+    "alpha": 0.05,
+    "null_coefficient": 0,
+    "expected": {
+      "candidate_critical_values": [17.969287064187522, 6.084869844593311],
+      "expected_iid_interval_lengths": [16.55542280226064, 6.226809826350534],
+      "selected_q": 2,
+      "coefficient": 2,
+      "se": 0.5773502691896258,
+      "t": 3.4641016151377544,
+      "p": 0.1339745962155614,
+      "interval": [-1.5131012427597845, 5.5131012427597845]
+    }
+  },
+  "spur_half_life": {
+    "sites": [0, 1, 2],
+    "outcome": [1, -6, 0],
+    "unbounded_case_outcome": [1, -5, 0],
+    "q": 2,
+    "alpha": 0.05,
+    "tested_nulls": [2, 8, 16, "infinity"],
+    "expected": {
+      "lbm_eigenvalues": [1, 0.3333333333333333],
+      "null_covariance_at_diameter": [[0.7213475204444816, 0], [0, 0.322958285574738]],
+      "mixture_density_without_common_constant": 0.7898748172656417,
+      "likelihood_ratio_at_diameter": 1.169105060364498,
+      "null_p_values": [0.056604603282803395, 0.0509379290454332, 0.049917538599838704, 0.048874503944394805],
+      "upper_endpoint": 14.814779473289729,
+      "normalized_upper_endpoint": 7.4073897366448645,
+      "unbounded_case_p_at_infinity": 0.057715876752608954
+    }
+  }
+}
