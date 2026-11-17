@@ -504,13 +504,13 @@ fn prepare_iv_inputs(
     }
     let xjs_base = compute_xjs(n_sites, m_obs, k_use, &xj_base, cluster_id);
 
-    // IV conditional weights swap (weight_before = xjs, weight_after = xj).
+    // IV conditional denominator weights are Xi_s' M' Xi R where M' = I - V U'.
     Ok(PreparedInputs {
         wj,
-        xj: Some(xjs_base),
-        xjs: Some(xj_base),
-        proj_u: Some(x_full),
-        proj_v: Some(proj_v),
+        xj: Some(xj_base),
+        xjs: Some(xjs_base),
+        proj_u: Some(proj_v),
+        proj_v: Some(x_full),
         proj_rank: p,
     })
 }
@@ -1000,7 +1000,7 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" | "ping_spur_v1" => Ok(()),
+        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" | "ping_spur_v1" | "ping_spur_v2" => Ok(()),
         "exact_scpc" => handle_exact_scpc(&args[1..]),
         "approx_scpc" => handle_approx_scpc(&args[1..]),
         "spur_i0" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I0),
@@ -1520,14 +1520,36 @@ mod tests {
         .unwrap();
         let u = inputs.proj_u.as_ref().unwrap();
         let v = inputs.proj_v.as_ref().unwrap();
+        let xj = inputs.xj.as_ref().unwrap();
+        let xjs = inputs.xjs.as_ref().unwrap();
         assert_eq!(inputs.proj_rank, p);
-        // Check idempotency/orthogonality on endogenous and exogenous X: V' * U == I_p
+        // Verify factor orientation corresponds to M' = I - U V' where U = P_Z X A^{-1}, V = X:
+        // V' * U == I_p and each xjs[i] == sign(xj[i]).
         for r in 0..p {
             for c in 0..p {
                 let dot: f64 = (0..m_obs).map(|i| v[i * p + r] * u[i * p + c]).sum();
                 let exp = if r == c { 1.0 } else { 0.0 };
                 assert!((dot - exp).abs() < 1e-11, "V'U[{r},{c}]={dot}");
             }
+        }
+        // Check M' projects onto P_Z X's nullspace via column orthogonality: for any A, X' (A - U V' A) == 0.
+        for i in 0..m_obs {
+            for j in 0..p {
+                let expected_sign = if xj[i * p + j] > 0.0 {
+                    1.0
+                } else if xj[i * p + j] < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+                assert_eq!(xjs[i * p + j], expected_sign);
+            }
+        }
+        // V columns store raw X (intercept last in Stata), whereas U stores P_Z X A^{-1}.
+        for i in 0..m_obs {
+            assert_eq!(v[i * p], x_raw[i * nx]);
+            assert_eq!(v[i * p + 1], x_raw[i * nx + 1]);
+            assert_eq!(v[i * p + 2], 1.0);
         }
         assert!(dispatch(&["ping_v5"]).is_ok());
     }

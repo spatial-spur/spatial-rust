@@ -26,7 +26,7 @@ all: $(PLUGIN_OUT) $(SPUR_PLUGIN_OUT)
 rust-lib:
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo build --release --offline --locked -p spatial-stata
 
-$(RUST_LIB): src/lib.rs src/stata_spi.rs Cargo.toml ../spatial-core/Cargo.toml ../spatial-core/src/*.rs
+$(RUST_LIB): src/*.rs Cargo.toml ../spatial-core/Cargo.toml ../spatial-core/src/*.rs
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo build --release --offline --locked -p spatial-stata
 
 $(PLUGIN_OUT): $(RUST_LIB) c/stplugin.c c/stata_bridge.c c/stplugin.h

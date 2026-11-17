@@ -335,7 +335,12 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
     .map_err(format_core_error)?;
 
     save_scalar(tied_scal_name, if out.tied { 1.0 } else { 0.0 })?;
-    save_scalar(max_dist_scal_name, out.max_dist * STATA_CIRCUMFERENCE_M)?;
+    let max_dist_out = if latlong {
+        out.max_dist * STATA_CIRCUMFERENCE_M
+    } else {
+        out.max_dist
+    };
+    save_scalar(max_dist_scal_name, max_dist_out)?;
     if out.ci_lower.is_finite() && out.ci_upper.is_finite() {
         save_scalar_or_missing(ci_l_scal_name, Some(out.ci_lower))?;
         save_scalar_or_missing(ci_u_scal_name, Some(out.ci_upper))?;
@@ -590,6 +595,7 @@ mod tests {
     #[test]
     fn ping_and_spur_arg_validation_work() {
         assert!(dispatch(&["ping_spur_v1"]).is_ok());
+        assert!(dispatch(&["ping_spur_v2"]).is_ok());
 
         // Wrong arity errors cleanly
         assert!(dispatch(&["spur_i0", "2"]).is_err());

@@ -1104,7 +1104,7 @@ fn run_spur_pipeline<'py>(
 #[pymodule]
 fn spatial_spur_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("API_VERSION", 5usize)?;
-    m.add("SPUR_API_VERSION", 1usize)?;
+    m.add("SPUR_API_VERSION", 2usize)?;
     m.add_function(wrap_pyfunction!(run_exact_scpc, m)?)?;
     m.add_function(wrap_pyfunction!(run_approx_scpc, m)?)?;
     m.add_function(wrap_pyfunction!(run_spur_i0, m)?)?;
