@@ -1,5 +1,6 @@
 //! Stata SPI v3 plugin entry points backed by `spatial-core`.
 
+mod spur_stata;
 mod stata_spi;
 
 use spatial_core::{
@@ -28,7 +29,7 @@ fn error_kind_label(kind: ErrorKind) -> &'static str {
     }
 }
 
-fn format_core_error(err: CoreError) -> String {
+pub(crate) fn format_core_error(err: CoreError) -> String {
     format!("{}: {}", error_kind_label(err.kind()), err.message())
 }
 
@@ -41,7 +42,7 @@ struct PreparedInputs {
     proj_rank: usize,
 }
 
-fn parse_bool_flag(raw: &str, name: &str) -> Result<bool, String> {
+pub(crate) fn parse_bool_flag(raw: &str, name: &str) -> Result<bool, String> {
     match raw {
         "0" => Ok(false),
         "1" => Ok(true),
@@ -49,7 +50,7 @@ fn parse_bool_flag(raw: &str, name: &str) -> Result<bool, String> {
     }
 }
 
-fn parse_usize(raw: &str, name: &str) -> Result<usize, String> {
+pub(crate) fn parse_usize(raw: &str, name: &str) -> Result<usize, String> {
     raw.parse::<usize>()
         .map_err(|_| format!("invalid integer argument {name}='{raw}'"))
 }
@@ -69,7 +70,7 @@ fn permute_rows(src: &[f64], perm: &[usize], cols: usize) -> Vec<f64> {
     out
 }
 
-fn parse_nthreads(raw: &str) -> Result<Option<usize>, String> {
+pub(crate) fn parse_nthreads(raw: &str) -> Result<Option<usize>, String> {
     let val = raw
         .parse::<isize>()
         .map_err(|_| format!("invalid nthreads argument '{raw}'"))?;
@@ -999,9 +1000,20 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" => Ok(()),
+        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" | "ping_spur_v1" => Ok(()),
         "exact_scpc" => handle_exact_scpc(&args[1..]),
         "approx_scpc" => handle_approx_scpc(&args[1..]),
+        "spur_i0" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I0),
+        "spur_i1" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I1),
+        "spur_i0_resid" => {
+            spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I0Resid)
+        }
+        "spur_i1_resid" => {
+            spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I1Resid)
+        }
+        "spur_halflife" => spur_stata::handle_spur_halflife(&args[1..]),
+        "spur_transform" => spur_stata::handle_spur_transform(&args[1..]),
+        "spur_pipeline" => spur_stata::handle_spur_pipeline(&args[1..]),
         other => Err(format!("unknown spatial-stata subcommand '{other}'")),
     }
 }

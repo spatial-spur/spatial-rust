@@ -1,6 +1,8 @@
 //! Safe Rust wrappers over Stata SPI v3 C shims (`c/stata_bridge.c`).
 
 use std::ffi::{CStr, CString};
+use std::fs::File;
+use std::io::Read;
 use std::os::raw::{c_char, c_double, c_int, c_uchar};
 
 pub const STATA_OK: c_int = 0;
@@ -18,7 +20,9 @@ extern "C" {
     fn st_nvars() -> c_int;
     fn st_ifobs(obs: c_int) -> c_uchar;
     fn st_is_missing(z: c_double) -> c_uchar;
+    fn st_missval() -> c_double;
     fn st_vdata(var: c_int, obs: c_int, z: *mut c_double) -> c_int;
+    fn st_vstore(var: c_int, obs: c_int, z: c_double) -> c_int;
     fn st_row(mat: *const c_char) -> c_int;
     fn st_col(mat: *const c_char) -> c_int;
     fn st_mat_el(mat: *const c_char, row: c_int, col: c_int, z: *mut c_double) -> c_int;
@@ -58,7 +62,13 @@ mod test_stubs {
     pub(super) unsafe fn st_is_missing(z: c_double) -> c_uchar {
         u8::from(!z.is_finite())
     }
+    pub(super) unsafe fn st_missval() -> c_double {
+        f64::NAN
+    }
     pub(super) unsafe fn st_vdata(_var: c_int, _obs: c_int, _z: *mut c_double) -> c_int {
+        STATA_ERR
+    }
+    pub(super) unsafe fn st_vstore(_var: c_int, _obs: c_int, _z: c_double) -> c_int {
         STATA_ERR
     }
     pub(super) unsafe fn st_row(_mat: *const c_char) -> c_int {
@@ -278,6 +288,89 @@ pub fn read_matrix(
     Ok(out)
 }
 
+/// Write a row-major `obs.len() x ncols` `f64` buffer into `ncols` contiguous
+/// dataset variables in the `plugin call` varlist starting at `var_1based_start`.
+pub fn write_var_matrix(
+    obs: &[c_int],
+    var_1based_start: usize,
+    ncols: usize,
+    data: &[f64],
+    label: &str,
+) -> Result<(), String> {
+    if ncols == 0 {
+        return Ok(());
+    }
+    let nvars = plugin_var_count();
+    let last_var = var_1based_start
+        .checked_add(ncols)
+        .and_then(|end| end.checked_sub(1))
+        .ok_or_else(|| format!("{label} output variable index overflow"))?;
+    if var_1based_start == 0 || last_var > nvars {
+        return Err(format!(
+            "{label} requires plugin output varlist indices {var_1based_start}..={last_var}, but only {nvars} variables were passed"
+        ));
+    }
+    let expected = obs
+        .len()
+        .checked_mul(ncols)
+        .ok_or_else(|| format!("{label} output size overflow"))?;
+    if data.len() != expected {
+        return Err(format!(
+            "{label} output length {} does not match {}x{ncols}",
+            data.len(),
+            obs.len()
+        ));
+    }
+    for (row_idx, &st_obs) in obs.iter().enumerate() {
+        for col_idx in 0..ncols {
+            let var_idx = c_int::try_from(var_1based_start + col_idx)
+                .map_err(|_| format!("{label} output variable index exceeds c_int range"))?;
+            let val = data[row_idx * ncols + col_idx];
+            if !val.is_finite() {
+                return Err(format!(
+                    "non-finite output value in {label} at obs {st_obs}, col {}",
+                    col_idx + 1
+                ));
+            }
+            let rc = unsafe { st_vstore(var_idx, st_obs, val) };
+            if rc != STATA_OK {
+                return Err(format!(
+                    "SF_vstore failed for {label} var {var_idx} obs {st_obs} (rc={rc})"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read `expected_len` little-endian IEEE-754 `f64` values written by Mata `fbufput(..., "%8z", ...)`.
+pub fn read_f64_bin_file(path: &str, expected_len: usize, label: &str) -> Result<Vec<f64>, String> {
+    let expected_bytes = expected_len
+        .checked_mul(8)
+        .ok_or_else(|| format!("{label} byte length overflow"))?;
+    let mut file = File::open(path).map_err(|e| format!("failed to open {label} file '{path}': {e}"))?;
+    let mut buf = Vec::with_capacity(expected_bytes);
+    file.read_to_end(&mut buf)
+        .map_err(|e| format!("failed to read {label} file '{path}': {e}"))?;
+    if buf.len() != expected_bytes {
+        return Err(format!(
+            "{label} binary file length {} bytes does not match expected {expected_bytes} bytes",
+            buf.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(expected_len);
+    for (idx, chunk) in buf.chunks_exact(8).enumerate() {
+        let val = f64::from_le_bytes(chunk.try_into().expect("8-byte chunk"));
+        if !val.is_finite() {
+            return Err(format!(
+                "non-finite entry in {label} file at index {idx}"
+            ));
+        }
+        out.push(val);
+    }
+    Ok(out)
+}
+
 /// Store a row-major `rows x cols` slice into an existing Stata matrix.
 ///
 /// Stata SPI v3 `SF_mat_store` uses 1-based row/col indices (`1..=rows`, `1..=cols`).
@@ -353,9 +446,29 @@ pub fn save_scalar(name: &str, value: f64) -> Result<(), String> {
     Ok(())
 }
 
+/// Save a finite scalar value, or Stata's missing value (`SV_missval`) when `None`.
+pub fn save_scalar_or_missing(name: &str, value: Option<f64>) -> Result<(), String> {
+    let raw = match value {
+        Some(v) => {
+            if !v.is_finite() {
+                return Err(format!("cannot store non-finite scalar '{name}'"));
+            }
+            v
+        }
+        None => unsafe { st_missval() },
+    };
+    let c_name = to_cstring(name, "scalar name")?;
+    let rc = unsafe { st_scal_save(c_name.as_ptr(), raw) };
+    if rc != STATA_OK {
+        return Err(format!("SF_scal_save failed for '{name}' (rc={rc})"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn write_matrix_validates_dims_and_inputs_before_store() {
@@ -368,5 +481,44 @@ mod tests {
         assert!(err.contains("missing or empty"));
         let err_read = read_matrix("m", usize::MAX, 1).unwrap_err();
         assert!(err_read.contains("i32::MAX"));
+        assert!(save_scalar_or_missing("s", Some(f64::NAN)).is_err());
+    }
+
+    #[test]
+    fn write_var_matrix_validates_bounds_and_inputs() {
+        let obs = [1, 2];
+        assert!(write_var_matrix(&obs, 1, 0, &[], "out").is_ok());
+        let err_zero = write_var_matrix(&obs, 0, 1, &[1.0, 2.0], "out").unwrap_err();
+        assert!(err_zero.contains("indices"));
+        let err_var = write_var_matrix(&obs, 1, 1, &[1.0, 2.0], "out").unwrap_err();
+        assert!(err_var.contains("varlist indices"));
+        let err_len = write_var_matrix(&obs, 1, 1, &[1.0], "out").unwrap_err();
+        assert!(err_len.contains("varlist indices") || err_len.contains("length"));
+    }
+
+    #[test]
+    fn read_f64_bin_file_round_trips_and_validates() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("spatial_stata_spi_test_{}.bin", std::process::id()));
+        let path_str = path.to_str().unwrap();
+
+        let vals = [1.5_f64, -2.25_f64, 0.0_f64, 42.125_f64];
+        {
+            let mut f = File::create(&path).unwrap();
+            for v in vals {
+                f.write_all(&v.to_le_bytes()).unwrap();
+            }
+        }
+        let parsed = read_f64_bin_file(path_str, vals.len(), "emat").unwrap();
+        assert_eq!(parsed, vals);
+        assert!(read_f64_bin_file(path_str, vals.len() + 1, "emat").is_err());
+
+        {
+            let mut f = File::create(&path).unwrap();
+            f.write_all(&f64::NAN.to_le_bytes()).unwrap();
+        }
+        assert!(read_f64_bin_file(path_str, 1, "emat").is_err());
+        let _ = std::fs::remove_file(&path);
+        assert!(read_f64_bin_file(path_str, 1, "emat").is_err());
     }
 }

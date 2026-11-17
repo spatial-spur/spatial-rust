@@ -53,9 +53,19 @@ ST_boolean st_is_missing(ST_double z)
     return SF_is_missing(z);
 }
 
+ST_double st_missval(void)
+{
+    return SV_missval;
+}
+
 ST_retcode st_vdata(ST_int var, ST_int obs, ST_double *z)
 {
     return SF_vdata(var, obs, z);
+}
+
+ST_retcode st_vstore(ST_int var, ST_int obs, ST_double z)
+{
+    return SF_vstore(var, obs, z);
 }
 
 ST_int st_row(const char *mat)
