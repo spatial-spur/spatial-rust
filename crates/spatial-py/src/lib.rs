@@ -7,7 +7,8 @@ use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyTypeError, PyVal
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyTuple};
 use spatial_core::{
-    run_exact_scpc as core_run_exact_scpc, CoreError, ErrorKind, ExactScpcRequest, Metric,
+    run_approx_scpc as core_run_approx_scpc, run_exact_scpc as core_run_exact_scpc,
+    ApproxScpcRequest, CoreError, ErrorKind, ExactScpcOutput, ExactScpcRequest, Metric,
 };
 use std::mem::align_of;
 
@@ -17,9 +18,10 @@ fn map_core_err(err: CoreError) -> PyErr {
         | ErrorKind::CalibrationFailed
         | ErrorKind::DegenerateVariance => PyValueError::new_err(err.message()),
         ErrorKind::UnsupportedCase => PyNotImplementedError::new_err(err.message()),
-        ErrorKind::TiedEigenspace | ErrorKind::InternalFailure => {
-            PyRuntimeError::new_err(err.message())
+        ErrorKind::TiedEigenspace => {
+            PyRuntimeError::new_err(format!("tied eigenspace: {}", err.message()))
         }
+        ErrorKind::InternalFailure => PyRuntimeError::new_err(err.message()),
     }
 }
 
@@ -120,23 +122,73 @@ fn parse_nthreads(nthreads: Option<Bound<'_, PyAny>>) -> PyResult<Option<usize>>
     Ok(Some(val as usize))
 }
 
-#[pyfunction]
-#[pyo3(signature = (
-    coords,
-    coef,
-    wj,
-    avc,
-    latlong = false,
-    uncond = false,
-    cvs = false,
-    xj = None,
-    xjs = None,
-    proj_u = None,
-    proj_v = None,
-    nthreads = None
-))]
+fn extract_1d_index_id<'py>(
+    py: Python<'py>,
+    require_fn: &Bound<'py, PyAny>,
+    obj: &Bound<'py, PyAny>,
+    upper_bound: usize,
+    name: &str,
+    bound_label: &str,
+) -> PyResult<Vec<usize>> {
+    if obj.is_none() {
+        return Err(PyTypeError::new_err(format!("{name} must not be None")));
+    }
+    let np_mod = py.import_bound("numpy")?;
+    let raw_arr = np_mod.getattr("asarray")?.call1((obj,))?;
+    let dtype = raw_arr.getattr("dtype")?;
+    let kind: String = dtype.getattr("kind")?.extract()?;
+    if kind != "i" && kind != "u" {
+        return Err(PyTypeError::new_err(format!(
+            "{name} must have an integer dtype (int/uint)"
+        )));
+    }
+    let int64_dtype = np_mod.getattr("int64")?;
+    let reqs = PyTuple::new_bound(py, ["C", "A"]);
+    let kwargs = PyDict::new_bound(py);
+    kwargs.set_item("dtype", int64_dtype)?;
+    kwargs.set_item("requirements", reqs)?;
+    let aligned = require_fn.call((raw_arr,), Some(&kwargs))?;
+    let arr: PyReadonlyArray1<'py, i64> = aligned.extract()?;
+    if !arr.is_empty() && (!arr.is_c_contiguous() || (arr.data() as usize) % align_of::<i64>() != 0)
+    {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be aligned and C-contiguous"
+        )));
+    }
+    let slice = arr
+        .as_slice()
+        .map_err(|_| PyValueError::new_err(format!("{name} must be C-contiguous")))?;
+    let mut out = Vec::with_capacity(slice.len());
+    for &val in slice {
+        if val < 0 || (val as usize) >= upper_bound {
+            return Err(PyValueError::new_err(format!(
+                "{name} entry {val} out of bounds for {upper_bound} {bound_label}"
+            )));
+        }
+        out.push(val as usize);
+    }
+    Ok(out)
+}
+
+struct ParsedScpcInputs {
+    coords: Vec<f64>,
+    n: usize,
+    d: usize,
+    metric: Metric,
+    coef: Vec<f64>,
+    wj: Vec<f64>,
+    cluster_id: Option<Vec<usize>>,
+    fe_id: Option<Vec<usize>>,
+    xj: Option<Vec<f64>>,
+    xjs: Option<Vec<f64>>,
+    proj_u: Option<Vec<f64>>,
+    proj_v: Option<Vec<f64>>,
+    proj_rank: usize,
+    nthreads: Option<usize>,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn run_exact_scpc<'py>(
+fn parse_scpc_inputs<'py>(
     py: Python<'py>,
     coords: &Bound<'py, PyAny>,
     coef: &Bound<'py, PyAny>,
@@ -144,13 +196,14 @@ fn run_exact_scpc<'py>(
     avc: f64,
     latlong: bool,
     uncond: bool,
-    cvs: bool,
     xj: Option<Bound<'py, PyAny>>,
     xjs: Option<Bound<'py, PyAny>>,
     proj_u: Option<Bound<'py, PyAny>>,
     proj_v: Option<Bound<'py, PyAny>>,
     nthreads: Option<Bound<'py, PyAny>>,
-) -> PyResult<Bound<'py, PyDict>> {
+    cluster_id: Option<Bound<'py, PyAny>>,
+    fe_id: Option<Bound<'py, PyAny>>,
+) -> PyResult<ParsedScpcInputs> {
     let nthreads_usize = parse_nthreads(nthreads)?;
 
     if !avc.is_finite() || avc <= 0.001 || avc >= 0.99 {
@@ -192,6 +245,30 @@ fn run_exact_scpc<'py>(
         )));
     }
 
+    let cluster_vec: Option<Vec<usize>> = match cluster_id.as_ref() {
+        Some(obj) => Some(extract_1d_index_id(
+            py,
+            &require_fn,
+            obj,
+            n,
+            "cluster_id",
+            "clusters",
+        )?),
+        None => None,
+    };
+    let m_obs = cluster_vec.as_ref().map_or(n, Vec::len);
+    let fe_vec: Option<Vec<usize>> = match fe_id.as_ref() {
+        Some(obj) => Some(extract_1d_index_id(
+            py,
+            &require_fn,
+            obj,
+            m_obs,
+            "fe_id",
+            "observations",
+        )?),
+        None => None,
+    };
+
     let mut xj_vec: Option<Vec<f64>> = None;
     let mut xjs_vec: Option<Vec<f64>> = None;
     let mut proj_u_vec: Option<Vec<f64>> = None;
@@ -208,16 +285,16 @@ fn run_exact_scpc<'py>(
 
         let (xj_data, xj_rows, xj_cols) =
             extract_2d_row_major_f64(&require_fn, &kwargs, xj_arr, "xj")?;
-        if xj_rows != n || xj_cols != k_use {
+        if xj_rows != m_obs || xj_cols != k_use {
             return Err(PyValueError::new_err(format!(
-                "xj shape ({xj_rows}, {xj_cols}) does not match expected ({n}, {k_use})"
+                "xj shape ({xj_rows}, {xj_cols}) does not match expected ({m_obs}, {k_use})"
             )));
         }
         let (xjs_data, xjs_rows, xjs_cols) =
             extract_2d_row_major_f64(&require_fn, &kwargs, xjs_arr, "xjs")?;
-        if xjs_rows != n || xjs_cols != k_use {
+        if xjs_rows != m_obs || xjs_cols != k_use {
             return Err(PyValueError::new_err(format!(
-                "xjs shape ({xjs_rows}, {xjs_cols}) does not match expected ({n}, {k_use})"
+                "xjs shape ({xjs_rows}, {xjs_cols}) does not match expected ({m_obs}, {k_use})"
             )));
         }
         xj_vec = Some(xj_data);
@@ -230,9 +307,9 @@ fn run_exact_scpc<'py>(
                     extract_2d_row_major_f64(&require_fn, &kwargs, u_arr, "proj_u")?;
                 let (v_data, v_rows, v_cols) =
                     extract_2d_row_major_f64(&require_fn, &kwargs, v_arr, "proj_v")?;
-                if u_rows != n || v_rows != n || u_cols != v_cols {
+                if u_rows != m_obs || v_rows != m_obs || u_cols != v_cols {
                     return Err(PyValueError::new_err(format!(
-                        "proj_u shape ({u_rows}, {u_cols}) and proj_v shape ({v_rows}, {v_cols}) must both be ({n}, r)"
+                        "proj_u shape ({u_rows}, {u_cols}) and proj_v shape ({v_rows}, {v_cols}) must both be ({m_obs}, r)"
                     )));
                 }
                 if u_cols > 0 {
@@ -255,30 +332,30 @@ fn run_exact_scpc<'py>(
         Metric::Euclidean
     };
 
-    let output = py
-        .allow_threads(|| {
-            let req = ExactScpcRequest {
-                coords: &coords_vec,
-                n,
-                d,
-                metric,
-                avc,
-                uncond,
-                cvs,
-                coef: &coef_vec,
-                wj: &wj_vec,
-                xj: xj_vec.as_deref(),
-                xjs: xjs_vec.as_deref(),
-                proj_u: proj_u_vec.as_deref(),
-                proj_v: proj_v_vec.as_deref(),
-                proj_rank,
-                cv_tolerance: 0.001,
-                nthreads: nthreads_usize,
-            };
-            core_run_exact_scpc(&req)
-        })
-        .map_err(map_core_err)?;
+    Ok(ParsedScpcInputs {
+        coords: coords_vec,
+        n,
+        d,
+        metric,
+        coef: coef_vec,
+        wj: wj_vec,
+        cluster_id: cluster_vec,
+        fe_id: fe_vec,
+        xj: xj_vec,
+        xjs: xjs_vec,
+        proj_u: proj_u_vec,
+        proj_v: proj_v_vec,
+        proj_rank,
+        nthreads: nthreads_usize,
+    })
+}
 
+fn build_scpc_result_dict<'py>(
+    py: Python<'py>,
+    output: ExactScpcOutput,
+    n: usize,
+    k_use: usize,
+) -> PyResult<Bound<'py, PyDict>> {
     let result = PyDict::new_bound(py);
     result.set_item("scpcstats", vec_to_pyarray2(py, output.scpcstats, k_use, 6)?)?;
     match output.scpccvs {
@@ -298,9 +375,160 @@ fn run_exact_scpc<'py>(
     Ok(result)
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    coords,
+    coef,
+    wj,
+    avc,
+    latlong = false,
+    uncond = false,
+    cvs = false,
+    xj = None,
+    xjs = None,
+    proj_u = None,
+    proj_v = None,
+    nthreads = None,
+    cluster_id = None,
+    fe_id = None
+))]
+#[allow(clippy::too_many_arguments)]
+fn run_exact_scpc<'py>(
+    py: Python<'py>,
+    coords: &Bound<'py, PyAny>,
+    coef: &Bound<'py, PyAny>,
+    wj: &Bound<'py, PyAny>,
+    avc: f64,
+    latlong: bool,
+    uncond: bool,
+    cvs: bool,
+    xj: Option<Bound<'py, PyAny>>,
+    xjs: Option<Bound<'py, PyAny>>,
+    proj_u: Option<Bound<'py, PyAny>>,
+    proj_v: Option<Bound<'py, PyAny>>,
+    nthreads: Option<Bound<'py, PyAny>>,
+    cluster_id: Option<Bound<'py, PyAny>>,
+    fe_id: Option<Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let inputs = parse_scpc_inputs(
+        py, coords, coef, wj, avc, latlong, uncond, xj, xjs, proj_u, proj_v, nthreads,
+        cluster_id, fe_id,
+    )?;
+    let n = inputs.n;
+    let k_use = inputs.coef.len();
+    let output = py
+        .allow_threads(|| {
+            let req = ExactScpcRequest {
+                coords: &inputs.coords,
+                n,
+                d: inputs.d,
+                metric: inputs.metric,
+                avc,
+                uncond,
+                cvs,
+                coef: &inputs.coef,
+                wj: &inputs.wj,
+                cluster_id: inputs.cluster_id.as_deref(),
+                fe_id: inputs.fe_id.as_deref(),
+                xj: inputs.xj.as_deref(),
+                xjs: inputs.xjs.as_deref(),
+                proj_u: inputs.proj_u.as_deref(),
+                proj_v: inputs.proj_v.as_deref(),
+                proj_rank: inputs.proj_rank,
+                cv_tolerance: 0.001,
+                nthreads: inputs.nthreads,
+            };
+            core_run_exact_scpc(&req)
+        })
+        .map_err(map_core_err)?;
+    build_scpc_result_dict(py, output, n, k_use)
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    coords,
+    coef,
+    wj,
+    avc,
+    latlong = false,
+    uncond = false,
+    cvs = false,
+    xj = None,
+    xjs = None,
+    proj_u = None,
+    proj_v = None,
+    nthreads = None,
+    cluster_id = None,
+    fe_id = None,
+    seed = 1,
+    landmarks = 1000,
+    samples = 20,
+    pair_count = 1_000_000
+))]
+#[allow(clippy::too_many_arguments)]
+fn run_approx_scpc<'py>(
+    py: Python<'py>,
+    coords: &Bound<'py, PyAny>,
+    coef: &Bound<'py, PyAny>,
+    wj: &Bound<'py, PyAny>,
+    avc: f64,
+    latlong: bool,
+    uncond: bool,
+    cvs: bool,
+    xj: Option<Bound<'py, PyAny>>,
+    xjs: Option<Bound<'py, PyAny>>,
+    proj_u: Option<Bound<'py, PyAny>>,
+    proj_v: Option<Bound<'py, PyAny>>,
+    nthreads: Option<Bound<'py, PyAny>>,
+    cluster_id: Option<Bound<'py, PyAny>>,
+    fe_id: Option<Bound<'py, PyAny>>,
+    seed: u32,
+    landmarks: usize,
+    samples: usize,
+    pair_count: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let inputs = parse_scpc_inputs(
+        py, coords, coef, wj, avc, latlong, uncond, xj, xjs, proj_u, proj_v, nthreads,
+        cluster_id, fe_id,
+    )?;
+    let n = inputs.n;
+    let k_use = inputs.coef.len();
+    let output = py
+        .allow_threads(|| {
+            let req = ApproxScpcRequest {
+                coords: &inputs.coords,
+                n,
+                d: inputs.d,
+                metric: inputs.metric,
+                avc,
+                uncond,
+                cvs,
+                coef: &inputs.coef,
+                wj: &inputs.wj,
+                cluster_id: inputs.cluster_id.as_deref(),
+                fe_id: inputs.fe_id.as_deref(),
+                xj: inputs.xj.as_deref(),
+                xjs: inputs.xjs.as_deref(),
+                proj_u: inputs.proj_u.as_deref(),
+                proj_v: inputs.proj_v.as_deref(),
+                proj_rank: inputs.proj_rank,
+                cv_tolerance: 0.001,
+                nthreads: inputs.nthreads,
+                seed,
+                landmarks,
+                samples,
+                pair_count,
+            };
+            core_run_approx_scpc(&req)
+        })
+        .map_err(map_core_err)?;
+    build_scpc_result_dict(py, output, n, k_use)
+}
+
 #[pymodule]
 fn spatial_spur_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("API_VERSION", 2usize)?;
+    m.add("API_VERSION", 5usize)?;
     m.add_function(wrap_pyfunction!(run_exact_scpc, m)?)?;
+    m.add_function(wrap_pyfunction!(run_approx_scpc, m)?)?;
     Ok(())
 }
