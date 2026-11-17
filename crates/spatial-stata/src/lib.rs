@@ -290,7 +290,7 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" => Ok(()),
+        "ping" | "ping_v2" => Ok(()),
         "exact_scpc" => handle_exact_scpc(&args[1..]),
         other => Err(format!("unknown spatial-stata subcommand '{other}'")),
     }

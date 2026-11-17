@@ -236,7 +236,7 @@ fn run_exact_scpc<'py>(
 
 #[pymodule]
 fn spatial_spur_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("API_VERSION", 1usize)?;
+    m.add("API_VERSION", 2usize)?;
     m.add_function(wrap_pyfunction!(run_exact_scpc, m)?)?;
     Ok(())
 }

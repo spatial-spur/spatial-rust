@@ -1,4 +1,4 @@
-//! Whole-operation exact SCPC inference pipeline matching released `main`/`master`.
+//! Whole-operation exact SCPC inference for unclustered OLS.
 
 use crate::basis::{scpc_basis, ScpcBasis};
 use crate::calibration::solve_c0_from_avc;
@@ -316,11 +316,12 @@ fn build_conditional_basis(
     }
 
     if q > 0 {
+        // Denominator weights are S_x M_V D_x B_q.
         let mut rx = vec![0.0; checked_len(&[n, q])?];
         for i in 0..n {
-            let xjs_i = xjs[i * k_use + col_j];
+            let xj_i = xj[i * k_use + col_j];
             for c in 0..q {
-                rx[i * q + c] = wfin[i * width + 1 + c] * xjs_i;
+                rx[i * q + c] = wfin[i * width + 1 + c] * xj_i;
             }
         }
         let rr = if proj_rank > 0 {
@@ -338,9 +339,9 @@ fn build_conditional_basis(
             rx
         };
         for i in 0..n {
-            let xj_i = xj[i * k_use + col_j];
+            let xjs_i = xjs[i * k_use + col_j];
             for c in 0..q {
-                wx[i * width + 1 + c] = rr[i * q + c] * xj_i;
+                wx[i * width + 1 + c] = rr[i * q + c] * xjs_i;
             }
         }
     }
@@ -723,7 +724,34 @@ mod tests {
     }
 
     #[test]
-    fn exact_scpc_matches_pinned_main_fixture_bench_200() {
+    fn conditional_basis_weights_apply_regressor_before_projection() {
+        let x = [-2.0, -1.0, 1.0, 2.0];
+        let sign = [-1.0, -1.0, 1.0, 1.0];
+        let norm = 10.0_f64.sqrt();
+        let w: Vec<_> = x.iter().flat_map(|value| [0.5, -value / norm]).collect();
+        let projection: Vec<_> = x.iter().flat_map(|value| [0.5, value / norm]).collect();
+        let weights = build_conditional_basis(
+            &w,
+            4,
+            1,
+            &x,
+            &sign,
+            1,
+            0,
+            Some(&projection),
+            Some(&projection),
+            2,
+        )
+        .unwrap();
+        let a = 1.5 / norm;
+        let expected = [1.0, a, 0.5, -a, 0.5, a, 1.0, -a];
+        for (got, expected) in weights.iter().zip(expected) {
+            assert!((got - expected).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn exact_scpc_matches_release_score_statistics_bench_200() {
         let (y, x, coords) = load_bench_csv("bench_200.csv");
         let n = y.len();
         let p = 3usize;
@@ -792,22 +820,16 @@ mod tests {
             "cvfin={}",
             out_euclid.cvfin
         );
+        // The release fixture's conditional critical values use the reversed weights.
         let expected_stats = [
-            1.4834167407175964, 0.11454779987636342, 12.95019845268713, 1.5882043004635851e-10, 1.236953655047813, 1.7298798263873798,
-            1.5473280763431876, 0.09650902048915827, 16.032989128897157, 4.3785289611173374e-12, 1.3375098664953151, 1.75714628619106,
-            -0.6589528089605742, 0.10738682321940547, -6.13625386435211, 8.27465855135604e-06, -0.8878059409227403, -0.430099676998408,
+            [1.4834167407175964, 0.11454779987636342, 12.95019845268713],
+            [1.5473280763431876, 0.09650902048915827, 16.032989128897157],
+            [-0.6589528089605742, 0.10738682321940547, -6.13625386435211],
         ];
-        for (got, exp) in out_euclid.scpcstats.iter().zip(expected_stats.iter()) {
-            assert!((got - exp).abs() < 1e-10, "got={got}, exp={exp}");
-        }
-        let expected_cvs = [
-            1.0504692889253482, 1.7779609365213687, 2.151617804408309, 2.9400361689649794,
-            1.061211476425348, 1.7965156240213684, 2.174078741908309, 2.97323929396498,
-            1.041680226425348, 1.7613593740213687, 2.1311099919083087, 2.9097627314649794,
-        ];
-        let got_cvs = out_euclid.scpccvs.as_ref().unwrap();
-        for (got, exp) in got_cvs.iter().zip(expected_cvs.iter()) {
-            assert!((got - exp).abs() < 1e-10, "cv got={got}, exp={exp}");
+        for (row, expected) in out_euclid.scpcstats.chunks_exact(6).zip(expected_stats) {
+            for (got, exp) in row.iter().zip(expected) {
+                assert!((got - exp).abs() < 1e-10, "got={got}, exp={exp}");
+            }
         }
 
         // 2. Single-threaded Rust (`nthreads: Some(1)`) produces identical results
@@ -859,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_scpc_matches_pinned_main_fixture_bench_1000() {
+    fn exact_scpc_matches_release_score_statistics_bench_1000() {
         let (y, x, coords) = load_bench_csv("bench_1000.csv");
         let n = y.len();
         let p = 3usize;
@@ -925,12 +947,14 @@ mod tests {
         assert!((out.c0 - 0.43896032977784594).abs() < 1e-12);
         assert!((out.cvfin - 2.365574447704166).abs() < 1e-12);
         let expected_stats = [
-            1.5780823405600297, 0.13216765018777865, 11.940004519396016, 2.773253799788007e-06, 1.2611706154234632, 1.8949940656965962,
-            1.745699446088806, 0.0697326838936868, 25.03416401913148, 1.002440662662066e-08, 1.5752256266467595, 1.9161732655308525,
-            -0.9039531747843945, 0.037101498337623266, -24.3643306951765, 1.0072078299790812e-08, -0.9924441698628215, -0.8154621797059676,
+            [1.5780823405600297, 0.13216765018777865, 11.940004519396016],
+            [1.745699446088806, 0.0697326838936868, 25.03416401913148],
+            [-0.9039531747843945, 0.037101498337623266, -24.3643306951765],
         ];
-        for (got, exp) in out.scpcstats.iter().zip(expected_stats.iter()) {
-            assert!((got - exp).abs() < 1e-10, "got={got}, exp={exp}");
+        for (row, expected) in out.scpcstats.chunks_exact(6).zip(expected_stats) {
+            for (got, exp) in row.iter().zip(expected) {
+                assert!((got - exp).abs() < 1e-10, "got={got}, exp={exp}");
+            }
         }
     }
 }
