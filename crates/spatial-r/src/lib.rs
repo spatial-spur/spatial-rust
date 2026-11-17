@@ -1,10 +1,21 @@
 //! Shared `extendr` R FFI adapter for `scpcR` and `spuR`.
 
 use extendr_api::prelude::*;
-use spatial_core::{run_exact_scpc, CoreError, ExactScpcRequest, Metric};
+use spatial_core::{run_exact_scpc, CoreError, ErrorKind, ExactScpcRequest, Metric};
 
 fn core_err(err: CoreError) -> Error {
-    Error::Other(err.to_string())
+    match err.kind() {
+        ErrorKind::InvalidInput => Error::Other(err.message().to_string()),
+        ErrorKind::UnsupportedCase => Error::Other(format!("unsupported case: {}", err.message())),
+        ErrorKind::TiedEigenspace => Error::Other(format!("tied eigenspace: {}", err.message())),
+        ErrorKind::CalibrationFailed => {
+            Error::Other(format!("calibration failed: {}", err.message()))
+        }
+        ErrorKind::DegenerateVariance => {
+            Error::Other(format!("degenerate variance: {}", err.message()))
+        }
+        ErrorKind::InternalFailure => Error::Other(format!("internal failure: {}", err.message())),
+    }
 }
 
 /// Convert an R column-major matrix buffer (`nrows x ncols`) into a contiguous row-major `Vec<f64>`.
@@ -308,5 +319,23 @@ mod tests {
     #[test]
     fn col_major_to_row_major_rejects_mismatched_length() {
         assert!(col_major_to_row_major(&[1.0, 2.0], 2, 2).is_err());
+    }
+
+    #[test]
+    fn core_err_maps_all_error_kinds() {
+        let cases = [
+            (CoreError::invalid_input("bad arg"), "bad arg"),
+            (CoreError::unsupported("approx"), "unsupported case: approx"),
+            (CoreError::tied("ambiguous"), "tied eigenspace: ambiguous"),
+            (CoreError::calibration("no root"), "calibration failed: no root"),
+            (CoreError::degenerate("zero var"), "degenerate variance: zero var"),
+            (CoreError::internal("lapack"), "internal failure: lapack"),
+        ];
+        for (err, expected) in cases {
+            match core_err(err) {
+                Error::Other(msg) => assert_eq!(msg, expected),
+                other => panic!("unexpected Error variant: {other:?}"),
+            }
+        }
     }
 }

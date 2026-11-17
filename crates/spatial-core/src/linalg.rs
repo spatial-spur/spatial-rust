@@ -183,7 +183,9 @@ impl EigenWorkspace {
             );
         }
         if status != 0 {
-            return Err(CoreError("SCPC covariance eigensolver failed to converge"));
+            return Err(CoreError::internal(
+                "SCPC covariance eigensolver failed to converge",
+            ));
         }
         Ok(&self.values)
     }
@@ -213,7 +215,9 @@ impl EigenWorkspace {
                 .expect("pivot range is nonempty");
             if self.auxiliary[p] <= 0.0 {
                 if self.auxiliary[k..].iter().any(|&value| value < -tolerance) {
-                    return Err(CoreError("SCPC covariance is not positive semidefinite"));
+                    return Err(CoreError::invalid_input(
+                        "SCPC covariance is not positive semidefinite",
+                    ));
                 }
                 break;
             }
@@ -320,5 +324,7 @@ pub(crate) fn symmetric_eigen(
             return Ok(());
         }
     }
-    Err(CoreError("SCPC covariance eigensolver failed to converge"))
+    Err(CoreError::internal(
+        "SCPC covariance eigensolver failed to converge",
+    ))
 }

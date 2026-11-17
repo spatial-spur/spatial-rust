@@ -63,16 +63,20 @@ impl<'a> Distances<'a> {
         metric: Metric,
     ) -> Result<Self, CoreError> {
         if width == 0 || coordinates.len() != checked_len(&[n, width])? {
-            return Err(CoreError("coordinate dimensions do not match"));
+            return Err(CoreError::invalid_input(
+                "coordinate dimensions do not match",
+            ));
         }
         if coordinates.iter().any(|v| !v.is_finite()) {
-            return Err(CoreError("coordinates must be finite"));
+            return Err(CoreError::invalid_input("coordinates must be finite"));
         }
         let geographic = match metric {
             Metric::Euclidean => None,
             Metric::GreatCircleFractionLatLon | Metric::GreatCircle { .. } => {
                 if width != 2 {
-                    return Err(CoreError("geographic coordinates require two columns"));
+                    return Err(CoreError::invalid_input(
+                        "geographic coordinates require two columns",
+                    ));
                 }
                 Some(
                     coordinates
@@ -83,7 +87,9 @@ impl<'a> Distances<'a> {
             }
             Metric::GreatCircleFractionLonLat => {
                 if width != 2 {
-                    return Err(CoreError("geographic coordinates require two columns"));
+                    return Err(CoreError::invalid_input(
+                        "geographic coordinates require two columns",
+                    ));
                 }
                 Some(
                     coordinates
@@ -100,7 +106,9 @@ impl<'a> Distances<'a> {
             }
             Metric::GreatCircle { radius } if radius.is_finite() && radius > 0.0 => 2.0 * radius,
             Metric::GreatCircle { .. } => {
-                return Err(CoreError("Earth radius must be finite and positive"))
+                return Err(CoreError::invalid_input(
+                    "Earth radius must be finite and positive",
+                ))
             }
         };
         Ok(Self {
@@ -145,18 +153,26 @@ pub fn distance_matrix(
     if n == 0 {
         return Ok(matrix);
     }
-    matrix.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-        for (j, value) in row[..i].iter_mut().enumerate() {
-            *value = distances.pair(i, j);
+    if crate::threads::is_serial() || n < 64 {
+        for (i, row) in matrix.chunks_exact_mut(n).enumerate() {
+            for (j, value) in row[..i].iter_mut().enumerate() {
+                *value = distances.pair(i, j);
+            }
         }
-    });
+    } else {
+        matrix.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+            for (j, value) in row[..i].iter_mut().enumerate() {
+                *value = distances.pair(i, j);
+            }
+        });
+    }
     for i in 0..n {
         for j in 0..i {
             matrix[j * n + i] = matrix[i * n + j];
         }
     }
     if matrix.iter().any(|d| !d.is_finite()) {
-        return Err(CoreError(
+        return Err(CoreError::invalid_input(
             "pairwise distance exceeds the floating-point range",
         ));
     }

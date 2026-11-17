@@ -79,7 +79,7 @@ fn betacf(a: f64, b: f64, x: f64) -> f64 {
     h
 }
 
-fn betainc(a: f64, b: f64, x: f64) -> f64 {
+pub(crate) fn betainc(a: f64, b: f64, x: f64) -> f64 {
     if x <= 0.0 {
         return 0.0;
     }
@@ -98,7 +98,9 @@ fn betainc(a: f64, b: f64, x: f64) -> f64 {
 /// Student-t quantile `F^{-1}(p; df)` for `0 < p < 1` and `df >= 1`.
 pub(crate) fn student_t_ppf(p: f64, df: usize) -> Result<f64, CoreError> {
     if !p.is_finite() || p <= 0.0 || p >= 1.0 || df == 0 {
-        return Err(CoreError("invalid Student-t quantile parameters"));
+        return Err(CoreError::invalid_input(
+            "invalid Student-t quantile parameters",
+        ));
     }
     if (p - 0.5).abs() == 0.0 {
         return Ok(0.0);

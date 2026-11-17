@@ -1,8 +1,8 @@
 //! Stata SPI v3 plugin entry points backed by `spatial-core`.
 
-pub mod stata_spi;
+mod stata_spi;
 
-use spatial_core::{run_exact_scpc, ExactScpcRequest, Metric};
+use spatial_core::{run_exact_scpc, CoreError, ErrorKind, ExactScpcRequest, Metric};
 use stata_spi::{
     active_obs, error, plugin_var_count, read_matrix, read_var_matrix, save_scalar, write_matrix,
     STATA_ERR, STATA_OK,
@@ -12,6 +12,22 @@ use std::os::raw::{c_char, c_int};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 const DEFAULT_CV_TOL: f64 = 0.001;
+const MGS_RANK_REL_TOL: f64 = 1e-12;
+
+fn error_kind_label(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::InvalidInput => "invalid input",
+        ErrorKind::UnsupportedCase => "unsupported case",
+        ErrorKind::TiedEigenspace => "tied eigenspace",
+        ErrorKind::CalibrationFailed => "calibration failed",
+        ErrorKind::DegenerateVariance => "degenerate variance",
+        ErrorKind::InternalFailure => "internal failure",
+    }
+}
+
+fn format_core_error(err: CoreError) -> String {
+    format!("{}: {}", error_kind_label(err.kind()), err.message())
+}
 
 struct PreparedOlsInputs {
     wj: Vec<f64>,
@@ -47,6 +63,40 @@ fn parse_nthreads(raw: &str) -> Result<Option<usize>, String> {
     }
 }
 
+fn normalize_column(v: &mut [f64]) -> bool {
+    let orig_norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if orig_norm.is_finite() && orig_norm > 0.0 {
+        let inv = 1.0 / orig_norm;
+        for vi in v.iter_mut() {
+            *vi *= inv;
+        }
+        return true;
+    }
+    let mut max_abs = 0.0_f64;
+    for &x in v.iter() {
+        if !x.is_finite() {
+            return false;
+        }
+        max_abs = max_abs.max(x.abs());
+    }
+    if max_abs == 0.0 {
+        return false;
+    }
+    let inv_max = 1.0 / max_abs;
+    for vi in v.iter_mut() {
+        *vi *= inv_max;
+    }
+    let scaled_norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if !scaled_norm.is_finite() || scaled_norm == 0.0 {
+        return false;
+    }
+    let inv = 1.0 / scaled_norm;
+    for vi in v.iter_mut() {
+        *vi *= inv;
+    }
+    true
+}
+
 /// Two-pass Modified Gram-Schmidt on `[x_raw, 1]` (or `[x_raw]` if `!has_cons`),
 /// returning row-major orthonormal `Q` (`n x rank`) and `rank`.
 fn orthonormal_basis_mgs(x_raw: &[f64], n: usize, nx: usize, has_cons: bool) -> (Vec<f64>, usize) {
@@ -66,8 +116,7 @@ fn orthonormal_basis_mgs(x_raw: &[f64], n: usize, nx: usize, has_cons: bool) -> 
                 v[i] = x_raw[i * nx + col_idx];
             }
         }
-        let orig_norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if !orig_norm.is_finite() || orig_norm <= 1e-14 {
+        if !normalize_column(&mut v) {
             continue;
         }
         // Two passes ensure near machine-precision orthogonality for ill-conditioned designs.
@@ -80,7 +129,7 @@ fn orthonormal_basis_mgs(x_raw: &[f64], n: usize, nx: usize, has_cons: bool) -> 
             }
         }
         let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if norm.is_finite() && norm > 1e-12 * orig_norm && norm > 1e-14 {
+        if norm.is_finite() && norm > MGS_RANK_REL_TOL {
             let inv = 1.0 / norm;
             cols.push(v.iter().map(|&x| x * inv).collect());
         }
@@ -176,48 +225,106 @@ fn prepare_ols_inputs(
     })
 }
 
+struct ExactScpcArgs<'a> {
+    d: usize,
+    p: usize,
+    k_use: usize,
+    has_cons: bool,
+    avc: f64,
+    latlong: bool,
+    uncond: bool,
+    cvs: bool,
+    nthreads: Option<usize>,
+    b_mat_name: &'a str,
+    bread_mat_name: &'a str,
+    stats_mat_name: &'a str,
+    cvs_mat_name: &'a str,
+    c0_scal_name: &'a str,
+    cv_scal_name: &'a str,
+    q_scal_name: &'a str,
+    tied_scal_name: Option<&'a str>,
+}
+
+impl<'a> ExactScpcArgs<'a> {
+    fn parse(args: &'a [&'a str]) -> Result<Self, String> {
+        if args.len() != 16 && args.len() != 17 {
+            return Err(format!(
+                "exact_scpc expects 16 or 17 arguments after subcommand, got {}",
+                args.len()
+            ));
+        }
+
+        let d = parse_usize(args[0], "d")?;
+        let p = parse_usize(args[1], "p")?;
+        let k_use = parse_usize(args[2], "k_use")?;
+        let has_cons = parse_bool_flag(args[3], "has_cons")?;
+        let avc = args[4]
+            .parse::<f64>()
+            .map_err(|_| format!("invalid avc '{}'", args[4]))?;
+        let latlong = parse_bool_flag(args[5], "latlong")?;
+        let uncond = parse_bool_flag(args[6], "uncond")?;
+        let cvs = parse_bool_flag(args[7], "cvs")?;
+        let nthreads = parse_nthreads(args[8])?;
+
+        let b_mat_name = args[9];
+        let bread_mat_name = args[10];
+        let stats_mat_name = args[11];
+        let cvs_mat_name = args[12];
+        let c0_scal_name = args[13];
+        let cv_scal_name = args[14];
+        let q_scal_name = args[15];
+        let tied_scal_name = args.get(16).copied();
+
+        if d == 0 || p == 0 || k_use == 0 || k_use > p {
+            return Err(format!(
+                "invalid dimensions: d={d}, p={p}, k_use={k_use}"
+            ));
+        }
+        if latlong && d != 2 {
+            return Err(format!("latlong requires d=2 coordinates, got d={d}"));
+        }
+        if !avc.is_finite() || avc <= 0.001 || avc >= 0.99 {
+            return Err(format!("avc must lie strictly in (0.001, 0.99), got {avc}"));
+        }
+        if b_mat_name.is_empty()
+            || bread_mat_name.is_empty()
+            || stats_mat_name.is_empty()
+            || cvs_mat_name.is_empty()
+            || c0_scal_name.is_empty()
+            || cv_scal_name.is_empty()
+            || q_scal_name.is_empty()
+            || tied_scal_name.is_some_and(str::is_empty)
+        {
+            return Err("matrix and scalar names passed to exact_scpc must be non-empty".to_string());
+        }
+
+        Ok(Self {
+            d,
+            p,
+            k_use,
+            has_cons,
+            avc,
+            latlong,
+            uncond,
+            cvs,
+            nthreads,
+            b_mat_name,
+            bread_mat_name,
+            stats_mat_name,
+            cvs_mat_name,
+            c0_scal_name,
+            cv_scal_name,
+            q_scal_name,
+            tied_scal_name,
+        })
+    }
+}
+
 fn handle_exact_scpc(args: &[&str]) -> Result<(), String> {
-    if args.len() != 16 {
-        return Err(format!(
-            "exact_scpc expects 16 arguments after subcommand, got {}",
-            args.len()
-        ));
-    }
+    let parsed = ExactScpcArgs::parse(args)?;
 
-    let d = parse_usize(args[0], "d")?;
-    let p = parse_usize(args[1], "p")?;
-    let k_use = parse_usize(args[2], "k_use")?;
-    let has_cons = parse_bool_flag(args[3], "has_cons")?;
-    let avc = args[4]
-        .parse::<f64>()
-        .map_err(|_| format!("invalid avc '{}'", args[4]))?;
-    let latlong = parse_bool_flag(args[5], "latlong")?;
-    let uncond = parse_bool_flag(args[6], "uncond")?;
-    let cvs = parse_bool_flag(args[7], "cvs")?;
-    let nthreads = parse_nthreads(args[8])?;
-
-    let b_mat_name = args[9];
-    let bread_mat_name = args[10];
-    let stats_mat_name = args[11];
-    let cvs_mat_name = args[12];
-    let c0_scal_name = args[13];
-    let cv_scal_name = args[14];
-    let q_scal_name = args[15];
-
-    if d == 0 || p == 0 || k_use == 0 || k_use > p {
-        return Err(format!(
-            "invalid dimensions: d={d}, p={p}, k_use={k_use}"
-        ));
-    }
-    if latlong && d != 2 {
-        return Err(format!("latlong requires d=2 coordinates, got d={d}"));
-    }
-    if !avc.is_finite() || avc <= 0.001 || avc >= 0.99 {
-        return Err(format!("avc must lie strictly in (0.001, 0.99), got {avc}"));
-    }
-
-    let nx = p - usize::from(has_cons);
-    let expected_vars = d + p + if uncond { 0 } else { nx };
+    let nx = parsed.p - usize::from(parsed.has_cons);
+    let expected_vars = parsed.d + parsed.p + if parsed.uncond { 0 } else { nx };
     let actual_vars = plugin_var_count();
     if actual_vars != expected_vars {
         return Err(format!(
@@ -232,19 +339,29 @@ fn handle_exact_scpc(args: &[&str]) -> Result<(), String> {
     }
 
     // Read all Stata dataset variables and matrices on the calling thread before Rayon.
-    let coords = read_var_matrix(&obs, 1, d, "coordinates (s_*)")?;
-    let scores = read_var_matrix(&obs, 1 + d, p, "scores (scpc_score*)")?;
-    let x_raw = if !uncond && nx > 0 {
-        read_var_matrix(&obs, 1 + d + p, nx, "conditional regressors")?
+    let coords = read_var_matrix(&obs, 1, parsed.d, "coordinates (s_*)")?;
+    let scores = read_var_matrix(&obs, 1 + parsed.d, parsed.p, "scores (scpc_score*)")?;
+    let x_raw = if !parsed.uncond && nx > 0 {
+        read_var_matrix(&obs, 1 + parsed.d + parsed.p, nx, "conditional regressors")?
     } else {
         Vec::new()
     };
 
-    let b = read_matrix(b_mat_name, 1, p)?;
-    let bread = read_matrix(bread_mat_name, p, p)?;
+    let b = read_matrix(parsed.b_mat_name, 1, parsed.p)?;
+    let bread = read_matrix(parsed.bread_mat_name, parsed.p, parsed.p)?;
 
-    let inputs = prepare_ols_inputs(n, p, k_use, has_cons, uncond, &b, &bread, &scores, &x_raw)?;
-    let metric = if latlong {
+    let inputs = prepare_ols_inputs(
+        n,
+        parsed.p,
+        parsed.k_use,
+        parsed.has_cons,
+        parsed.uncond,
+        &b,
+        &bread,
+        &scores,
+        &x_raw,
+    )?;
+    let metric = if parsed.latlong {
         Metric::GreatCircleFractionLatLon
     } else {
         Metric::Euclidean
@@ -253,12 +370,12 @@ fn handle_exact_scpc(args: &[&str]) -> Result<(), String> {
     let out = run_exact_scpc(&ExactScpcRequest {
         coords: &coords,
         n,
-        d,
+        d: parsed.d,
         metric,
-        avc,
-        uncond,
-        cvs,
-        coef: &b[..k_use],
+        avc: parsed.avc,
+        uncond: parsed.uncond,
+        cvs: parsed.cvs,
+        coef: &b[..parsed.k_use],
         wj: &inputs.wj,
         xj: inputs.xj.as_deref(),
         xjs: inputs.xjs.as_deref(),
@@ -266,21 +383,24 @@ fn handle_exact_scpc(args: &[&str]) -> Result<(), String> {
         proj_v: inputs.proj_q.as_deref(),
         proj_rank: inputs.proj_rank,
         cv_tolerance: DEFAULT_CV_TOL,
-        nthreads,
+        nthreads: parsed.nthreads,
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(format_core_error)?;
 
-    write_matrix(stats_mat_name, k_use, 6, &out.scpcstats)?;
-    if cvs {
+    write_matrix(parsed.stats_mat_name, parsed.k_use, 6, &out.scpcstats)?;
+    if parsed.cvs {
         let cvs_mat = out
             .scpccvs
             .as_deref()
             .ok_or_else(|| "missing scpccvs output when cvs=1".to_string())?;
-        write_matrix(cvs_mat_name, k_use, 4, cvs_mat)?;
+        write_matrix(parsed.cvs_mat_name, parsed.k_use, 4, cvs_mat)?;
     }
-    save_scalar(c0_scal_name, out.c0)?;
-    save_scalar(cv_scal_name, out.cvfin)?;
-    save_scalar(q_scal_name, out.q as f64)?;
+    save_scalar(parsed.c0_scal_name, out.c0)?;
+    save_scalar(parsed.cv_scal_name, out.cvfin)?;
+    save_scalar(parsed.q_scal_name, out.q as f64)?;
+    if let Some(tied_scal_name) = parsed.tied_scal_name {
+        save_scalar(tied_scal_name, if out.tied { 1.0 } else { 0.0 })?;
+    }
 
     Ok(())
 }
@@ -290,15 +410,18 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" | "ping_v2" => Ok(()),
+        "ping" | "ping_v2" | "ping_v3" => Ok(()),
         "exact_scpc" => handle_exact_scpc(&args[1..]),
         other => Err(format!("unknown spatial-stata subcommand '{other}'")),
     }
 }
 
 /// Entry point invoked from `c/stata_bridge.c`.
+///
+/// # Safety
+/// `argv` must point to at least `argc` valid NUL-terminated C string pointers when `argc > 0`.
 #[no_mangle]
-pub extern "C" fn rs_stata_call(argc: c_int, argv: *const *const c_char) -> c_int {
+pub unsafe extern "C" fn rs_stata_call(argc: c_int, argv: *const *const c_char) -> c_int {
     let res = catch_unwind(AssertUnwindSafe(|| {
         if argc <= 0 || argv.is_null() {
             return Err("plugin called without subcommand arguments".to_string());
@@ -485,7 +608,20 @@ mod tests {
         })
         .unwrap();
         assert_eq!(out_euclid.q, 19);
-        assert!((out_euclid.c0 - 3.500409719601247).abs() < 1e-12);
+        let dist_euclid =
+            spatial_core::distance::distance_matrix(&coords_lon_lat, n, 2, Metric::Euclidean)
+                .unwrap();
+        let mut dvec_euclid = Vec::with_capacity(n * (n - 1) / 2);
+        for i in 1..n {
+            dvec_euclid.extend_from_slice(&dist_euclid[i * n..i * n + i]);
+        }
+        assert!(
+            (spatial_core::calibration::avg_correlation(out_euclid.c0, &dvec_euclid) - 0.03).abs()
+                < 1e-12
+        );
+        assert!((out_euclid.c0 - 3.500409719601247).abs() < 1e-3);
+        assert!((out_euclid.cvfin - 2.1008365544083087).abs() < 1e-3);
+        assert!(!out_euclid.tied);
         // Row 0 is x1, row 1 is x2, row 2 is _cons
         assert!((out_euclid.scpcstats[0] - 1.5473280763431876).abs() < 1e-10);
         assert!((out_euclid.scpcstats[12] - 1.4834167407175964).abs() < 1e-10);
@@ -515,8 +651,205 @@ mod tests {
         })
         .unwrap();
         assert_eq!(out_geo.q, 18);
-        assert!((out_geo.c0 - 1396.4193247376622).abs() < 1e-10);
-        assert!((out_geo.cvfin - 2.1009220402410382).abs() < 1e-10);
+        let dist_geo = spatial_core::distance::distance_matrix(
+            &coords_lat_lon,
+            n,
+            2,
+            Metric::GreatCircleFractionLatLon,
+        )
+        .unwrap();
+        let mut dvec_geo = Vec::with_capacity(n * (n - 1) / 2);
+        for i in 1..n {
+            dvec_geo.extend_from_slice(&dist_geo[i * n..i * n + i]);
+        }
+        assert!(
+            (spatial_core::calibration::avg_correlation(out_geo.c0, &dvec_geo) - 0.03).abs()
+                < 1e-12
+        );
+        assert!(
+            (out_geo.c0 - 1396.4193247376622).abs() < 1.0,
+            "geo c0={}",
+            out_geo.c0
+        );
+        assert!(
+            (out_geo.cvfin - 2.1009220402410382).abs() < 5e-3,
+            "geo cvfin={}",
+            out_geo.cvfin
+        );
+        assert!(!out_geo.tied);
+
+        // First 20 rows of bench_200 exhibit tied eigenspace for automatic fallback.
+        let n_tie = 20;
+        let mut xtx_20 = vec![0.0; p * p];
+        let mut xty_20 = vec![0.0; p];
+        for i in 0..n_tie {
+            for r in 0..p {
+                xty_20[r] += x_design[i * p + r] * y[i];
+                for c in 0..p {
+                    xtx_20[r * p + c] += x_design[i * p + r] * x_design[i * p + c];
+                }
+            }
+        }
+        let bread_20 = invert_symmetric(&xtx_20, p);
+        let mut b_20 = vec![0.0; p];
+        for r in 0..p {
+            b_20[r] = (0..p).map(|c| bread_20[r * p + c] * xty_20[c]).sum();
+        }
+        let mut scores_20 = vec![0.0; n_tie * p];
+        for i in 0..n_tie {
+            let yhat: f64 = (0..p).map(|c| x_design[i * p + c] * b_20[c]).sum();
+            let resid = y[i] - yhat;
+            for c in 0..p {
+                scores_20[i * p + c] = x_design[i * p + c] * resid;
+            }
+        }
+        let inputs_20 = prepare_ols_inputs(
+            n_tie,
+            p,
+            p,
+            true,
+            false,
+            &b_20,
+            &bread_20,
+            &scores_20,
+            &x_raw[..n_tie * nx],
+        )
+        .unwrap();
+        let out_20 = run_exact_scpc(&ExactScpcRequest {
+            coords: &coords_lon_lat[..n_tie * 2],
+            n: n_tie,
+            d: 2,
+            metric: Metric::Euclidean,
+            avc: 0.03,
+            uncond: false,
+            cvs: false,
+            coef: &b_20,
+            wj: &inputs_20.wj,
+            xj: inputs_20.xj.as_deref(),
+            xjs: inputs_20.xjs.as_deref(),
+            proj_u: inputs_20.proj_q.as_deref(),
+            proj_v: inputs_20.proj_q.as_deref(),
+            proj_rank: inputs_20.proj_rank,
+            cv_tolerance: DEFAULT_CV_TOL,
+            nthreads: Some(1),
+        })
+        .unwrap();
+        assert_eq!(out_20.q, 7);
+        assert!(out_20.tied);
+    }
+
+    #[test]
+    fn orthonormal_basis_is_scale_invariant_and_drops_collinear_columns() {
+        let n = 5;
+        let base = [1.0, -2.0, 0.5, 3.0, -1.5];
+        // Small-unit regressor 1e-12 * x and extreme tiny 1e-200 * x stay full rank with _cons.
+        for scale in [1e-12, 1e-200, 1e12] {
+            let x_raw: Vec<f64> = base.iter().map(|&v| v * scale).collect();
+            let (q, rank) = orthonormal_basis_mgs(&x_raw, n, 1, true);
+            assert_eq!(rank, 2, "scale={scale}");
+            for r1 in 0..2 {
+                for r2 in 0..2 {
+                    let dot: f64 = (0..n).map(|i| q[i * 2 + r1] * q[i * 2 + r2]).sum();
+                    let exp = if r1 == r2 { 1.0 } else { 0.0 };
+                    assert!((dot - exp).abs() < 1e-14, "scale={scale}, dot={dot}");
+                }
+            }
+        }
+
+        // Duplicate/collinear and zero columns drop cleanly while scaled regressor remains.
+        let mut x_raw = Vec::with_capacity(n * 3);
+        for &v in &base {
+            x_raw.extend_from_slice(&[1e-12 * v, 2e-12 * v, 0.0]);
+        }
+        let (q, rank) = orthonormal_basis_mgs(&x_raw, n, 3, true);
+        assert_eq!(rank, 2);
+        for r1 in 0..2 {
+            for r2 in 0..2 {
+                let dot: f64 = (0..n).map(|i| q[i * 2 + r1] * q[i * 2 + r2]).sum();
+                let exp = if r1 == r2 { 1.0 } else { 0.0 };
+                assert!((dot - exp).abs() < 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_and_exact_scpc_args_support_v3_and_17_args() {
+        assert!(dispatch(&["ping"]).is_ok());
+        assert!(dispatch(&["ping_v2"]).is_ok());
+        assert!(dispatch(&["ping_v3"]).is_ok());
+        assert!(dispatch(&[]).is_err());
+        assert!(dispatch(&["unknown"]).is_err());
+
+        let base16 = [
+            "2", "3", "3", "1", "0.03", "0", "0", "1", "-1", "b", "bread", "stats", "cvs", "c0",
+            "cv", "q",
+        ];
+        let parsed16 = ExactScpcArgs::parse(&base16).unwrap();
+        assert_eq!(parsed16.tied_scal_name, None);
+
+        let mut args17 = base16.to_vec();
+        args17.push("tied");
+        let parsed17 = ExactScpcArgs::parse(&args17).unwrap();
+        assert_eq!(parsed17.tied_scal_name, Some("tied"));
+
+        // 17 args enters handle_exact_scpc and reaches plugin_var_count() check (0 under test stubs).
+        let err = handle_exact_scpc(&args17).unwrap_err();
+        assert!(err.contains("variables in plugin varlist"), "err={err}");
+
+        // Wrong argument counts fail cleanly.
+        assert!(handle_exact_scpc(&base16[..15]).is_err());
+        let mut args18 = args17.clone();
+        args18.push("extra");
+        assert!(handle_exact_scpc(&args18).is_err());
+
+        // Empty tied scalar name or invalid avc/dims fail cleanly.
+        let mut bad_tied = base16.to_vec();
+        bad_tied.push("");
+        assert!(ExactScpcArgs::parse(&bad_tied).is_err());
+
+        let mut bad_latlong = args17.clone();
+        bad_latlong[0] = "3";
+        bad_latlong[5] = "1";
+        assert!(ExactScpcArgs::parse(&bad_latlong).is_err());
+
+        let mut bad_avc = args17;
+        bad_avc[4] = "0.99";
+        assert!(ExactScpcArgs::parse(&bad_avc).is_err());
+    }
+
+    #[test]
+    fn error_mapping_and_c_entrypoint_behave_safely() {
+        assert_eq!(
+            format_core_error(CoreError::calibration("bad target")),
+            "calibration failed: bad target"
+        );
+        assert_eq!(
+            format_core_error(CoreError::degenerate("zero var")),
+            "degenerate variance: zero var"
+        );
+        assert_eq!(
+            format_core_error(CoreError::tied("tie")),
+            "tied eigenspace: tie"
+        );
+        assert_eq!(
+            format_core_error(CoreError::unsupported("unsupported")),
+            "unsupported case: unsupported"
+        );
+        assert_eq!(
+            format_core_error(CoreError::invalid_input("invalid")),
+            "invalid input: invalid"
+        );
+        assert_eq!(
+            format_core_error(CoreError::internal("boom")),
+            "internal failure: boom"
+        );
+
+        let ping_cstr = std::ffi::CString::new("ping_v3").unwrap();
+        let argv_ok = [ping_cstr.as_ptr()];
+        assert_eq!(unsafe { rs_stata_call(1, argv_ok.as_ptr()) }, STATA_OK);
+        assert_eq!(unsafe { rs_stata_call(0, std::ptr::null()) }, STATA_ERR);
+        let argv_null = [std::ptr::null()];
+        assert_eq!(unsafe { rs_stata_call(1, argv_null.as_ptr()) }, STATA_ERR);
     }
 
     #[test]

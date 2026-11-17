@@ -1,12 +1,13 @@
 //! Safe Rust wrappers over Stata SPI v3 C shims (`c/stata_bridge.c`).
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int, c_uchar};
 
 pub const STATA_OK: c_int = 0;
 pub const STATA_ERR: c_int = 198;
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 extern "C" {
     fn st_error(message: *const c_char) -> c_int;
     fn st_display(message: *const c_char) -> c_int;
@@ -26,6 +27,7 @@ extern "C" {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod test_stubs {
     use super::*;
 
@@ -104,6 +106,7 @@ fn ensure_newline_cstring(message: &str) -> CString {
 }
 
 /// Print an informational message to the Stata console.
+#[allow(dead_code)]
 pub fn display(message: &str) {
     let cstr = ensure_newline_cstring(message);
     unsafe {
@@ -120,21 +123,20 @@ pub fn error(message: &str) {
 }
 
 /// Return total dataset observation count (`SF_nobs`).
+#[allow(dead_code)]
 pub fn total_obs() -> usize {
-    let count = unsafe { st_nobs() };
-    count.max(0) as usize
+    usize::try_from(unsafe { st_nobs() }).unwrap_or(0)
 }
 
 /// Return total dataset variable count (`SF_nvar`).
+#[allow(dead_code)]
 pub fn dataset_var_count() -> usize {
-    let count = unsafe { st_nvar() };
-    count.max(0) as usize
+    usize::try_from(unsafe { st_nvar() }).unwrap_or(0)
 }
 
 /// Return number of variables in the `plugin call` varlist (`SF_nvars`).
 pub fn plugin_var_count() -> usize {
-    let count = unsafe { st_nvars() };
-    count.max(0) as usize
+    usize::try_from(unsafe { st_nvars() }).unwrap_or(0)
 }
 
 /// Collect 1-based Stata observation indices in `SF_in1()..=SF_in2()` passing `SF_ifobs`.
@@ -144,7 +146,7 @@ pub fn active_obs() -> Vec<c_int> {
     if in1 < 1 || in2 < in1 {
         return Vec::new();
     }
-    let cap = (in2 - in1 + 1) as usize;
+    let cap = usize::try_from(i64::from(in2) - i64::from(in1) + 1).unwrap_or(0);
     let mut obs = Vec::with_capacity(cap);
     for row in in1..=in2 {
         if unsafe { st_ifobs(row) } != 0 {
@@ -175,6 +177,9 @@ pub fn read_var_matrix(
             "{label} requires plugin varlist indices {var_1based_start}..={last_var}, but only {nvars} variables were passed"
         ));
     }
+    if c_int::try_from(last_var).is_err() {
+        return Err(format!("{label} variable index {last_var} exceeds c_int range"));
+    }
 
     let n = obs.len();
     let total = n
@@ -184,7 +189,8 @@ pub fn read_var_matrix(
 
     for (row_idx, &st_obs) in obs.iter().enumerate() {
         for col_idx in 0..ncols {
-            let var_idx = (var_1based_start + col_idx) as c_int;
+            let var_idx = c_int::try_from(var_1based_start + col_idx)
+                .map_err(|_| format!("{label} variable index exceeds c_int range"))?;
             let mut val: c_double = 0.0;
             let rc = unsafe { st_vdata(var_idx, st_obs, &mut val) };
             if rc != STATA_OK {
@@ -204,9 +210,7 @@ pub fn read_var_matrix(
     Ok(out)
 }
 
-/// Query Stata matrix dimensions `(rows, cols)`.
-pub fn matrix_dims(name: &str) -> Result<(usize, usize), String> {
-    let c_name = to_cstring(name, "matrix name")?;
+fn matrix_dims_cstr(name: &str, c_name: &CStr) -> Result<(c_int, c_int), String> {
     let rows = unsafe { st_row(c_name.as_ptr()) };
     let cols = unsafe { st_col(c_name.as_ptr()) };
     if rows <= 0 || cols <= 0 {
@@ -214,7 +218,17 @@ pub fn matrix_dims(name: &str) -> Result<(usize, usize), String> {
             "Stata matrix '{name}' is missing or empty ({rows}x{cols})"
         ));
     }
-    Ok((rows as usize, cols as usize))
+    Ok((rows, cols))
+}
+
+/// Query Stata matrix dimensions `(rows, cols)`.
+#[allow(dead_code)]
+pub fn matrix_dims(name: &str) -> Result<(usize, usize), String> {
+    let c_name = to_cstring(name, "matrix name")?;
+    let (rows, cols) = matrix_dims_cstr(name, &c_name)?;
+    let rows_u = usize::try_from(rows).map_err(|_| format!("invalid row count {rows} for '{name}'"))?;
+    let cols_u = usize::try_from(cols).map_err(|_| format!("invalid col count {cols} for '{name}'"))?;
+    Ok((rows_u, cols_u))
 }
 
 /// Read a Stata matrix into a row-major `expected_rows x expected_cols` `Vec<f64>`.
@@ -225,36 +239,40 @@ pub fn read_matrix(
     expected_rows: usize,
     expected_cols: usize,
 ) -> Result<Vec<f64>, String> {
+    let expected_rows_i32 = c_int::try_from(expected_rows)
+        .map_err(|_| format!("Stata matrix '{name}' expected rows {expected_rows} exceeds i32::MAX"))?;
+    let expected_cols_i32 = c_int::try_from(expected_cols)
+        .map_err(|_| format!("Stata matrix '{name}' expected cols {expected_cols} exceeds i32::MAX"))?;
     let c_name = to_cstring(name, "matrix name")?;
-    let (rows, cols) = matrix_dims(name)?;
-    if rows != expected_rows || cols != expected_cols {
+    let (mat_rows, mat_cols) = matrix_dims_cstr(name, &c_name)?;
+    if mat_rows != expected_rows_i32 || mat_cols != expected_cols_i32 {
         return Err(format!(
-            "Stata matrix '{name}' has dimensions {rows}x{cols}, expected {expected_rows}x{expected_cols}"
+            "Stata matrix '{name}' has dimensions {mat_rows}x{mat_cols}, expected {expected_rows_i32}x{expected_cols_i32}"
         ));
     }
-    let total = rows
-        .checked_mul(cols)
+    let total = expected_rows
+        .checked_mul(expected_cols)
         .ok_or_else(|| format!("Stata matrix '{name}' size overflow"))?;
     let mut out = vec![0.0; total];
-    for r in 0..rows {
-        for c in 0..cols {
+    for r in 0..expected_rows {
+        let r_i32 = c_int::try_from(r + 1)
+            .map_err(|_| format!("Stata matrix '{name}' row index overflow"))?;
+        for c in 0..expected_cols {
+            let c_i32 = c_int::try_from(c + 1)
+                .map_err(|_| format!("Stata matrix '{name}' col index overflow"))?;
             let mut val: c_double = 0.0;
-            let rc = unsafe { st_mat_el(c_name.as_ptr(), (r + 1) as c_int, (c + 1) as c_int, &mut val) };
+            let rc = unsafe { st_mat_el(c_name.as_ptr(), r_i32, c_i32, &mut val) };
             if rc != STATA_OK {
                 return Err(format!(
-                    "SF_mat_el failed for '{name}'[{},{}] (rc={rc})",
-                    r + 1,
-                    c + 1
+                    "SF_mat_el failed for '{name}'[{r_i32},{c_i32}] (rc={rc})"
                 ));
             }
             if unsafe { st_is_missing(val) } != 0 || !val.is_finite() {
                 return Err(format!(
-                    "missing or non-finite entry in matrix '{name}'[{},{}]",
-                    r + 1,
-                    c + 1
+                    "missing or non-finite entry in matrix '{name}'[{r_i32},{c_i32}]"
                 ));
             }
-            out[r * cols + c] = val;
+            out[r * expected_cols + c] = val;
         }
     }
     Ok(out)
@@ -264,6 +282,15 @@ pub fn read_matrix(
 ///
 /// Stata SPI v3 `SF_mat_store` uses 1-based row/col indices (`1..=rows`, `1..=cols`).
 pub fn write_matrix(name: &str, rows: usize, cols: usize, data: &[f64]) -> Result<(), String> {
+    if rows == 0 || cols == 0 {
+        return Err(format!(
+            "target Stata matrix '{name}' dimensions must be positive (got {rows}x{cols})"
+        ));
+    }
+    let rows_i32 = c_int::try_from(rows)
+        .map_err(|_| format!("Stata matrix '{name}' row count {rows} exceeds i32::MAX"))?;
+    let cols_i32 = c_int::try_from(cols)
+        .map_err(|_| format!("Stata matrix '{name}' col count {cols} exceeds i32::MAX"))?;
     let expected_len = rows
         .checked_mul(cols)
         .ok_or_else(|| format!("Stata matrix '{name}' size overflow"))?;
@@ -273,29 +300,39 @@ pub fn write_matrix(name: &str, rows: usize, cols: usize, data: &[f64]) -> Resul
             data.len()
         ));
     }
+    for (idx, &val) in data.iter().enumerate() {
+        if !val.is_finite() {
+            return Err(format!(
+                "cannot store non-finite value into matrix '{name}'[{},{}]",
+                idx / cols + 1,
+                idx % cols + 1
+            ));
+        }
+    }
     let c_name = to_cstring(name, "matrix name")?;
-    let (mat_rows, mat_cols) = matrix_dims(name)?;
-    if mat_rows != rows || mat_cols != cols {
+    let mat_rows = unsafe { st_row(c_name.as_ptr()) };
+    let mat_cols = unsafe { st_col(c_name.as_ptr()) };
+    if mat_rows <= 0 || mat_cols <= 0 {
         return Err(format!(
-            "target Stata matrix '{name}' has dimensions {mat_rows}x{mat_cols}, expected {rows}x{cols}"
+            "Stata matrix '{name}' is missing or empty ({mat_rows}x{mat_cols})"
+        ));
+    }
+    if mat_rows != rows_i32 || mat_cols != cols_i32 {
+        return Err(format!(
+            "target Stata matrix '{name}' has dimensions {mat_rows}x{mat_cols}, expected {rows_i32}x{cols_i32}"
         ));
     }
     for r in 0..rows {
+        let r_i32 = c_int::try_from(r + 1)
+            .map_err(|_| format!("Stata matrix '{name}' row index overflow"))?;
         for c in 0..cols {
+            let c_i32 = c_int::try_from(c + 1)
+                .map_err(|_| format!("Stata matrix '{name}' col index overflow"))?;
             let val = data[r * cols + c];
-            if !val.is_finite() {
-                return Err(format!(
-                    "cannot store non-finite value into matrix '{name}'[{},{}]",
-                    r + 1,
-                    c + 1
-                ));
-            }
-            let rc = unsafe { st_mat_store(c_name.as_ptr(), (r + 1) as c_int, (c + 1) as c_int, val) };
+            let rc = unsafe { st_mat_store(c_name.as_ptr(), r_i32, c_i32, val) };
             if rc != STATA_OK {
                 return Err(format!(
-                    "SF_mat_store failed for '{name}'[{},{}] (rc={rc})",
-                    r + 1,
-                    c + 1
+                    "SF_mat_store failed for '{name}'[{r_i32},{c_i32}] (rc={rc})"
                 ));
             }
         }
@@ -314,4 +351,22 @@ pub fn save_scalar(name: &str, value: f64) -> Result<(), String> {
         return Err(format!("SF_scal_save failed for '{name}' (rc={rc})"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_matrix_validates_dims_and_inputs_before_store() {
+        assert!(write_matrix("m", 0, 2, &[]).is_err());
+        assert!(write_matrix("m", usize::MAX, 1, &[]).is_err());
+        assert!(write_matrix("m", 2, 2, &[1.0, 2.0, 3.0]).is_err());
+        assert!(write_matrix("m", 2, 2, &[1.0, f64::NAN, 3.0, 4.0]).is_err());
+        // test_stubs::st_row/st_col return 0, so dimension check rejects missing matrix
+        let err = write_matrix("m", 2, 2, &[1.0, 2.0, 3.0, 4.0]).unwrap_err();
+        assert!(err.contains("missing or empty"));
+        let err_read = read_matrix("m", usize::MAX, 1).unwrap_err();
+        assert!(err_read.contains("i32::MAX"));
+    }
 }

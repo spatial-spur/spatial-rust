@@ -62,13 +62,17 @@ pub fn scpc_basis(
     q: usize,
 ) -> Result<ScpcBasis, CoreError> {
     if q == 0 || q >= n || n > i32::MAX as usize / 26 || distances.len() != checked_len(&[n, n])? {
-        return Err(CoreError("SCPC basis dimensions do not match"));
+        return Err(CoreError::invalid_input("SCPC basis dimensions do not match"));
     }
     if !scale.is_finite() || scale < 0.0 {
-        return Err(CoreError("SCPC basis scale must be finite and nonnegative"));
+        return Err(CoreError::invalid_input(
+            "SCPC basis scale must be finite and nonnegative",
+        ));
     }
     if distances.iter().any(|&d| !d.is_finite() || d < 0.0) {
-        return Err(CoreError("distances must be finite and nonnegative"));
+        return Err(CoreError::invalid_input(
+            "distances must be finite and nonnegative",
+        ));
     }
 
     let dimension = n - 1;
@@ -138,7 +142,8 @@ fn contrast_covariance(distances: &[f64], n: usize, scale: f64) -> Vec<f64> {
         linalg::exp_scaled(&distances[start..start + m], -scale, row);
         *result = projection(row.iter().sum::<f64>() + last_row[i], last_row[i]);
     };
-    if m >= 256 {
+    let parallel = !crate::threads::is_serial() && m >= 256;
+    if parallel {
         covariance
             .par_chunks_exact_mut(m)
             .zip(projected[..m].par_iter_mut())
@@ -160,7 +165,7 @@ fn contrast_covariance(distances: &[f64], n: usize, scale: f64) -> Vec<f64> {
             *value += common - (projected[i] + projected[j]);
         }
     };
-    if m >= 256 {
+    if parallel {
         covariance
             .par_chunks_exact_mut(m)
             .enumerate()
@@ -224,7 +229,9 @@ fn dense_eigenpairs(a: &mut [f64], n: usize, q: usize) -> Result<Eigenpairs, Cor
         );
     }
     if status != 0 || found as usize != q {
-        return Err(CoreError("SCPC basis eigensolver failed to converge"));
+        return Err(CoreError::internal(
+            "SCPC basis eigensolver failed to converge",
+        ));
     }
     values.truncate(q);
     values.reverse();

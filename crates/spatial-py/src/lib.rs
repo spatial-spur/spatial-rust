@@ -1,17 +1,59 @@
 use numpy::ndarray::Array2;
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use numpy::{
+    IntoPyArray, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
+    PyUntypedArrayMethods,
+};
+use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict};
-use spatial_core::{run_exact_scpc as core_run_exact_scpc, ExactScpcRequest, Metric};
+use pyo3::types::{PyBool, PyDict, PyTuple};
+use spatial_core::{
+    run_exact_scpc as core_run_exact_scpc, CoreError, ErrorKind, ExactScpcRequest, Metric,
+};
+use std::mem::align_of;
 
-fn extract_1d_f64(arr: &PyReadonlyArray1<'_, f64>, name: &str) -> PyResult<Vec<f64>> {
-    let view = arr.as_array();
-    let data = if let Some(slice) = view.as_slice() {
-        slice.to_vec()
+fn map_core_err(err: CoreError) -> PyErr {
+    match err.kind() {
+        ErrorKind::InvalidInput
+        | ErrorKind::CalibrationFailed
+        | ErrorKind::DegenerateVariance => PyValueError::new_err(err.message()),
+        ErrorKind::UnsupportedCase => PyNotImplementedError::new_err(err.message()),
+        ErrorKind::TiedEigenspace | ErrorKind::InternalFailure => {
+            PyRuntimeError::new_err(err.message())
+        }
+    }
+}
+
+fn require_c_aligned_f64<'py>(
+    require_fn: &Bound<'py, PyAny>,
+    kwargs: &Bound<'py, PyDict>,
+    obj: &Bound<'py, PyAny>,
+    name: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    if obj.is_none() {
+        return Err(PyTypeError::new_err(format!("{name} must not be None")));
+    }
+    require_fn.call((obj,), Some(kwargs))
+}
+
+fn extract_1d_f64<'py>(
+    require_fn: &Bound<'py, PyAny>,
+    kwargs: &Bound<'py, PyDict>,
+    obj: &Bound<'py, PyAny>,
+    name: &str,
+) -> PyResult<Vec<f64>> {
+    let aligned = require_c_aligned_f64(require_fn, kwargs, obj, name)?;
+    let arr: PyReadonlyArray1<'py, f64> = aligned.extract()?;
+    let data = if arr.is_empty() {
+        Vec::new()
     } else {
-        let std_layout = view.as_standard_layout();
-        std_layout.iter().copied().collect()
+        if !arr.is_c_contiguous() || (arr.data() as usize) % align_of::<f64>() != 0 {
+            return Err(PyValueError::new_err(format!(
+                "{name} must be aligned and C-contiguous"
+            )));
+        }
+        arr.as_slice()
+            .map_err(|_| PyValueError::new_err(format!("{name} must be C-contiguous")))?
+            .to_vec()
     };
     if data.iter().any(|v| !v.is_finite()) {
         return Err(PyValueError::new_err(format!(
@@ -21,17 +63,27 @@ fn extract_1d_f64(arr: &PyReadonlyArray1<'_, f64>, name: &str) -> PyResult<Vec<f
     Ok(data)
 }
 
-fn extract_2d_row_major_f64(
-    arr: &PyReadonlyArray2<'_, f64>,
+fn extract_2d_row_major_f64<'py>(
+    require_fn: &Bound<'py, PyAny>,
+    kwargs: &Bound<'py, PyDict>,
+    obj: &Bound<'py, PyAny>,
     name: &str,
 ) -> PyResult<(Vec<f64>, usize, usize)> {
-    let view = arr.as_array();
-    let (rows, cols) = view.dim();
-    let data = if let Some(slice) = view.as_slice() {
-        slice.to_vec()
+    let aligned = require_c_aligned_f64(require_fn, kwargs, obj, name)?;
+    let arr: PyReadonlyArray2<'py, f64> = aligned.extract()?;
+    let shape = arr.shape();
+    let (rows, cols) = (shape[0], shape[1]);
+    let data = if arr.is_empty() {
+        Vec::new()
     } else {
-        let owned = view.as_standard_layout().into_owned();
-        owned.iter().copied().collect()
+        if !arr.is_c_contiguous() || (arr.data() as usize) % align_of::<f64>() != 0 {
+            return Err(PyValueError::new_err(format!(
+                "{name} must be aligned and C-contiguous"
+            )));
+        }
+        arr.as_slice()
+            .map_err(|_| PyValueError::new_err(format!("{name} must be C-contiguous")))?
+            .to_vec()
     };
     if data.iter().any(|v| !v.is_finite()) {
         return Err(PyValueError::new_err(format!(
@@ -86,17 +138,17 @@ fn parse_nthreads(nthreads: Option<Bound<'_, PyAny>>) -> PyResult<Option<usize>>
 #[allow(clippy::too_many_arguments)]
 fn run_exact_scpc<'py>(
     py: Python<'py>,
-    coords: PyReadonlyArray2<'py, f64>,
-    coef: PyReadonlyArray1<'py, f64>,
-    wj: PyReadonlyArray2<'py, f64>,
+    coords: &Bound<'py, PyAny>,
+    coef: &Bound<'py, PyAny>,
+    wj: &Bound<'py, PyAny>,
     avc: f64,
     latlong: bool,
     uncond: bool,
     cvs: bool,
-    xj: Option<PyReadonlyArray2<'py, f64>>,
-    xjs: Option<PyReadonlyArray2<'py, f64>>,
-    proj_u: Option<PyReadonlyArray2<'py, f64>>,
-    proj_v: Option<PyReadonlyArray2<'py, f64>>,
+    xj: Option<Bound<'py, PyAny>>,
+    xjs: Option<Bound<'py, PyAny>>,
+    proj_u: Option<Bound<'py, PyAny>>,
+    proj_v: Option<Bound<'py, PyAny>>,
     nthreads: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let nthreads_usize = parse_nthreads(nthreads)?;
@@ -107,7 +159,15 @@ fn run_exact_scpc<'py>(
         ));
     }
 
-    let (coords_vec, n, d) = extract_2d_row_major_f64(&coords, "coords")?;
+    let np_mod = py.import_bound("numpy")?;
+    let require_fn = np_mod.getattr("require")?;
+    let float64_dtype = np_mod.getattr("float64")?;
+    let reqs = PyTuple::new_bound(py, ["C", "A"]);
+    let kwargs = PyDict::new_bound(py);
+    kwargs.set_item("dtype", float64_dtype)?;
+    kwargs.set_item("requirements", reqs)?;
+
+    let (coords_vec, n, d) = extract_2d_row_major_f64(&require_fn, &kwargs, coords, "coords")?;
     if n < 2 || d == 0 {
         return Err(PyValueError::new_err(
             "coords must have at least 2 rows and 1 column",
@@ -119,13 +179,13 @@ fn run_exact_scpc<'py>(
         ));
     }
 
-    let coef_vec = extract_1d_f64(&coef, "coef")?;
+    let coef_vec = extract_1d_f64(&require_fn, &kwargs, coef, "coef")?;
     let k_use = coef_vec.len();
     if k_use == 0 {
         return Err(PyValueError::new_err("coef must be non-empty"));
     }
 
-    let (wj_vec, wj_rows, wj_cols) = extract_2d_row_major_f64(&wj, "wj")?;
+    let (wj_vec, wj_rows, wj_cols) = extract_2d_row_major_f64(&require_fn, &kwargs, wj, "wj")?;
     if wj_rows != n || wj_cols != k_use {
         return Err(PyValueError::new_err(format!(
             "wj shape ({wj_rows}, {wj_cols}) does not match expected ({n}, {k_use})"
@@ -146,13 +206,15 @@ fn run_exact_scpc<'py>(
             PyValueError::new_err("conditional SCPC requires xjs scaling matrix")
         })?;
 
-        let (xj_data, xj_rows, xj_cols) = extract_2d_row_major_f64(xj_arr, "xj")?;
+        let (xj_data, xj_rows, xj_cols) =
+            extract_2d_row_major_f64(&require_fn, &kwargs, xj_arr, "xj")?;
         if xj_rows != n || xj_cols != k_use {
             return Err(PyValueError::new_err(format!(
                 "xj shape ({xj_rows}, {xj_cols}) does not match expected ({n}, {k_use})"
             )));
         }
-        let (xjs_data, xjs_rows, xjs_cols) = extract_2d_row_major_f64(xjs_arr, "xjs")?;
+        let (xjs_data, xjs_rows, xjs_cols) =
+            extract_2d_row_major_f64(&require_fn, &kwargs, xjs_arr, "xjs")?;
         if xjs_rows != n || xjs_cols != k_use {
             return Err(PyValueError::new_err(format!(
                 "xjs shape ({xjs_rows}, {xjs_cols}) does not match expected ({n}, {k_use})"
@@ -164,8 +226,10 @@ fn run_exact_scpc<'py>(
         match (proj_u.as_ref(), proj_v.as_ref()) {
             (None, None) => {}
             (Some(u_arr), Some(v_arr)) => {
-                let (u_data, u_rows, u_cols) = extract_2d_row_major_f64(u_arr, "proj_u")?;
-                let (v_data, v_rows, v_cols) = extract_2d_row_major_f64(v_arr, "proj_v")?;
+                let (u_data, u_rows, u_cols) =
+                    extract_2d_row_major_f64(&require_fn, &kwargs, u_arr, "proj_u")?;
+                let (v_data, v_rows, v_cols) =
+                    extract_2d_row_major_f64(&require_fn, &kwargs, v_arr, "proj_v")?;
                 if u_rows != n || v_rows != n || u_cols != v_cols {
                     return Err(PyValueError::new_err(format!(
                         "proj_u shape ({u_rows}, {u_cols}) and proj_v shape ({v_rows}, {v_cols}) must both be ({n}, r)"
@@ -213,7 +277,7 @@ fn run_exact_scpc<'py>(
             };
             core_run_exact_scpc(&req)
         })
-        .map_err(|err| PyValueError::new_err(err.0))?;
+        .map_err(map_core_err)?;
 
     let result = PyDict::new_bound(py);
     result.set_item("scpcstats", vec_to_pyarray2(py, output.scpcstats, k_use, 6)?)?;
