@@ -10,9 +10,11 @@ ifeq ($(UNAME_S),Darwin)
 	ifeq ($(origin CC),default)
 		CC := clang
 	endif
-else
+else ifeq ($(UNAME_S),Linux)
 	PLATFORM_CFLAGS := -shared -fPIC -DSYSTEM=OPUNIX
 	PLATFORM_LDFLAGS := -ldl -lm -lpthread
+else
+	$(error Building the Stata plugin is supported by this Makefile on macOS and Linux)
 endif
 
 CFLAGS ?= -O3 -Wall -Wextra
@@ -26,14 +28,16 @@ all: $(PLUGIN_OUT) $(SPUR_PLUGIN_OUT)
 rust-lib:
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo build --release --offline --locked -p spatial-stata
 
-$(RUST_LIB): src/*.rs Cargo.toml ../spatial-core/Cargo.toml ../spatial-core/src/*.rs
+$(RUST_LIB): src/*.rs Cargo.toml ../../Cargo.toml ../../Cargo.lock ../spatial-core/Cargo.toml ../spatial-core/src/*.rs
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo build --release --offline --locked -p spatial-stata
 
-$(PLUGIN_OUT): $(RUST_LIB) c/stplugin.c c/stata_bridge.c c/stplugin.h
-	$(CC) $(ALL_CFLAGS) c/stplugin.c c/stata_bridge.c $(RUST_LIB) $(ALL_LDFLAGS) -o $@
+$(PLUGIN_OUT): $(RUST_LIB) c/stplugin.c c/stata_bridge.c c/stplugin.h Makefile
+	$(CC) $(ALL_CFLAGS) c/stplugin.c c/stata_bridge.c $(RUST_LIB) $(ALL_LDFLAGS) -o $@.tmp
+	mv $@.tmp $@
 
-$(SPUR_PLUGIN_OUT): $(RUST_LIB) c/stplugin.c c/stata_bridge.c c/stplugin.h
-	$(CC) $(ALL_CFLAGS) c/stplugin.c c/stata_bridge.c $(RUST_LIB) $(ALL_LDFLAGS) -o $@
+$(SPUR_PLUGIN_OUT): $(RUST_LIB) c/stplugin.c c/stata_bridge.c c/stplugin.h Makefile
+	$(CC) $(ALL_CFLAGS) c/stplugin.c c/stata_bridge.c $(RUST_LIB) $(ALL_LDFLAGS) -o $@.tmp
+	mv $@.tmp $@
 
 test:
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo test --offline --locked -p spatial-stata

@@ -4,6 +4,7 @@ use numpy::{
     PyUntypedArrayMethods,
 };
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::marker::Ungil;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyTuple};
 use spatial_core::{
@@ -18,14 +19,28 @@ use spatial_core::{
 };
 use std::mem::align_of;
 
+// PyO3 0.22's exception macro checks its own `gil-refs` feature in the caller.
+#[allow(unexpected_cfgs)]
+mod exceptions {
+    use pyo3::exceptions::PyValueError;
+    pyo3::create_exception!(
+        spatial_spur_rust,
+        InvalidSampledCovarianceError,
+        PyValueError
+    );
+    pyo3::create_exception!(spatial_spur_rust, TiedEigenspaceError, PyValueError);
+}
+use exceptions::{InvalidSampledCovarianceError, TiedEigenspaceError};
+
 fn map_core_err(err: CoreError) -> PyErr {
     match err.kind() {
-        ErrorKind::InvalidInput
-        | ErrorKind::CalibrationFailed
-        | ErrorKind::DegenerateVariance => PyValueError::new_err(err.message()),
+        ErrorKind::InvalidInput | ErrorKind::CalibrationFailed | ErrorKind::DegenerateVariance => {
+            PyValueError::new_err(err.message())
+        }
         ErrorKind::UnsupportedCase => PyNotImplementedError::new_err(err.message()),
-        ErrorKind::TiedEigenspace => {
-            PyRuntimeError::new_err(format!("tied eigenspace: {}", err.message()))
+        ErrorKind::TiedEigenspace => TiedEigenspaceError::new_err(err.message()),
+        ErrorKind::InvalidSampledCovariance => {
+            InvalidSampledCovarianceError::new_err(err.message())
         }
         ErrorKind::InternalFailure => PyRuntimeError::new_err(err.message()),
     }
@@ -116,7 +131,54 @@ fn vec_to_pyarray2<'py>(
     Ok(array.into_pyarray_bound(py))
 }
 
+#[cfg(unix)]
+static NATIVE_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn fork_error() -> PyErr {
+    PyRuntimeError::new_err(
+        "Spatial Rust was used before this process forked. Use the multiprocessing 'spawn' or 'forkserver' start method for native calls.",
+    )
+}
+
+fn check_not_forked() -> PyResult<()> {
+    #[cfg(unix)]
+    {
+        use std::sync::atomic::Ordering;
+        let parent = NATIVE_PID.load(Ordering::Relaxed);
+        if parent != 0 && parent != std::process::id() {
+            return Err(fork_error());
+        }
+    }
+    Ok(())
+}
+
+fn mark_native_used() -> PyResult<()> {
+    #[cfg(unix)]
+    {
+        use std::sync::atomic::Ordering;
+        let pid = std::process::id();
+        if let Err(parent) =
+            NATIVE_PID.compare_exchange(0, pid, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            if parent != pid {
+                return Err(fork_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn allow_threads_checked<T, F>(py: Python<'_>, f: F) -> PyResult<T>
+where
+    F: Ungil + FnOnce() -> T,
+    T: Ungil,
+{
+    mark_native_used()?;
+    Ok(py.allow_threads(f))
+}
+
 fn parse_nthreads(nthreads: Option<Bound<'_, PyAny>>) -> PyResult<Option<usize>> {
+    check_not_forked()?;
     let Some(obj) = nthreads else {
         return Ok(None);
     };
@@ -426,31 +488,30 @@ fn run_exact_scpc<'py>(
     )?;
     let n = inputs.n;
     let k_use = inputs.coef.len();
-    let output = py
-        .allow_threads(|| {
-            let req = ExactScpcRequest {
-                coords: &inputs.coords,
-                n,
-                d: inputs.d,
-                metric: inputs.metric,
-                avc,
-                uncond,
-                cvs,
-                coef: &inputs.coef,
-                wj: &inputs.wj,
-                cluster_id: inputs.cluster_id.as_deref(),
-                fe_id: inputs.fe_id.as_deref(),
-                xj: inputs.xj.as_deref(),
-                xjs: inputs.xjs.as_deref(),
-                proj_u: inputs.proj_u.as_deref(),
-                proj_v: inputs.proj_v.as_deref(),
-                proj_rank: inputs.proj_rank,
-                cv_tolerance: 0.001,
-                nthreads: inputs.nthreads,
-            };
-            core_run_exact_scpc(&req)
-        })
-        .map_err(map_core_err)?;
+    let output = allow_threads_checked(py, || {
+        let req = ExactScpcRequest {
+            coords: &inputs.coords,
+            n,
+            d: inputs.d,
+            metric: inputs.metric,
+            avc,
+            uncond,
+            cvs,
+            coef: &inputs.coef,
+            wj: &inputs.wj,
+            cluster_id: inputs.cluster_id.as_deref(),
+            fe_id: inputs.fe_id.as_deref(),
+            xj: inputs.xj.as_deref(),
+            xjs: inputs.xjs.as_deref(),
+            proj_u: inputs.proj_u.as_deref(),
+            proj_v: inputs.proj_v.as_deref(),
+            proj_rank: inputs.proj_rank,
+            cv_tolerance: 0.001,
+            nthreads: inputs.nthreads,
+        };
+        core_run_exact_scpc(&req)
+    })?
+    .map_err(map_core_err)?;
     build_scpc_result_dict(py, output, n, k_use)
 }
 
@@ -503,35 +564,34 @@ fn run_approx_scpc<'py>(
     )?;
     let n = inputs.n;
     let k_use = inputs.coef.len();
-    let output = py
-        .allow_threads(|| {
-            let req = ApproxScpcRequest {
-                coords: &inputs.coords,
-                n,
-                d: inputs.d,
-                metric: inputs.metric,
-                avc,
-                uncond,
-                cvs,
-                coef: &inputs.coef,
-                wj: &inputs.wj,
-                cluster_id: inputs.cluster_id.as_deref(),
-                fe_id: inputs.fe_id.as_deref(),
-                xj: inputs.xj.as_deref(),
-                xjs: inputs.xjs.as_deref(),
-                proj_u: inputs.proj_u.as_deref(),
-                proj_v: inputs.proj_v.as_deref(),
-                proj_rank: inputs.proj_rank,
-                cv_tolerance: 0.001,
-                nthreads: inputs.nthreads,
-                seed,
-                landmarks,
-                samples,
-                pair_count,
-            };
-            core_run_approx_scpc(&req)
-        })
-        .map_err(map_core_err)?;
+    let output = allow_threads_checked(py, || {
+        let req = ApproxScpcRequest {
+            coords: &inputs.coords,
+            n,
+            d: inputs.d,
+            metric: inputs.metric,
+            avc,
+            uncond,
+            cvs,
+            coef: &inputs.coef,
+            wj: &inputs.wj,
+            cluster_id: inputs.cluster_id.as_deref(),
+            fe_id: inputs.fe_id.as_deref(),
+            xj: inputs.xj.as_deref(),
+            xjs: inputs.xjs.as_deref(),
+            proj_u: inputs.proj_u.as_deref(),
+            proj_v: inputs.proj_v.as_deref(),
+            proj_rank: inputs.proj_rank,
+            cv_tolerance: 0.001,
+            nthreads: inputs.nthreads,
+            seed,
+            landmarks,
+            samples,
+            pair_count,
+        };
+        core_run_approx_scpc(&req)
+    })?
+    .map_err(map_core_err)?;
     build_scpc_result_dict(py, output, n, k_use)
 }
 
@@ -691,54 +751,52 @@ fn run_spur_test_impl<'py>(
     };
 
     if is_i0 {
-        let output = py
-            .allow_threads(|| {
-                let req = SpurTestRequest {
-                    coords: &coords_vec,
-                    n,
-                    d,
-                    metric,
-                    y: &y_vec,
-                    n_y,
-                    x_in: x_vec.as_deref(),
-                    k_x,
-                    emat: &emat_vec,
-                    q,
-                    nrep,
-                    nthreads: nthreads_usize,
-                };
-                if req.x_in.is_some() {
-                    core_run_spur_i0_resid(&req)
-                } else {
-                    core_run_spur_i0(&req)
-                }
-            })
-            .map_err(map_core_err)?;
+        let output = allow_threads_checked(py, || {
+            let req = SpurTestRequest {
+                coords: &coords_vec,
+                n,
+                d,
+                metric,
+                y: &y_vec,
+                n_y,
+                x_in: x_vec.as_deref(),
+                k_x,
+                emat: &emat_vec,
+                q,
+                nrep,
+                nthreads: nthreads_usize,
+            };
+            if req.x_in.is_some() {
+                core_run_spur_i0_resid(&req)
+            } else {
+                core_run_spur_i0(&req)
+            }
+        })?
+        .map_err(map_core_err)?;
         build_spur_i0_dict(py, output, n_y)
     } else {
-        let output = py
-            .allow_threads(|| {
-                let req = SpurTestRequest {
-                    coords: &coords_vec,
-                    n,
-                    d,
-                    metric,
-                    y: &y_vec,
-                    n_y,
-                    x_in: x_vec.as_deref(),
-                    k_x,
-                    emat: &emat_vec,
-                    q,
-                    nrep,
-                    nthreads: nthreads_usize,
-                };
-                if req.x_in.is_some() {
-                    core_run_spur_i1_resid(&req)
-                } else {
-                    core_run_spur_i1(&req)
-                }
-            })
-            .map_err(map_core_err)?;
+        let output = allow_threads_checked(py, || {
+            let req = SpurTestRequest {
+                coords: &coords_vec,
+                n,
+                d,
+                metric,
+                y: &y_vec,
+                n_y,
+                x_in: x_vec.as_deref(),
+                k_x,
+                emat: &emat_vec,
+                q,
+                nrep,
+                nthreads: nthreads_usize,
+            };
+            if req.x_in.is_some() {
+                core_run_spur_i1_resid(&req)
+            } else {
+                core_run_spur_i1(&req)
+            }
+        })?
+        .map_err(map_core_err)?;
         build_spur_i1_dict(py, output)
     }
 }
@@ -862,22 +920,21 @@ fn run_spur_halflife<'py>(
             "emat shape ({emat_rows}, {emat_cols}) does not match expected ({q}, {nrep})"
         )));
     }
-    let output = py
-        .allow_threads(|| {
-            core_run_spur_halflife(&SpurHalfLifeRequest {
-                coords: &coords_vec,
-                n,
-                d,
-                metric,
-                y: &y_vec,
-                emat: &emat_vec,
-                q,
-                nrep,
-                level,
-                nthreads: nthreads_usize,
-            })
+    let output = allow_threads_checked(py, || {
+        core_run_spur_halflife(&SpurHalfLifeRequest {
+            coords: &coords_vec,
+            n,
+            d,
+            metric,
+            y: &y_vec,
+            emat: &emat_vec,
+            q,
+            nrep,
+            level,
+            nthreads: nthreads_usize,
         })
-        .map_err(map_core_err)?;
+    })?
+    .map_err(map_core_err)?;
     build_spur_halflife_dict(py, output)
 }
 
@@ -968,23 +1025,22 @@ fn run_spur_transform<'py>(
         None => (None, 0, false),
     };
 
-    let output = py
-        .allow_threads(|| {
-            core_run_spur_transform(&SpurTransformRequest {
-                coords: coords_opt.as_deref(),
-                n,
-                d,
-                metric,
-                kind: transform_kind,
-                cluster_id: cluster_opt.as_deref(),
-                y: y_opt.as_deref(),
-                n_y,
-                return_matrix,
-                demean_lbmgls,
-                nthreads: nthreads_usize,
-            })
+    let output = allow_threads_checked(py, || {
+        core_run_spur_transform(&SpurTransformRequest {
+            coords: coords_opt.as_deref(),
+            n,
+            d,
+            metric,
+            kind: transform_kind,
+            cluster_id: cluster_opt.as_deref(),
+            y: y_opt.as_deref(),
+            n_y,
+            return_matrix,
+            demean_lbmgls,
+            nthreads: nthreads_usize,
         })
-        .map_err(map_core_err)?;
+    })?
+    .map_err(map_core_err)?;
 
     let result = PyDict::new_bound(py);
     match output.matrix {
@@ -1068,26 +1124,25 @@ fn run_spur_pipeline<'py>(
         )));
     }
 
-    let output = py
-        .allow_threads(|| {
-            core_run_spur_pipeline(&SpurPipelineRequest {
-                coords: &coords_vec,
-                n,
-                d,
-                metric,
-                y: &y_vec,
-                x_in: &x_vec,
-                k_x,
-                emat: &emat_vec,
-                q,
-                nrep,
-                transform_vars: &tr_vec,
-                n_transform_vars: n_tr,
-                demean_lbmgls,
-                nthreads: nthreads_usize,
-            })
+    let output = allow_threads_checked(py, || {
+        core_run_spur_pipeline(&SpurPipelineRequest {
+            coords: &coords_vec,
+            n,
+            d,
+            metric,
+            y: &y_vec,
+            x_in: &x_vec,
+            k_x,
+            emat: &emat_vec,
+            q,
+            nrep,
+            transform_vars: &tr_vec,
+            n_transform_vars: n_tr,
+            demean_lbmgls,
+            nthreads: nthreads_usize,
         })
-        .map_err(map_core_err)?;
+    })?
+    .map_err(map_core_err)?;
 
     let result = PyDict::new_bound(py);
     result.set_item("i0", build_spur_i0_dict(py, output.i0, 1)?)?;
@@ -1103,8 +1158,16 @@ fn run_spur_pipeline<'py>(
 
 #[pymodule]
 fn spatial_spur_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("API_VERSION", 5usize)?;
-    m.add("SPUR_API_VERSION", 2usize)?;
+    m.add("API_VERSION", 6usize)?;
+    m.add("SPUR_API_VERSION", 3usize)?;
+    m.add(
+        "InvalidSampledCovarianceError",
+        m.py().get_type_bound::<InvalidSampledCovarianceError>(),
+    )?;
+    m.add(
+        "TiedEigenspaceError",
+        m.py().get_type_bound::<TiedEigenspaceError>(),
+    )?;
     m.add_function(wrap_pyfunction!(run_exact_scpc, m)?)?;
     m.add_function(wrap_pyfunction!(run_approx_scpc, m)?)?;
     m.add_function(wrap_pyfunction!(run_spur_i0, m)?)?;

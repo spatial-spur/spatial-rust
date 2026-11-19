@@ -23,6 +23,7 @@ fn error_kind_label(kind: ErrorKind) -> &'static str {
         ErrorKind::InvalidInput => "invalid input",
         ErrorKind::UnsupportedCase => "unsupported case",
         ErrorKind::TiedEigenspace => "tied eigenspace",
+        ErrorKind::InvalidSampledCovariance => "invalid sampled covariance",
         ErrorKind::CalibrationFailed => "calibration failed",
         ErrorKind::DegenerateVariance => "degenerate variance",
         ErrorKind::InternalFailure => "internal failure",
@@ -208,93 +209,164 @@ fn compute_xjs(
 ) -> Vec<f64> {
     let mut xjs = vec![0.0; m_obs * k_use];
     if let Some(cl) = cluster_id {
-        let mut sq_sum = vec![0.0_f64; n_sites * k_use];
+        let mut scales = vec![0.0_f64; n_sites * k_use];
         for (i, &g) in cl.iter().enumerate() {
             for j in 0..k_use {
-                let v = xj[i * k_use + j];
-                sq_sum[g * k_use + j] += v * v;
+                let group_col = g * k_use + j;
+                scales[group_col] = scales[group_col].max(xj[i * k_use + j].abs());
+            }
+        }
+        let mut sq_sum = vec![0.0; n_sites * k_use];
+        for (i, &g) in cl.iter().enumerate() {
+            for j in 0..k_use {
+                let row_col = i * k_use + j;
+                let group_col = g * k_use + j;
+                if scales[group_col] > 0.0 {
+                    xjs[row_col] = xj[row_col] / scales[group_col];
+                    sq_sum[group_col] += xjs[row_col] * xjs[row_col];
+                }
             }
         }
         for (i, &g) in cl.iter().enumerate() {
             for j in 0..k_use {
                 let norm = sq_sum[g * k_use + j].sqrt();
-                xjs[i * k_use + j] = if norm > 0.0 {
-                    xj[i * k_use + j] / norm
-                } else {
-                    0.0
-                };
+                if norm > 0.0 {
+                    xjs[i * k_use + j] /= norm;
+                }
             }
         }
     } else {
         for idx in 0..xj.len() {
             let x_dir = xj[idx];
-            xjs[idx] = if x_dir > 0.0 {
-                1.0
-            } else if x_dir < 0.0 {
-                -1.0
-            } else {
-                0.0
-            };
+            xjs[idx] = if x_dir < 0.0 { -1.0 } else { 1.0 };
         }
     }
     xjs
 }
 
-fn solve_multi_rhs(a_in: &[f64], b_in: &[f64], p: usize, ncols: usize) -> Result<Vec<f64>, String> {
-    let mut a = a_in.to_vec();
-    let mut b = b_in.to_vec();
-    let max_entry = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    if !max_entry.is_finite() || max_entry == 0.0 {
-        return Err("IV projection matrix X' P_Z X is zero or non-finite".to_string());
+fn scaled_col_norm(col: &[f64]) -> f64 {
+    let scale = col.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    if !scale.is_finite() || scale == 0.0 {
+        return scale;
     }
-    let tol = 1e-12 * max_entry;
+    scale * col.iter().map(|&v| (v / scale) * (v / scale)).sum::<f64>().sqrt()
+}
 
-    for col in 0..p {
-        let mut pivot = col;
-        let mut max_val = a[col * p + col].abs();
-        for row in (col + 1)..p {
-            let cand = a[row * p + col].abs();
-            if cand > max_val {
-                max_val = cand;
-                pivot = row;
+/// Compute `(A^+)^T` (`rows x cols`, row-major) via one-sided Jacobi SVD without forming `A^T A`.
+fn thin_svd_pseudoinverse_t(
+    a: &[f64],
+    rows: usize,
+    cols: usize,
+    rel_tol: f64,
+) -> Result<Vec<f64>, String> {
+    if rows < cols || cols == 0 {
+        return Err(
+            "IV residualizer is rank deficient: projected design is not full rank".to_string(),
+        );
+    }
+    let mut w = vec![0.0_f64; cols * rows];
+    for r in 0..rows {
+        for c in 0..cols {
+            w[c * rows + r] = a[r * cols + c];
+        }
+    }
+    let mut v = vec![0.0_f64; cols * cols];
+    for c in 0..cols {
+        v[c * cols + c] = 1.0;
+    }
+
+    for _ in 0..64 {
+        let mut rotated = false;
+        for a_idx in 0..cols {
+            for b_idx in (a_idx + 1)..cols {
+                let (left_w, right_w) = w.split_at_mut(b_idx * rows);
+                let wa = &mut left_w[a_idx * rows..(a_idx + 1) * rows];
+                let wb = &mut right_w[..rows];
+
+                let na = scaled_col_norm(wa);
+                let nb = scaled_col_norm(wb);
+                if !na.is_finite() || !nb.is_finite() {
+                    return Err(
+                        "IV residualizer failed: projected design contains non-finite values"
+                            .to_string(),
+                    );
+                }
+                if na == 0.0 || nb == 0.0 {
+                    continue;
+                }
+                let cos_ab: f64 = wa
+                    .iter()
+                    .zip(wb.iter())
+                    .map(|(&va, &vb)| (va / na) * (vb / nb))
+                    .sum();
+                if cos_ab.abs() <= 4.0 * f64::EPSILON {
+                    continue;
+                }
+                rotated = true;
+
+                let ratio = na.min(nb) / na.max(nb);
+                let diff_norm = 1.0 - ratio * ratio;
+                let signed_num = if na < nb { diff_norm } else { -diff_norm };
+                let den = 2.0 * ratio * cos_ab;
+                let t = if diff_norm == 0.0 {
+                    cos_ab.signum()
+                } else {
+                    (den * signed_num.signum()) / (diff_norm + den.hypot(diff_norm))
+                };
+                let c = 1.0 / 1.0_f64.hypot(t);
+                let sn = t * c;
+
+                for (va, vb) in wa.iter_mut().zip(wb.iter_mut()) {
+                    let x = *va;
+                    let y = *vb;
+                    *va = c * x - sn * y;
+                    *vb = sn * x + c * y;
+                }
+                let (left_v, right_v) = v.split_at_mut(b_idx * cols);
+                let va = &mut left_v[a_idx * cols..(a_idx + 1) * cols];
+                let vb = &mut right_v[..cols];
+                for (xa, xb) in va.iter_mut().zip(vb.iter_mut()) {
+                    let x = *xa;
+                    let y = *xb;
+                    *xa = c * x - sn * y;
+                    *xb = sn * x + c * y;
+                }
             }
         }
-        if !max_val.is_finite() || max_val <= tol {
-            return Err("IV residualizer is rank deficient: X' P_Z X is singular".to_string());
+        if !rotated {
+            break;
         }
-        if pivot != col {
-            for k in 0..p {
-                a.swap(col * p + k, pivot * p + k);
-            }
-            for k in 0..ncols {
-                b.swap(col * ncols + k, pivot * ncols + k);
-            }
-        }
-        let diag = a[col * p + col];
-        let inv_diag = 1.0 / diag;
-        for k in col..p {
-            a[col * p + k] *= inv_diag;
-        }
-        for k in 0..ncols {
-            b[col * ncols + k] *= inv_diag;
-        }
-        for row in 0..p {
-            if row == col {
-                continue;
-            }
-            let factor = a[row * p + col];
-            if factor == 0.0 {
-                continue;
-            }
-            for k in col..p {
-                a[row * p + k] -= factor * a[col * p + k];
-            }
-            for k in 0..ncols {
-                b[row * ncols + k] -= factor * b[col * ncols + k];
+    }
+
+    let sigmas: Vec<f64> = (0..cols)
+        .map(|j| scaled_col_norm(&w[j * rows..(j + 1) * rows]))
+        .collect();
+    if sigmas.iter().any(|&s| !s.is_finite()) {
+        return Err(
+            "IV residualizer failed: projected design contains non-finite values".to_string(),
+        );
+    }
+    let s_max = sigmas.iter().copied().fold(0.0_f64, f64::max);
+    let s_min = sigmas.iter().copied().fold(f64::INFINITY, f64::min);
+    if s_max == 0.0 || s_min <= rel_tol * s_max {
+        return Err(
+            "IV residualizer is rank deficient: projected design is not full rank".to_string(),
+        );
+    }
+
+    let mut pinv_t = vec![0.0_f64; rows * cols];
+    for j in 0..cols {
+        let s = sigmas[j];
+        let wj = &w[j * rows..(j + 1) * rows];
+        let vj = &v[j * cols..(j + 1) * cols];
+        for r in 0..rows {
+            let ur = wj[r] / s;
+            for k in 0..cols {
+                pinv_t[r * cols + k] += (ur * vj[k]) / s;
             }
         }
     }
-    Ok(b)
+    Ok(pinv_t)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -423,6 +495,22 @@ fn prepare_iv_inputs(
             x_full[i * p + nx] = 1.0;
         }
     }
+    // Scaling X changes the factors of the IV projection but preserves their
+    // product. Restore the original units only when multiplying by the bread.
+    let mut x_scales = vec![0.0_f64; p];
+    for row in x_full.chunks_exact(p) {
+        for (scale, value) in x_scales.iter_mut().zip(row) {
+            *scale = scale.max(value.abs());
+        }
+    }
+    if x_scales.contains(&0.0) {
+        return Err("IV residualizer failed: regressor space has insufficient rank".to_string());
+    }
+    for row in x_full.chunks_exact_mut(p) {
+        for (value, scale) in row.iter_mut().zip(&x_scales) {
+            *value /= scale;
+        }
+    }
 
     let n_exog = nx - n_endog;
     let mut z_cols = Vec::with_capacity(n_exog + n_z_excl + usize::from(has_cons));
@@ -465,30 +553,18 @@ fn prepare_iv_inputs(
         }
     }
 
-    // A = X' P_Z X (p x p)
-    let mut gram_a = vec![0.0; p * p];
-    for i in 0..m_obs {
-        let x_row = &x_full[i * p..(i + 1) * p];
-        let p_row = &pzx[i * p..(i + 1) * p];
-        for r in 0..p {
-            let xr = x_row[r];
-            for c in 0..p {
-                gram_a[r * p + c] += xr * p_row[c];
-            }
-        }
-    }
-
-    let mut pzx_t = vec![0.0; p * m_obs];
-    for i in 0..m_obs {
-        for c in 0..p {
-            pzx_t[c * m_obs + i] = pzx[i * p + c];
-        }
-    }
-    let v_t = solve_multi_rhs(&gram_a, &pzx_t, p, m_obs)?;
+    // Factor C = Q_z' X directly via SVD without forming X' P_Z X, then lift
+    // (C^+)^T = U Sigma^{-1} V^T back through Q_z so V = Q_z (C^+)^T.
+    let c_pinv_t = thin_svd_pseudoinverse_t(&qzt_x, rank_z, p, 1e-10)?;
     let mut proj_v = vec![0.0; m_obs * p];
     for i in 0..m_obs {
-        for c in 0..p {
-            proj_v[i * p + c] = v_t[c * m_obs + i];
+        let q_row = &q_z[i * rank_z..(i + 1) * rank_z];
+        let v_row = &mut proj_v[i * p..(i + 1) * p];
+        for r in 0..rank_z {
+            let qr = q_row[r];
+            for c in 0..p {
+                v_row[c] += qr * c_pinv_t[r * p + c];
+            }
         }
     }
 
@@ -498,7 +574,11 @@ fn prepare_iv_inputs(
         let p_row = &pzx[i * p..(i + 1) * p];
         for j in 0..k_use {
             let bread_row = &bread[j * p..(j + 1) * p];
-            let dot: f64 = bread_row.iter().zip(p_row.iter()).map(|(a, b)| a * b).sum();
+            let dot: f64 = bread_row
+                .iter()
+                .zip(p_row.iter().zip(&x_scales))
+                .map(|(bread, (projected, scale))| (bread * scale) * projected)
+                .sum();
             xj_base[i * k_use + j] = nf * dot;
         }
     }
@@ -1000,7 +1080,8 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" | "ping_spur_v1" | "ping_spur_v2" => Ok(()),
+        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" | "ping_v6" | "ping_spur_v1"
+        | "ping_spur_v2" | "ping_spur_v3" => Ok(()),
         "exact_scpc" => handle_exact_scpc(&args[1..]),
         "approx_scpc" => handle_approx_scpc(&args[1..]),
         "spur_i0" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I0),
@@ -1061,7 +1142,7 @@ mod tests {
 
     fn load_bench_200_csv() -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
         let path = format!(
-            "{}/../../fixtures/../../verification/data/bench_200.csv",
+            "{}/../spatial-core/tests/fixtures/bench_200.csv",
             env!("CARGO_MANIFEST_DIR")
         );
         let text = std::fs::read_to_string(path).expect("bench_200.csv");
@@ -1461,6 +1542,10 @@ mod tests {
             "invalid input: invalid"
         );
         assert_eq!(
+            format_core_error(CoreError::invalid_sampled_covariance("not psd")),
+            "invalid sampled covariance: not psd"
+        );
+        assert_eq!(
             format_core_error(CoreError::internal("boom")),
             "internal failure: boom"
         );
@@ -1523,7 +1608,7 @@ mod tests {
         let xj = inputs.xj.as_ref().unwrap();
         let xjs = inputs.xjs.as_ref().unwrap();
         assert_eq!(inputs.proj_rank, p);
-        // Verify factor orientation corresponds to M' = I - U V' where U = P_Z X A^{-1}, V = X:
+        // Verify the normalized factor orientation M' = I - U V' with columns of V scaled:
         // V' * U == I_p and each xjs[i] == sign(xj[i]).
         for r in 0..p {
             for c in 0..p {
@@ -1535,23 +1620,94 @@ mod tests {
         // Check M' projects onto P_Z X's nullspace via column orthogonality: for any A, X' (A - U V' A) == 0.
         for i in 0..m_obs {
             for j in 0..p {
-                let expected_sign = if xj[i * p + j] > 0.0 {
-                    1.0
-                } else if xj[i * p + j] < 0.0 {
-                    -1.0
-                } else {
-                    0.0
-                };
+                let expected_sign = if xj[i * p + j] < 0.0 { -1.0 } else { 1.0 };
                 assert_eq!(xjs[i * p + j], expected_sign);
             }
         }
-        // V columns store raw X (intercept last in Stata), whereas U stores P_Z X A^{-1}.
+        let expected_scales = [0, 1].map(|col| {
+            (0..m_obs)
+                .map(|i| x_raw[i * nx + col].abs())
+                .fold(0.0_f64, f64::max)
+        });
         for i in 0..m_obs {
-            assert_eq!(v[i * p], x_raw[i * nx]);
-            assert_eq!(v[i * p + 1], x_raw[i * nx + 1]);
+            assert_eq!(v[i * p], x_raw[i * nx] / expected_scales[0]);
+            assert_eq!(v[i * p + 1], x_raw[i * nx + 1] / expected_scales[1]);
             assert_eq!(v[i * p + 2], 1.0);
         }
         assert!(dispatch(&["ping_v5"]).is_ok());
+        assert!(dispatch(&["ping_v6"]).is_ok());
+    }
+
+    #[test]
+    fn iv_svd_avoids_normal_equations_and_rejects_irrelevant_instruments() {
+        // Case 1: kappa(Q_Z' X) ~ 2e7, so kappa^2 ~ 4e14 would destroy normal equations.
+        let m_obs = 6;
+        let p = 2; // [x1, x2], has_cons = false
+        let eps = 1e-7_f64;
+        // Build orthonormal rows/vectors on R^6 via simple basis vectors e_0, e_1:
+        // x1 = e_0, x2 = e_0 + eps * e_1 + 0.5 * e_2; z1 = e_0, z2 = e_1 -> P_Z X_tilde = [e_0, e_0 + eps*e_1]
+        let mut x_raw = vec![0.0; m_obs * p];
+        let mut z_excl = vec![0.0; m_obs * p];
+        z_excl[0] = 1.0; // obs 0, z1
+        z_excl[p + 1] = 1.0; // obs 1, z2
+        x_raw[0] = 1.0;
+        x_raw[1] = 1.0;
+        x_raw[p + 1] = eps;
+        x_raw[2 * p + 1] = 0.5;
+        let b = [1.0, 2.0];
+        let bread = [1.0, 0.0, 0.0, 1.0];
+        let scores = vec![0.1; m_obs * p];
+
+        let inputs = prepare_iv_inputs(
+            m_obs, m_obs, p, p, false, false, 2, p, &b, &bread, &scores, &x_raw, &z_excl, None,
+        )
+        .expect("ill-conditioned kappa ~ 2e7 should succeed without normal equations");
+        let u = inputs.proj_u.as_ref().unwrap();
+        let v = inputs.proj_v.as_ref().unwrap();
+        for r in 0..p {
+            for c in 0..p {
+                let dot: f64 = (0..m_obs).map(|i| v[i * p + r] * u[i * p + c]).sum();
+                let exp = if r == c { 1.0 } else { 0.0 };
+                assert!((dot - exp).abs() < 1e-7, "V'U[{r},{c}]={dot}");
+            }
+        }
+
+        // Case 2: Orthogonal / irrelevant instrument (e_0 vs e_1, e_2 -> zero projected column norm)
+        let mut z_irrel = vec![0.0; m_obs * p];
+        z_irrel[2 * p] = 1.0;
+        z_irrel[3 * p + 1] = 1.0;
+        let x_irrel = {
+            let mut m = vec![0.0; m_obs * p];
+            m[0] = 1.0;
+            m[p + 1] = 1.0;
+            m
+        };
+        let err = prepare_iv_inputs(
+            m_obs, m_obs, p, p, false, false, 2, p, &b, &bread, &scores, &x_irrel, &z_irrel, None,
+        )
+        .err()
+        .expect("irrelevant instrument must fail rank check");
+        assert!(err.contains("rank deficient"), "unexpected err: {err}");
+
+        // Case 3: Pure numerical roundoff overlap (~1e-13) must also fail 1e-10 SVD rank check
+        let mut z_roundoff = z_irrel.clone();
+        z_roundoff[0] = 1e-13;
+        let err_roundoff = prepare_iv_inputs(
+            m_obs, m_obs, p, p, false, false, 2, p, &b, &bread, &scores, &x_irrel, &z_roundoff, None,
+        )
+        .err()
+        .expect("1e-13 roundoff overlap must fail 1e-10 relative SVD check");
+        assert!(err_roundoff.contains("rank deficient"), "unexpected err: {err_roundoff}");
+    }
+
+    #[test]
+    fn zero_unclustered_score_has_positive_sign() {
+        let x = [-3.0, 0.0, 4.0, -0.0];
+        assert_eq!(compute_xjs(4, 4, 1, &x, None), [-1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            compute_xjs(2, 4, 1, &x, Some(&[0, 0, 0, 1])),
+            [-0.6, 0.0, 0.8, 0.0]
+        );
     }
 
     #[test]

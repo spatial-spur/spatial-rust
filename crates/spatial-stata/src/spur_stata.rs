@@ -596,6 +596,7 @@ mod tests {
     fn ping_and_spur_arg_validation_work() {
         assert!(dispatch(&["ping_spur_v1"]).is_ok());
         assert!(dispatch(&["ping_spur_v2"]).is_ok());
+        assert!(dispatch(&["ping_spur_v3"]).is_ok());
 
         // Wrong arity errors cleanly
         assert!(dispatch(&["spur_i0", "2"]).is_err());

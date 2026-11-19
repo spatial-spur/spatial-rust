@@ -1,12 +1,13 @@
 # SCPC and SPUR methods specification
 
-Current version **0.2.0**. See the [version 0.2.0 record](0.2.0/README.md) for the IV extension and adopted package conventions. Version 0.1.0 remains available unchanged.
+Current version **0.3.0**. See the [version 0.3.0 record](0.3.0/README.md) for sampled covariance validation, score signs, and the SPUR pipeline. Earlier records remain available.
 
 The inherited theoretical scope covers exact conditional OLS SCPC for unclustered observations and half-life inference for a scalar spatial series. This specification defines the statistical targets and records the finite-sample conventions used to reproduce particular sources. It can be read and checked independently of Rust, the host packages, and their release fixtures.
 
 | Document | Contents |
 | --- | --- |
-| [IV projection and current conventions](0.2.0/README.md) | Required transposed IV weights, adopted validation, simulation, and unit policies. |
+| [Current conventions](0.3.0/README.md) | Sampled covariance validation, unclustered score signs, SPUR pipeline samples and finite simulation. |
+| [IV projection and version 0.2.0 conventions](0.2.0/README.md) | Required transposed IV weights and adopted validation, simulation, and unit policies. |
 | [Conditional OLS SCPC](0.1.0/scpc-conditional-ols.md) | OLS coefficient and scores, spatial basis, recommended component selection, and control over both Gaussian benchmark families. |
 | [SPUR half-life](0.1.0/spur-half-life.md) | Lévy–Brownian basis, angular Gaussian likelihood, uniform half-life mixture, and confidence-set inversion. |
 | [Conventions and decisions](0.1.0/conventions.md) | Author replication and package behavior, and open choices for a reproducible product profile. |

@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "spatial-spur-rust"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "numpy",
  "pyo3",

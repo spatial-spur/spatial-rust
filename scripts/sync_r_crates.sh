@@ -46,7 +46,7 @@ sync_crate() {
   if [[ "${CHECK_ONLY}" -eq 0 ]]; then
     rm -rf "${dst}"
     mkdir -p "${dst}"
-    (cd "${src}" && tar --exclude='target*' --exclude='.DS_Store' -cf - .) | (cd "${dst}" && tar -xf -)
+    (cd "${src}" && tar --exclude='target*' --exclude='tests' --exclude='.DS_Store' -cf - .) | (cd "${dst}" && tar -xf -)
   fi
 
   if [[ ! -d "${dst}" ]]; then
@@ -54,7 +54,7 @@ sync_crate() {
     exit 1
   fi
 
-  diff -rq -x 'target*' -x '.DS_Store' "${src}" "${dst}"
+  diff -rq -x 'target*' -x 'tests' -x '.DS_Store' "${src}" "${dst}"
 }
 
 sync_crate "spatial-core"
