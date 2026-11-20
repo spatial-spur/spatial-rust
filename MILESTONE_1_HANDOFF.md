@@ -1,5 +1,8 @@
 # Milestone 1 Review Handoff: Shared Rust Core for Exact OLS SCPC
 
+This document records the Milestone 1 build. See [the current build instructions](README.md) for the OxiBLAS branch.
+
+
 ## 1. Repository Layout, Branches, and Commit SHAs
 
 All legacy `dev-rust` work in the six upstream repositories was preserved intact via `git stash push -u -m "preserve dev-rust shared-core prototype"` before creating clean `rust-core` branches from the pinned release commits.

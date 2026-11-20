@@ -60,4 +60,11 @@ sync_crate() {
 sync_crate "spatial-core"
 sync_crate "spatial-r"
 
-echo "Verified byte-for-byte sync for spatial-core and spatial-r into ${DEST_RUST_DIR}"
+LICENSE_FILE="OxiBLAS-Apache-2.0.txt"
+if [[ "${CHECK_ONLY}" -eq 0 ]]; then
+  mkdir -p "${PKG_DIR}/inst"
+  cp "${SPATIAL_RUST_DIR}/LICENSES/${LICENSE_FILE}" "${PKG_DIR}/inst/${LICENSE_FILE}"
+fi
+cmp "${SPATIAL_RUST_DIR}/LICENSES/${LICENSE_FILE}" "${PKG_DIR}/inst/${LICENSE_FILE}"
+
+echo "Verified byte-for-byte sync for spatial-core, spatial-r, and the OxiBLAS license into ${PKG_DIR}"

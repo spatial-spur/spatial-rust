@@ -6,13 +6,14 @@ SPUR_PLUGIN_OUT ?= ../../../spur-stata/spur_rust.plugin
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 	PLATFORM_CFLAGS := -bundle -DSYSTEM=APPLEMAC
-	PLATFORM_LDFLAGS := -framework Accelerate
+	PLATFORM_LDFLAGS := -Wl,-exported_symbol,_pginit,-exported_symbol,_stata_call
 	ifeq ($(origin CC),default)
 		CC := clang
 	endif
 else ifeq ($(UNAME_S),Linux)
 	PLATFORM_CFLAGS := -shared -fPIC -DSYSTEM=OPUNIX
-	PLATFORM_LDFLAGS := -ldl -lm -lpthread
+	PLATFORM_EXPORTS := c/exports.map
+	PLATFORM_LDFLAGS := -Wl,--version-script=$(PLATFORM_EXPORTS) -ldl -lm -lpthread
 else
 	$(error Building the Stata plugin is supported by this Makefile on macOS and Linux)
 endif
@@ -31,11 +32,8 @@ rust-lib:
 $(RUST_LIB): src/*.rs Cargo.toml ../../Cargo.toml ../../Cargo.lock ../spatial-core/Cargo.toml ../spatial-core/src/*.rs
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo build --release --offline --locked -p spatial-stata
 
-$(PLUGIN_OUT): $(RUST_LIB) c/stplugin.c c/stata_bridge.c c/stplugin.h Makefile
-	$(CC) $(ALL_CFLAGS) c/stplugin.c c/stata_bridge.c $(RUST_LIB) $(ALL_LDFLAGS) -o $@.tmp
-	mv $@.tmp $@
-
-$(SPUR_PLUGIN_OUT): $(RUST_LIB) c/stplugin.c c/stata_bridge.c c/stplugin.h Makefile
+# Publish only the entry points in the Stata plugin ABI.
+$(PLUGIN_OUT) $(SPUR_PLUGIN_OUT): $(RUST_LIB) c/stplugin.c c/stata_bridge.c c/stplugin.h $(PLATFORM_EXPORTS) Makefile
 	$(CC) $(ALL_CFLAGS) c/stplugin.c c/stata_bridge.c $(RUST_LIB) $(ALL_LDFLAGS) -o $@.tmp
 	mv $@.tmp $@
 
