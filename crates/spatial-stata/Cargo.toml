@@ -9,5 +9,8 @@ license = "MIT"
 name = "spatial_stata"
 crate-type = ["staticlib", "rlib"]
 
+[features]
+sme2 = ["spatial-core/sme2"]
+
 [dependencies]
 spatial-core = { path = "../spatial-core" }

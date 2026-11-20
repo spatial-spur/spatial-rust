@@ -9,6 +9,9 @@ license = "MIT"
 name = "spatial_spur_rust"
 crate-type = ["cdylib"]
 
+[features]
+sme2 = ["spatial-core/sme2"]
+
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }
 numpy = "0.22"

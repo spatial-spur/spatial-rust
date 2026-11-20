@@ -1,4 +1,6 @@
 CARGO_TARGET_DIR ?= ../../target-stata
+SPATIAL_SME2 ?= 0
+CARGO_FEATURES := $(if $(filter 1,$(SPATIAL_SME2)),--features sme2)
 RUST_LIB := $(CARGO_TARGET_DIR)/release/libspatial_stata.a
 PLUGIN_OUT ?= ../../../scpc-stata/src/scpc_rust.plugin
 SPUR_PLUGIN_OUT ?= ../../../spur-stata/spur_rust.plugin
@@ -27,18 +29,16 @@ ALL_LDFLAGS := $(PLATFORM_LDFLAGS) $(LDFLAGS)
 all: $(PLUGIN_OUT) $(SPUR_PLUGIN_OUT)
 
 rust-lib:
-	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo build --release --offline --locked -p spatial-stata
+	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo build --release --offline --locked -p spatial-stata $(CARGO_FEATURES)
 
-$(RUST_LIB): src/*.rs Cargo.toml ../../Cargo.toml ../../Cargo.lock ../spatial-core/Cargo.toml ../spatial-core/src/*.rs
-	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo build --release --offline --locked -p spatial-stata
-
+# Relink with Cargo's selected archive on every build, including feature switches.
 # Publish only the entry points in the Stata plugin ABI.
-$(PLUGIN_OUT) $(SPUR_PLUGIN_OUT): $(RUST_LIB) c/stplugin.c c/stata_bridge.c c/stplugin.h $(PLATFORM_EXPORTS) Makefile
+$(PLUGIN_OUT) $(SPUR_PLUGIN_OUT): rust-lib c/stplugin.c c/stata_bridge.c c/stplugin.h $(PLATFORM_EXPORTS) Makefile
 	$(CC) $(ALL_CFLAGS) c/stplugin.c c/stata_bridge.c $(RUST_LIB) $(ALL_LDFLAGS) -o $@.tmp
 	mv $@.tmp $@
 
 test:
-	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo test --offline --locked -p spatial-stata
+	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo test --offline --locked -p spatial-stata $(CARGO_FEATURES)
 
 clean:
 	rm -f $(PLUGIN_OUT) $(SPUR_PLUGIN_OUT)
