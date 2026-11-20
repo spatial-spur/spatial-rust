@@ -32,15 +32,11 @@ make -C crates/spatial-stata \
   SPUR_PLUGIN_OUT=/path/to/spur-stata/spur_rust.plugin
 ```
 
-## Optional Arm SME2 build
+## Arm SME2 runtime selection
 
-SME2 is off by default. The opt-in builds use OxiBLAS's runtime checks to select SME2 kernels for eligible operations on supported Arm systems. Other hosts and operations use OxiBLAS's regular CPU dispatch.
+Standard builds include OxiBLAS's SME2 kernels on Arm64 macOS, Linux, and Android. OxiBLAS selects them for eligible operations after its hardware, OS, and first-use checks pass. Other targets and operations use regular CPU dispatch.
 
-Set `OXIBLAS_DISABLE_SME2=1` before starting the host process to use regular CPU dispatch with an opt-in build.
-
-- **Python.** Add `--features sme2` to the Maturin command and install the resulting shared wheel.
-- **R.** Build the source archives as above. Set `SPATIAL_SME2=1` when installing either archive with `R CMD INSTALL`. The same source archives support the default build.
-- **Stata.** Add `SPATIAL_SME2=1` to the Make command above to build both plugins.
+To opt out, set `OXIBLAS_DISABLE_SME2=1` before starting Python, R, or Stata. The runtime setting is read on first use and applies to the life of the process.
 
 ## Native symbols
 
