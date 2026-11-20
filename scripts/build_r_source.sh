@@ -32,7 +32,11 @@ bash "$script_dir/sync_r_crates.sh" "$staging/$package"
 (
   cd "$staging/$package/src/rust"
   cargo vendor --locked vendor > vendor-config.toml
-  COPYFILE_DISABLE=1 tar -cJf vendor.tar.xz vendor
+  if [[ "$(tar --version)" == bsdtar* ]]; then
+    COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -cJf vendor.tar.xz vendor
+  else
+    tar -cJf vendor.tar.xz vendor
+  fi
   rm -rf vendor
 )
 cd "$output_dir"

@@ -7,8 +7,8 @@ and the [transposed IV weights](../0.2.0/scpc-iv.md) continue to govern every ba
 ## SCPC
 
 - For an unclustered coefficient, write its signed score direction as
-  \(S_x=\operatorname{diag}(s_i)\), where \(s_i=-1\) for \(x_i<0\) and
-  \(s_i=+1\) for \(x_i\geq0\). Apply this convention to both IEEE signs of exact zero.
+  $S_x=\operatorname{diag}(s_i)$, where $s_i=-1$ for $x_i<0$ and
+  $s_i=+1$ for $x_i\geq0$. Apply this convention to both IEEE signs of exact zero.
   This reproduces the author's unclustered MATLAB convention for the diagonal
   sign matrix. A tiny nonzero score keeps its own sign. Clustered SCPC
   continues to use the within-cluster direction normalization.
@@ -37,7 +37,7 @@ and the [transposed IV weights](../0.2.0/scpc-iv.md) continue to govern every ba
   for the diagnostics, transformation, and SCPC fits when reporting the full
   pipeline.
 - When orienting isolated eigenvectors, consider entries within
-  \(64\epsilon_{\mathrm{mach}}\) times the vector's largest absolute entry
+  $64\epsilon_{\mathrm{mach}}$ times the vector's largest absolute entry
   tied in magnitude. Select the earliest such entry and make it positive.
   This stabilizes the sign convention for symmetric geometries. The rule
   concerns orientation of individual eigenvectors. A repeated eigenvalue
@@ -45,11 +45,11 @@ and the [transposed IV weights](../0.2.0/scpc-iv.md) continue to govern every ba
 - Distinguish an empty half-life confidence set from a set that accepts the
   open-upper grid endpoint. A finite set reports both grid endpoints in the
   requested units.
-- Let \(m\) be the number of simulated statistics strictly greater than the
-  observed statistic out of \(B\) draws. Report \(p=m/B\) and retain a grid
-  point exactly when \((B-m)/B < \ell\), where \(\ell\) is the requested
+- Let $m$ be the number of simulated statistics strictly greater than the
+  observed statistic out of $B$ draws. Report $p=m/B$ and retain a grid
+  point exactly when $(B-m)/B < \ell$, where $\ell$ is the requested
   confidence level. Compute this complement from the counts so rounding
-  \(1-\ell\) cannot include a grid point at the nominal equality boundary.
+  $1-\ell$ cannot include a grid point at the nominal equality boundary.
 
 The Python adapter requires SCPC API 6 and SPUR API 3. The corresponding
 Stata plugin probes are `ping_v6` and `ping_spur_v3`.

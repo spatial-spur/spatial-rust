@@ -17,6 +17,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 const DEFAULT_CV_TOL: f64 = 0.001;
 const MGS_RANK_REL_TOL: f64 = 1e-12;
+const IV_RANK_TOL: f64 = 1e-10;
 
 fn error_kind_label(kind: ErrorKind) -> &'static str {
     match kind {
@@ -103,9 +104,8 @@ fn normalize_column(v: &mut [f64]) -> bool {
     if max_abs == 0.0 {
         return false;
     }
-    let inv_max = 1.0 / max_abs;
     for vi in v.iter_mut() {
-        *vi *= inv_max;
+        *vi /= max_abs;
     }
     let scaled_norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
     if !scaled_norm.is_finite() || scaled_norm == 0.0 {
@@ -119,7 +119,7 @@ fn normalize_column(v: &mut [f64]) -> bool {
 }
 
 /// Two-pass Modified Gram-Schmidt on arbitrary column vectors, returning row-major `Q` (`n x rank`).
-fn orthonormal_cols_mgs(cols_in: &[Vec<f64>], n: usize) -> (Vec<f64>, usize) {
+fn orthonormal_cols_mgs(cols_in: &[Vec<f64>], n: usize, rank_tol: f64) -> (Vec<f64>, usize) {
     if cols_in.is_empty() || n == 0 {
         return (Vec::new(), 0);
     }
@@ -142,7 +142,7 @@ fn orthonormal_cols_mgs(cols_in: &[Vec<f64>], n: usize) -> (Vec<f64>, usize) {
             }
         }
         let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if norm.is_finite() && norm > MGS_RANK_REL_TOL {
+        if norm.is_finite() && norm > rank_tol {
             let inv = 1.0 / norm;
             cols.push(v.iter().map(|&x| x * inv).collect());
         }
@@ -172,7 +172,7 @@ fn orthonormal_basis_mgs(x_raw: &[f64], n: usize, nx: usize, has_cons: bool) -> 
     if has_cons {
         cols_in.push(vec![1.0; n]);
     }
-    orthonormal_cols_mgs(&cols_in, n)
+    orthonormal_cols_mgs(&cols_in, n, MGS_RANK_REL_TOL)
 }
 
 fn compute_wj(
@@ -253,12 +253,7 @@ fn scaled_col_norm(col: &[f64]) -> f64 {
 }
 
 /// Compute `(A^+)^T` (`rows x cols`, row-major) via one-sided Jacobi SVD without forming `A^T A`.
-fn thin_svd_pseudoinverse_t(
-    a: &[f64],
-    rows: usize,
-    cols: usize,
-    rel_tol: f64,
-) -> Result<Vec<f64>, String> {
+fn thin_svd_pseudoinverse_t(a: &[f64], rows: usize, cols: usize) -> Result<Vec<f64>, String> {
     if rows < cols || cols == 0 {
         return Err(
             "IV residualizer is rank deficient: projected design is not full rank".to_string(),
@@ -275,7 +270,7 @@ fn thin_svd_pseudoinverse_t(
         v[c * cols + c] = 1.0;
     }
 
-    for _ in 0..64 {
+    for sweep in 0..=64 {
         let mut rotated = false;
         for a_idx in 0..cols {
             for b_idx in (a_idx + 1)..cols {
@@ -301,6 +296,11 @@ fn thin_svd_pseudoinverse_t(
                     .sum();
                 if cos_ab.abs() <= 4.0 * f64::EPSILON {
                     continue;
+                }
+                if sweep == 64 {
+                    return Err(
+                        "IV residualizer failed: projected design SVD did not converge".to_string(),
+                    );
                 }
                 rotated = true;
 
@@ -348,7 +348,10 @@ fn thin_svd_pseudoinverse_t(
     }
     let s_max = sigmas.iter().copied().fold(0.0_f64, f64::max);
     let s_min = sigmas.iter().copied().fold(f64::INFINITY, f64::min);
-    if s_max == 0.0 || s_min <= rel_tol * s_max {
+    // Columns of X are max-abs equilibrated before projection. A uniformly
+    // tiny Q_Z'X (including a 1-by-1 projection) is unidentified even when
+    // its relative condition number is small.
+    if s_min <= IV_RANK_TOL * s_max.max(1.0) {
         return Err(
             "IV residualizer is rank deficient: projected design is not full rank".to_string(),
         );
@@ -365,6 +368,9 @@ fn thin_svd_pseudoinverse_t(
                 pinv_t[r * cols + k] += (ur * vj[k]) / s;
             }
         }
+    }
+    if pinv_t.iter().any(|value| !value.is_finite()) {
+        return Err("IV residualizer failed: non-finite pseudoinverse".to_string());
     }
     Ok(pinv_t)
 }
@@ -524,7 +530,7 @@ fn prepare_iv_inputs(
     if has_cons {
         z_cols.push(vec![1.0; m_obs]);
     }
-    let (q_z, rank_z) = orthonormal_cols_mgs(&z_cols, m_obs);
+    let (q_z, rank_z) = orthonormal_cols_mgs(&z_cols, m_obs, IV_RANK_TOL);
     if rank_z < p {
         return Err("IV residualizer failed: instrument space has insufficient rank".to_string());
     }
@@ -555,7 +561,7 @@ fn prepare_iv_inputs(
 
     // Factor C = Q_z' X directly via SVD without forming X' P_Z X, then lift
     // (C^+)^T = U Sigma^{-1} V^T back through Q_z so V = Q_z (C^+)^T.
-    let c_pinv_t = thin_svd_pseudoinverse_t(&qzt_x, rank_z, p, 1e-10)?;
+    let c_pinv_t = thin_svd_pseudoinverse_t(&qzt_x, rank_z, p)?;
     let mut proj_v = vec![0.0; m_obs * p];
     for i in 0..m_obs {
         let q_row = &q_z[i * rank_z..(i + 1) * rank_z];
@@ -1697,7 +1703,44 @@ mod tests {
         )
         .err()
         .expect("1e-13 roundoff overlap must fail 1e-10 relative SVD check");
-        assert!(err_roundoff.contains("rank deficient"), "unexpected err: {err_roundoff}");
+        assert!(
+            err_roundoff.contains("rank deficient"),
+            "unexpected err: {err_roundoff}"
+        );
+    }
+
+    #[test]
+    fn iv_svd_rejects_a_uniformly_negligible_projection() {
+        for (width, projection) in [
+            (1, &[1e-16][..]),
+            (1, &[1e-310][..]),
+            (2, &[1e-13, 0.0, 0.0, 1e-13][..]),
+        ] {
+            let err = thin_svd_pseudoinverse_t(projection, width, width).unwrap_err();
+            assert!(err.contains("rank deficient"), "unexpected err: {err}");
+        }
+        let identified = thin_svd_pseudoinverse_t(&[1e-7], 1, 1).unwrap();
+        assert_eq!(identified, [1e7]);
+
+        let err = prepare_iv_inputs(
+            3,
+            3,
+            1,
+            1,
+            false,
+            false,
+            1,
+            1,
+            &[0.0],
+            &[1.0],
+            &[0.1; 3],
+            &[1.0, 0.0, 0.0],
+            &[1e-13, 1.0, 0.0],
+            None,
+        )
+        .err()
+        .expect("one nearly orthogonal instrument must fail rank validation");
+        assert!(err.contains("rank deficient"), "unexpected err: {err}");
     }
 
     #[test]

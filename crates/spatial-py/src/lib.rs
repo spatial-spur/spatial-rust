@@ -134,6 +134,7 @@ fn vec_to_pyarray2<'py>(
 #[cfg(unix)]
 static NATIVE_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+#[cfg(unix)]
 fn fork_error() -> PyErr {
     PyRuntimeError::new_err(
         "Spatial Rust was used before this process forked. Use the multiprocessing 'spawn' or 'forkserver' start method for native calls.",
