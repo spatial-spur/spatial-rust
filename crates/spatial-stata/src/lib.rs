@@ -4,8 +4,7 @@ mod spur_stata;
 mod stata_spi;
 
 use spatial_core::{
-    nystrom::normalize_coords, run_approx_scpc, run_exact_scpc, ApproxScpcRequest, CoreError,
-    ErrorKind, ExactScpcOutput, ExactScpcRequest, Metric,
+    preparation::{run_model_scpc, ScpcPreparation}, CoreError, ErrorKind, ExactScpcOutput, Metric,
 };
 use stata_spi::{
     active_obs, error, plugin_var_count, read_matrix, read_var_matrix, save_scalar, write_matrix,
@@ -14,10 +13,6 @@ use stata_spi::{
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-
-const DEFAULT_CV_TOL: f64 = 0.001;
-const MGS_RANK_REL_TOL: f64 = 1e-12;
-const IV_RANK_TOL: f64 = 1e-10;
 
 fn error_kind_label(kind: ErrorKind) -> &'static str {
     match kind {
@@ -33,15 +28,6 @@ fn error_kind_label(kind: ErrorKind) -> &'static str {
 
 pub(crate) fn format_core_error(err: CoreError) -> String {
     format!("{}: {}", error_kind_label(err.kind()), err.message())
-}
-
-struct PreparedInputs {
-    wj: Vec<f64>,
-    xj: Option<Vec<f64>>,
-    xjs: Option<Vec<f64>>,
-    proj_u: Option<Vec<f64>>,
-    proj_v: Option<Vec<f64>>,
-    proj_rank: usize,
 }
 
 pub(crate) fn parse_bool_flag(raw: &str, name: &str) -> Result<bool, String> {
@@ -64,14 +50,6 @@ fn parse_seed(raw: &str) -> Result<u32, String> {
     u32::try_from(val).map_err(|_| format!("seed argument '{raw}' must be in [0, 2^32)"))
 }
 
-fn permute_rows(src: &[f64], perm: &[usize], cols: usize) -> Vec<f64> {
-    let mut out = Vec::with_capacity(perm.len() * cols);
-    for &src_idx in perm {
-        out.extend_from_slice(&src[src_idx * cols..(src_idx + 1) * cols]);
-    }
-    out
-}
-
 pub(crate) fn parse_nthreads(raw: &str) -> Result<Option<usize>, String> {
     let val = raw
         .parse::<isize>()
@@ -85,529 +63,77 @@ pub(crate) fn parse_nthreads(raw: &str) -> Result<Option<usize>, String> {
     }
 }
 
-fn normalize_column(v: &mut [f64]) -> bool {
-    let orig_norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-    if orig_norm.is_finite() && orig_norm > 0.0 {
-        let inv = 1.0 / orig_norm;
-        for vi in v.iter_mut() {
-            *vi *= inv;
-        }
-        return true;
-    }
-    let mut max_abs = 0.0_f64;
-    for &x in v.iter() {
-        if !x.is_finite() {
-            return false;
-        }
-        max_abs = max_abs.max(x.abs());
-    }
-    if max_abs == 0.0 {
-        return false;
-    }
-    for vi in v.iter_mut() {
-        *vi /= max_abs;
-    }
-    let scaled_norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-    if !scaled_norm.is_finite() || scaled_norm == 0.0 {
-        return false;
-    }
-    let inv = 1.0 / scaled_norm;
-    for vi in v.iter_mut() {
-        *vi *= inv;
-    }
-    true
+/// Expand the Stata design (endogenous columns first, constant last) into the
+/// fitted structural and instrument columns required by the shared operation.
+struct StataDesign {
+    x: Vec<f64>,
+    z: Option<Vec<f64>>,
+    z_cols: usize,
 }
 
-/// Two-pass Modified Gram-Schmidt on arbitrary column vectors, returning row-major `Q` (`n x rank`).
-fn orthonormal_cols_mgs(cols_in: &[Vec<f64>], n: usize, rank_tol: f64) -> (Vec<f64>, usize) {
-    if cols_in.is_empty() || n == 0 {
-        return (Vec::new(), 0);
-    }
-
-    let mut cols: Vec<Vec<f64>> = Vec::with_capacity(cols_in.len());
-    let mut v = vec![0.0; n];
-
-    for src in cols_in {
-        v.copy_from_slice(src);
-        if !normalize_column(&mut v) {
-            continue;
+impl StataDesign {
+    fn from_columns(
+        rows: usize,
+        p: usize,
+        has_cons: bool,
+        n_endog: usize,
+        z_cols: usize,
+        raw_x: &[f64],
+        excluded: &[f64],
+    ) -> Result<Self, String> {
+        let nx = p
+            .checked_sub(usize::from(has_cons))
+            .ok_or("invalid Stata regressor count")?;
+        if n_endog > nx
+            || raw_x.len() != rows.checked_mul(nx).ok_or("Stata design too large")?
+            || excluded.len()
+                != rows
+                    .checked_mul(z_cols)
+                    .ok_or("Stata instrument design too large")?
+        {
+            return Err("invalid Stata model columns".into());
         }
-        // Two passes ensure near machine-precision orthogonality for ill-conditioned designs.
-        for _ in 0..2 {
-            for q_col in &cols {
-                let dot: f64 = q_col.iter().zip(v.iter()).map(|(a, b)| a * b).sum();
-                for (vi, &qi) in v.iter_mut().zip(q_col.iter()) {
-                    *vi -= dot * qi;
-                }
-            }
-        }
-        let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if norm.is_finite() && norm > rank_tol {
-            let inv = 1.0 / norm;
-            cols.push(v.iter().map(|&x| x * inv).collect());
-        }
-    }
-
-    let rank = cols.len();
-    let mut q_row_major = vec![0.0; n * rank];
-    for (r, q_col) in cols.iter().enumerate() {
-        for i in 0..n {
-            q_row_major[i * rank + r] = q_col[i];
-        }
-    }
-    (q_row_major, rank)
-}
-
-/// Two-pass Modified Gram-Schmidt on `[x_raw, 1]` (or `[x_raw]` if `!has_cons`),
-/// returning row-major orthonormal `Q` (`n x rank`) and `rank`.
-fn orthonormal_basis_mgs(x_raw: &[f64], n: usize, nx: usize, has_cons: bool) -> (Vec<f64>, usize) {
-    let p = nx + usize::from(has_cons);
-    if p == 0 || n == 0 {
-        return (Vec::new(), 0);
-    }
-    let mut cols_in = Vec::with_capacity(p);
-    for col_idx in 0..nx {
-        cols_in.push((0..n).map(|i| x_raw[i * nx + col_idx]).collect());
-    }
-    if has_cons {
-        cols_in.push(vec![1.0; n]);
-    }
-    orthonormal_cols_mgs(&cols_in, n, MGS_RANK_REL_TOL)
-}
-
-fn compute_wj(
-    n_sites: usize,
-    p: usize,
-    k_use: usize,
-    b: &[f64],
-    bread: &[f64],
-    scores: &[f64],
-) -> Vec<f64> {
-    let nf = n_sites as f64;
-    let mut wj = vec![0.0; n_sites * k_use];
-    for i in 0..n_sites {
-        let score_row = &scores[i * p..(i + 1) * p];
-        for j in 0..k_use {
-            let bread_row = &bread[j * p..(j + 1) * p];
-            let dot: f64 = bread_row
-                .iter()
-                .zip(score_row.iter())
-                .map(|(a, s)| a * s)
-                .sum();
-            wj[i * k_use + j] = nf * dot + b[j];
-        }
-    }
-    wj
-}
-
-fn compute_xjs(
-    n_sites: usize,
-    m_obs: usize,
-    k_use: usize,
-    xj: &[f64],
-    cluster_id: Option<&[usize]>,
-) -> Vec<f64> {
-    let mut xjs = vec![0.0; m_obs * k_use];
-    if let Some(cl) = cluster_id {
-        let mut scales = vec![0.0_f64; n_sites * k_use];
-        for (i, &g) in cl.iter().enumerate() {
-            for j in 0..k_use {
-                let group_col = g * k_use + j;
-                scales[group_col] = scales[group_col].max(xj[i * k_use + j].abs());
-            }
-        }
-        let mut sq_sum = vec![0.0; n_sites * k_use];
-        for (i, &g) in cl.iter().enumerate() {
-            for j in 0..k_use {
-                let row_col = i * k_use + j;
-                let group_col = g * k_use + j;
-                if scales[group_col] > 0.0 {
-                    xjs[row_col] = xj[row_col] / scales[group_col];
-                    sq_sum[group_col] += xjs[row_col] * xjs[row_col];
-                }
-            }
-        }
-        for (i, &g) in cl.iter().enumerate() {
-            for j in 0..k_use {
-                let norm = sq_sum[g * k_use + j].sqrt();
-                if norm > 0.0 {
-                    xjs[i * k_use + j] /= norm;
-                }
-            }
-        }
-    } else {
-        for idx in 0..xj.len() {
-            let x_dir = xj[idx];
-            xjs[idx] = if x_dir < 0.0 { -1.0 } else { 1.0 };
-        }
-    }
-    xjs
-}
-
-fn scaled_col_norm(col: &[f64]) -> f64 {
-    let scale = col.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    if !scale.is_finite() || scale == 0.0 {
-        return scale;
-    }
-    scale * col.iter().map(|&v| (v / scale) * (v / scale)).sum::<f64>().sqrt()
-}
-
-/// Compute `(A^+)^T` (`rows x cols`, row-major) via one-sided Jacobi SVD without forming `A^T A`.
-fn thin_svd_pseudoinverse_t(a: &[f64], rows: usize, cols: usize) -> Result<Vec<f64>, String> {
-    if rows < cols || cols == 0 {
-        return Err(
-            "IV residualizer is rank deficient: projected design is not full rank".to_string(),
-        );
-    }
-    let mut w = vec![0.0_f64; cols * rows];
-    for r in 0..rows {
-        for c in 0..cols {
-            w[c * rows + r] = a[r * cols + c];
-        }
-    }
-    let mut v = vec![0.0_f64; cols * cols];
-    for c in 0..cols {
-        v[c * cols + c] = 1.0;
-    }
-
-    for sweep in 0..=64 {
-        let mut rotated = false;
-        for a_idx in 0..cols {
-            for b_idx in (a_idx + 1)..cols {
-                let (left_w, right_w) = w.split_at_mut(b_idx * rows);
-                let wa = &mut left_w[a_idx * rows..(a_idx + 1) * rows];
-                let wb = &mut right_w[..rows];
-
-                let na = scaled_col_norm(wa);
-                let nb = scaled_col_norm(wb);
-                if !na.is_finite() || !nb.is_finite() {
-                    return Err(
-                        "IV residualizer failed: projected design contains non-finite values"
-                            .to_string(),
-                    );
-                }
-                if na == 0.0 || nb == 0.0 {
-                    continue;
-                }
-                let cos_ab: f64 = wa
-                    .iter()
-                    .zip(wb.iter())
-                    .map(|(&va, &vb)| (va / na) * (vb / nb))
-                    .sum();
-                if cos_ab.abs() <= 4.0 * f64::EPSILON {
-                    continue;
-                }
-                if sweep == 64 {
-                    return Err(
-                        "IV residualizer failed: projected design SVD did not converge".to_string(),
-                    );
-                }
-                rotated = true;
-
-                let ratio = na.min(nb) / na.max(nb);
-                let diff_norm = 1.0 - ratio * ratio;
-                let signed_num = if na < nb { diff_norm } else { -diff_norm };
-                let den = 2.0 * ratio * cos_ab;
-                let t = if diff_norm == 0.0 {
-                    cos_ab.signum()
-                } else {
-                    (den * signed_num.signum()) / (diff_norm + den.hypot(diff_norm))
-                };
-                let c = 1.0 / 1.0_f64.hypot(t);
-                let sn = t * c;
-
-                for (va, vb) in wa.iter_mut().zip(wb.iter_mut()) {
-                    let x = *va;
-                    let y = *vb;
-                    *va = c * x - sn * y;
-                    *vb = sn * x + c * y;
-                }
-                let (left_v, right_v) = v.split_at_mut(b_idx * cols);
-                let va = &mut left_v[a_idx * cols..(a_idx + 1) * cols];
-                let vb = &mut right_v[..cols];
-                for (xa, xb) in va.iter_mut().zip(vb.iter_mut()) {
-                    let x = *xa;
-                    let y = *xb;
-                    *xa = c * x - sn * y;
-                    *xb = sn * x + c * y;
-                }
-            }
-        }
-        if !rotated {
-            break;
-        }
-    }
-
-    let sigmas: Vec<f64> = (0..cols)
-        .map(|j| scaled_col_norm(&w[j * rows..(j + 1) * rows]))
-        .collect();
-    if sigmas.iter().any(|&s| !s.is_finite()) {
-        return Err(
-            "IV residualizer failed: projected design contains non-finite values".to_string(),
-        );
-    }
-    let s_max = sigmas.iter().copied().fold(0.0_f64, f64::max);
-    let s_min = sigmas.iter().copied().fold(f64::INFINITY, f64::min);
-    // Columns of X are max-abs equilibrated before projection. A uniformly
-    // tiny Q_Z'X (including a 1-by-1 projection) is unidentified even when
-    // its relative condition number is small.
-    if s_min <= IV_RANK_TOL * s_max.max(1.0) {
-        return Err(
-            "IV residualizer is rank deficient: projected design is not full rank".to_string(),
-        );
-    }
-
-    let mut pinv_t = vec![0.0_f64; rows * cols];
-    for j in 0..cols {
-        let s = sigmas[j];
-        let wj = &w[j * rows..(j + 1) * rows];
-        let vj = &v[j * cols..(j + 1) * cols];
-        for r in 0..rows {
-            let ur = wj[r] / s;
-            for k in 0..cols {
-                pinv_t[r * cols + k] += (ur * vj[k]) / s;
-            }
-        }
-    }
-    if pinv_t.iter().any(|value| !value.is_finite()) {
-        return Err("IV residualizer failed: non-finite pseudoinverse".to_string());
-    }
-    Ok(pinv_t)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_ols_inputs(
-    n_sites: usize,
-    m_obs: usize,
-    p: usize,
-    k_use: usize,
-    has_cons: bool,
-    uncond: bool,
-    b: &[f64],
-    bread: &[f64],
-    scores: &[f64],
-    x_raw: &[f64],
-    cluster_id: Option<&[usize]>,
-) -> Result<PreparedInputs, String> {
-    let nx = p - usize::from(has_cons);
-    if b.len() != p || bread.len() != p * p || scores.len() != n_sites * p {
-        return Err("internal dimension mismatch in OLS score inputs".to_string());
-    }
-    if !uncond && x_raw.len() != m_obs * nx {
-        return Err("internal dimension mismatch in conditional regressor inputs".to_string());
-    }
-    if let Some(cl) = cluster_id {
-        if cl.len() != m_obs {
-            return Err("internal dimension mismatch in cluster_id inputs".to_string());
-        }
-    } else if m_obs != n_sites {
-        return Err("m_obs must equal n_sites when unclustered".to_string());
-    }
-
-    let wj = compute_wj(n_sites, p, k_use, b, bread, scores);
-    if uncond {
-        return Ok(PreparedInputs {
-            wj,
-            xj: None,
-            xjs: None,
-            proj_u: None,
-            proj_v: None,
-            proj_rank: 0,
-        });
-    }
-
-    let nf = n_sites as f64;
-    let mut xj = vec![0.0; m_obs * k_use];
-    for i in 0..m_obs {
-        let x_row = &x_raw[i * nx..(i + 1) * nx];
-        for j in 0..k_use {
-            let bread_row = &bread[j * p..(j + 1) * p];
-            let mut dot: f64 = bread_row[..nx]
-                .iter()
-                .zip(x_row.iter())
-                .map(|(a, x)| a * x)
-                .sum();
+        let instruments = if n_endog == 0 {
+            0
+        } else {
+            p - n_endog + z_cols
+        };
+        let mut x = Vec::with_capacity(rows.checked_mul(p).ok_or("Stata design too large")?);
+        let mut z = if n_endog == 0 {
+            None
+        } else {
+            Some(Vec::with_capacity(
+                rows.checked_mul(instruments)
+                    .ok_or("Stata instrument design too large")?,
+            ))
+        };
+        for i in 0..rows {
+            let xrow = &raw_x[i * nx..(i + 1) * nx];
+            x.extend_from_slice(xrow);
             if has_cons {
-                dot += bread_row[p - 1];
+                x.push(1.0);
             }
-            xj[i * k_use + j] = nf * dot;
+            if let Some(ref mut values) = z {
+                values.extend_from_slice(&xrow[n_endog..]);
+                values.extend_from_slice(&excluded[i * z_cols..(i + 1) * z_cols]);
+                if has_cons {
+                    values.push(1.0);
+                }
+            }
         }
+        Ok(Self {
+            x,
+            z,
+            z_cols: instruments,
+        })
     }
-
-    let xjs = compute_xjs(n_sites, m_obs, k_use, &xj, cluster_id);
-    let (proj_q, proj_rank) = orthonormal_basis_mgs(x_raw, m_obs, nx, has_cons);
-    let proj_opt = (proj_rank > 0).then_some(proj_q);
-    Ok(PreparedInputs {
-        wj,
-        xj: Some(xj),
-        xjs: Some(xjs),
-        proj_u: proj_opt.clone(),
-        proj_v: proj_opt,
-        proj_rank,
-    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prepare_iv_inputs(
-    n_sites: usize,
-    m_obs: usize,
-    p: usize,
-    k_use: usize,
-    has_cons: bool,
-    uncond: bool,
-    n_endog: usize,
-    n_z_excl: usize,
-    b: &[f64],
-    bread: &[f64],
-    scores: &[f64],
-    x_raw: &[f64],
-    z_excl: &[f64],
-    cluster_id: Option<&[usize]>,
-) -> Result<PreparedInputs, String> {
-    let nx = p - usize::from(has_cons);
-    if n_endog == 0 || n_endog > nx {
-        return Err(format!("invalid n_endog={n_endog} for nx={nx}"));
-    }
-    if b.len() != p || bread.len() != p * p || scores.len() != n_sites * p {
-        return Err("internal dimension mismatch in IV score inputs".to_string());
-    }
-    if !uncond && (x_raw.len() != m_obs * nx || z_excl.len() != m_obs * n_z_excl) {
-        return Err("internal dimension mismatch in IV conditional inputs".to_string());
-    }
-    if let Some(cl) = cluster_id {
-        if cl.len() != m_obs {
-            return Err("internal dimension mismatch in cluster_id inputs".to_string());
-        }
-    } else if m_obs != n_sites {
-        return Err("m_obs must equal n_sites when unclustered".to_string());
-    }
-
-    let wj = compute_wj(n_sites, p, k_use, b, bread, scores);
-    if uncond {
-        return Ok(PreparedInputs {
-            wj,
-            xj: None,
-            xjs: None,
-            proj_u: None,
-            proj_v: None,
-            proj_rank: 0,
-        });
-    }
-
-    let mut x_full = vec![0.0; m_obs * p];
-    for i in 0..m_obs {
-        x_full[i * p..i * p + nx].copy_from_slice(&x_raw[i * nx..(i + 1) * nx]);
-        if has_cons {
-            x_full[i * p + nx] = 1.0;
-        }
-    }
-    // Scaling X changes the factors of the IV projection but preserves their
-    // product. Restore the original units only when multiplying by the bread.
-    let mut x_scales = vec![0.0_f64; p];
-    for row in x_full.chunks_exact(p) {
-        for (scale, value) in x_scales.iter_mut().zip(row) {
-            *scale = scale.max(value.abs());
-        }
-    }
-    if x_scales.contains(&0.0) {
-        return Err("IV residualizer failed: regressor space has insufficient rank".to_string());
-    }
-    for row in x_full.chunks_exact_mut(p) {
-        for (value, scale) in row.iter_mut().zip(&x_scales) {
-            *value /= scale;
-        }
-    }
-
-    let n_exog = nx - n_endog;
-    let mut z_cols = Vec::with_capacity(n_exog + n_z_excl + usize::from(has_cons));
-    for col in 0..n_exog {
-        let raw_col = n_endog + col;
-        z_cols.push((0..m_obs).map(|i| x_raw[i * nx + raw_col]).collect());
-    }
-    for col in 0..n_z_excl {
-        z_cols.push((0..m_obs).map(|i| z_excl[i * n_z_excl + col]).collect());
-    }
-    if has_cons {
-        z_cols.push(vec![1.0; m_obs]);
-    }
-    let (q_z, rank_z) = orthonormal_cols_mgs(&z_cols, m_obs, IV_RANK_TOL);
-    if rank_z < p {
-        return Err("IV residualizer failed: instrument space has insufficient rank".to_string());
-    }
-
-    // Q_z' * X_full (rank_z x p), then P_Z X = Q_z * (Q_z' * X_full) (m_obs x p)
-    let mut qzt_x = vec![0.0; rank_z * p];
-    for i in 0..m_obs {
-        let q_row = &q_z[i * rank_z..(i + 1) * rank_z];
-        let x_row = &x_full[i * p..(i + 1) * p];
-        for r in 0..rank_z {
-            let qr = q_row[r];
-            for c in 0..p {
-                qzt_x[r * p + c] += qr * x_row[c];
-            }
-        }
-    }
-    let mut pzx = vec![0.0; m_obs * p];
-    for i in 0..m_obs {
-        let q_row = &q_z[i * rank_z..(i + 1) * rank_z];
-        let p_row = &mut pzx[i * p..(i + 1) * p];
-        for r in 0..rank_z {
-            let qr = q_row[r];
-            for c in 0..p {
-                p_row[c] += qr * qzt_x[r * p + c];
-            }
-        }
-    }
-
-    // Factor C = Q_z' X directly via SVD without forming X' P_Z X, then lift
-    // (C^+)^T = U Sigma^{-1} V^T back through Q_z so V = Q_z (C^+)^T.
-    let c_pinv_t = thin_svd_pseudoinverse_t(&qzt_x, rank_z, p)?;
-    let mut proj_v = vec![0.0; m_obs * p];
-    for i in 0..m_obs {
-        let q_row = &q_z[i * rank_z..(i + 1) * rank_z];
-        let v_row = &mut proj_v[i * p..(i + 1) * p];
-        for r in 0..rank_z {
-            let qr = q_row[r];
-            for c in 0..p {
-                v_row[c] += qr * c_pinv_t[r * p + c];
-            }
-        }
-    }
-
-    let nf = n_sites as f64;
-    let mut xj_base = vec![0.0; m_obs * k_use];
-    for i in 0..m_obs {
-        let p_row = &pzx[i * p..(i + 1) * p];
-        for j in 0..k_use {
-            let bread_row = &bread[j * p..(j + 1) * p];
-            let dot: f64 = bread_row
-                .iter()
-                .zip(p_row.iter().zip(&x_scales))
-                .map(|(bread, (projected, scale))| (bread * scale) * projected)
-                .sum();
-            xj_base[i * k_use + j] = nf * dot;
-        }
-    }
-    let xjs_base = compute_xjs(n_sites, m_obs, k_use, &xj_base, cluster_id);
-
-    // IV conditional denominator weights are Xi_s' M' Xi R where M' = I - V U'.
-    Ok(PreparedInputs {
-        wj,
-        xj: Some(xj_base),
-        xjs: Some(xjs_base),
-        proj_u: Some(proj_v),
-        proj_v: Some(x_full),
-        proj_rank: p,
-    })
-}
-
-fn aggregate_cluster_inputs(
+fn cluster_coordinates(
     cl_raw: &[f64],
     coords_obs: &[f64],
-    scores_obs: &[f64],
     d: usize,
-    p: usize,
-) -> Result<(usize, Vec<usize>, Vec<f64>, Vec<f64>), String> {
+) -> Result<(usize, Vec<usize>, Vec<f64>), String> {
     let m_obs = cl_raw.len();
     if m_obs < 2 {
         return Err(format!("too few active observations ({m_obs}) for clustered SCPC"));
@@ -615,7 +141,7 @@ fn aggregate_cluster_inputs(
     let mut cluster_id = Vec::with_capacity(m_obs);
     let mut max_id = 0usize;
     for &val in cl_raw {
-        if !val.is_finite() || val < 1.0 || (val - val.round()).abs() > 0.0 {
+        if !val.is_finite() || val < 1.0 || val > m_obs as f64 || val != val.round() {
             return Err(format!("invalid cluster index '{val}' in plugin varlist"));
         }
         let g = (val as usize) - 1;
@@ -629,26 +155,20 @@ fn aggregate_cluster_inputs(
 
     let mut seen = vec![false; n_clust];
     let mut coords_cl = vec![0.0; n_clust * d];
-    let mut scores_cl = vec![0.0; n_clust * p];
     for (i, &g) in cluster_id.iter().enumerate() {
         let obs_c = &coords_obs[i * d..(i + 1) * d];
         let cl_c = &mut coords_cl[g * d..(g + 1) * d];
         if !seen[g] {
             seen[g] = true;
             cl_c.copy_from_slice(obs_c);
-            scores_cl[g * p..(g + 1) * p].copy_from_slice(&scores_obs[i * p..(i + 1) * p]);
-        } else {
-            for k in 0..d {
-                if (obs_c[k] - cl_c[k]).abs() > 1e-8 {
-                    return Err("coordinates are not constant within clusters".to_string());
-                }
-            }
+        } else if obs_c != cl_c {
+            return Err("coordinates are not constant within clusters".to_string());
         }
     }
     if seen.iter().any(|&s| !s) {
         return Err("cluster index vector contains empty clusters".to_string());
     }
-    Ok((n_clust, cluster_id, coords_cl, scores_cl))
+    Ok((n_clust, cluster_id, coords_cl))
 }
 
 struct ExactScpcArgs<'a> {
@@ -774,10 +294,34 @@ struct LoadedStataScpc {
     coords: Vec<f64>,
     b: Vec<f64>,
     cluster_id: Option<Vec<usize>>,
-    inputs: PreparedInputs,
+    n_obs: usize,
+    scores: Vec<f64>,
+    bread: Vec<f64>,
+    design: Option<StataDesign>,
 }
 
-fn load_stata_scpc_inputs(parsed: &ExactScpcArgs<'_>) -> Result<LoadedStataScpc, String> {
+impl LoadedStataScpc {
+    fn prepare_request(&self, k: usize) -> ScpcPreparation<'_> {
+        let p = self.b.len();
+        ScpcPreparation {
+            n_sites: self.n_sites,
+            n_obs: self.n_obs,
+            n_scores: p,
+            coefficients: &self.b[..k],
+            bread: &self.bread[..k * p],
+            scores: &self.scores,
+            design: self.design.as_ref().map(|v| v.x.as_slice()),
+            design_cols: self.design.as_ref().map_or(0, |_| p),
+            instruments: self.design.as_ref().and_then(|v| v.z.as_deref()),
+            instrument_cols: self.design.as_ref().map_or(0, |v| v.z_cols),
+            direction_design: None,
+            cluster_ids: self.cluster_id.as_deref(),
+            fixed_effects: None,
+        }
+    }
+}
+
+fn load_stata_scpc_inputs(parsed: &ExactScpcArgs<'_>, observation_scores: bool) -> Result<LoadedStataScpc, String> {
     let nx = parsed.p - usize::from(parsed.has_cons);
     let cl_vars = usize::from(parsed.has_cluster);
     let iv_vars = if !parsed.uncond && parsed.n_endog > 0 {
@@ -802,7 +346,7 @@ fn load_stata_scpc_inputs(parsed: &ExactScpcArgs<'_>) -> Result<LoadedStataScpc,
 
     // Read all Stata dataset variables and matrices on the calling thread before Rayon.
     let coords_obs = read_var_matrix(&obs, 1, parsed.d, "coordinates (s_*)")?;
-    let scores_obs = read_var_matrix(&obs, 1 + parsed.d, parsed.p, "scores (scpc_score*)")?;
+    let mut scores = read_var_matrix(&obs, 1 + parsed.d, parsed.p, "scores (scpc_score*)")?;
     let cl_raw = if parsed.has_cluster {
         read_var_matrix(&obs, 1 + parsed.d + parsed.p, 1, "cluster index (cl_idx)")?
     } else {
@@ -829,48 +373,38 @@ fn load_stata_scpc_inputs(parsed: &ExactScpcArgs<'_>) -> Result<LoadedStataScpc,
         Vec::new()
     };
 
-    let (n_sites, cluster_id_vec, coords, scores) = if parsed.has_cluster {
-        let (nc, cid, cc, sc) =
-            aggregate_cluster_inputs(&cl_raw, &coords_obs, &scores_obs, parsed.d, parsed.p)?;
-        (nc, Some(cid), cc, sc)
+    let (n_sites, cluster_id_vec, coords) = if parsed.has_cluster {
+        let (sites, ids, coords) = cluster_coordinates(&cl_raw, &coords_obs, parsed.d)?;
+        if !observation_scores {
+            // Older ado files repeat a cluster total on every row of the cluster.
+            let mut seen = vec![false; sites];
+            for (&g, row) in ids.iter().zip(scores.chunks_exact_mut(parsed.p)) {
+                if seen[g] {
+                    row.fill(0.0);
+                }
+                seen[g] = true;
+            }
+        }
+        (sites, Some(ids), coords)
     } else {
-        (m_obs, None, coords_obs, scores_obs)
+        (m_obs, None, coords_obs)
     };
 
     let b = read_matrix(parsed.b_mat_name, 1, parsed.p)?;
     let bread = read_matrix(parsed.bread_mat_name, parsed.p, parsed.p)?;
 
-    let inputs = if parsed.n_endog > 0 {
-        prepare_iv_inputs(
-            n_sites,
+    let design = if parsed.uncond {
+        None
+    } else {
+        Some(StataDesign::from_columns(
             m_obs,
             parsed.p,
-            parsed.k_use,
             parsed.has_cons,
-            parsed.uncond,
             parsed.n_endog,
             parsed.n_z_excl,
-            &b,
-            &bread,
-            &scores,
             &x_raw,
             &z_excl,
-            cluster_id_vec.as_deref(),
-        )?
-    } else {
-        prepare_ols_inputs(
-            n_sites,
-            m_obs,
-            parsed.p,
-            parsed.k_use,
-            parsed.has_cons,
-            parsed.uncond,
-            &b,
-            &bread,
-            &scores,
-            &x_raw,
-            cluster_id_vec.as_deref(),
-        )?
+        )?)
     };
     let metric = if parsed.latlong {
         Metric::GreatCircleFractionLatLon
@@ -884,7 +418,10 @@ fn load_stata_scpc_inputs(parsed: &ExactScpcArgs<'_>) -> Result<LoadedStataScpc,
         coords,
         b,
         cluster_id: cluster_id_vec,
-        inputs,
+        n_obs: m_obs,
+        scores,
+        bread,
+        design,
     })
 }
 
@@ -906,121 +443,24 @@ fn write_stata_scpc_outputs(parsed: &ExactScpcArgs<'_>, out: &ExactScpcOutput) -
     Ok(())
 }
 
-fn handle_exact_scpc(args: &[&str]) -> Result<(), String> {
+fn handle_exact_scpc(args: &[&str], observation_scores: bool) -> Result<(), String> {
     let parsed = ExactScpcArgs::parse(args)?;
-    let loaded = load_stata_scpc_inputs(&parsed)?;
-    let out = run_exact_scpc(&ExactScpcRequest {
-        coords: &loaded.coords,
-        n: loaded.n_sites,
-        d: parsed.d,
-        metric: loaded.metric,
-        avc: parsed.avc,
-        uncond: parsed.uncond,
-        cvs: parsed.cvs,
-        coef: &loaded.b[..parsed.k_use],
-        wj: &loaded.inputs.wj,
-        cluster_id: loaded.cluster_id.as_deref(),
-        fe_id: None,
-        xj: loaded.inputs.xj.as_deref(),
-        xjs: loaded.inputs.xjs.as_deref(),
-        proj_u: loaded.inputs.proj_u.as_deref(),
-        proj_v: loaded.inputs.proj_v.as_deref(),
-        proj_rank: loaded.inputs.proj_rank,
-        cv_tolerance: DEFAULT_CV_TOL,
-        nthreads: parsed.nthreads,
-    })
+    let loaded = load_stata_scpc_inputs(&parsed, observation_scores)?;
+    let out = run_model_scpc(
+        loaded.prepare_request(parsed.k_use),
+        &loaded.coords,
+        parsed.d,
+        loaded.metric,
+        parsed.avc,
+        parsed.cvs,
+        parsed.nthreads,
+        None,
+    )
     .map_err(format_core_error)?;
     write_stata_scpc_outputs(&parsed, &out)
 }
 
-const DEFAULT_NYSTROM_LANDMARKS: usize = 1000;
-const DEFAULT_NYSTROM_SAMPLES: usize = 20;
-const DEFAULT_NYSTROM_PAIR_COUNT: usize = 1_000_000;
-
-struct PermutedApproxInputs {
-    coords: Vec<f64>,
-    wj: Vec<f64>,
-    cluster_id: Option<Vec<usize>>,
-    xj: Option<Vec<f64>>,
-    xjs: Option<Vec<f64>>,
-    proj_u: Option<Vec<f64>>,
-    proj_v: Option<Vec<f64>>,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_permuted_approx_inputs(
-    coords: &[f64],
-    n_sites: usize,
-    d: usize,
-    metric: Metric,
-    k_use: usize,
-    uncond: bool,
-    cluster_id: Option<&[usize]>,
-    inputs: &PreparedInputs,
-) -> Result<PermutedApproxInputs, String> {
-    let (coords_norm, perm) =
-        normalize_coords(coords, n_sites, d, metric).map_err(format_core_error)?;
-    let wj = permute_rows(&inputs.wj, &perm, k_use);
-
-    if uncond {
-        return Ok(PermutedApproxInputs {
-            coords: coords_norm,
-            wj,
-            cluster_id: None,
-            xj: None,
-            xjs: None,
-            proj_u: None,
-            proj_v: None,
-        });
-    }
-
-    if let Some(cid) = cluster_id {
-        let mut inv_perm = vec![0usize; n_sites];
-        for (new_idx, &old_idx) in perm.iter().enumerate() {
-            inv_perm[old_idx] = new_idx;
-        }
-        let remapped = cid.iter().map(|&g| inv_perm[g]).collect();
-        return Ok(PermutedApproxInputs {
-            coords: coords_norm,
-            wj,
-            cluster_id: Some(remapped),
-            xj: inputs.xj.clone(),
-            xjs: inputs.xjs.clone(),
-            proj_u: inputs.proj_u.clone(),
-            proj_v: inputs.proj_v.clone(),
-        });
-    }
-
-    let xj = inputs.xj.as_deref().map(|v| permute_rows(v, &perm, k_use));
-    let xjs = inputs.xjs.as_deref().map(|v| permute_rows(v, &perm, k_use));
-    let proj_u = if inputs.proj_rank > 0 {
-        inputs
-            .proj_u
-            .as_deref()
-            .map(|v| permute_rows(v, &perm, inputs.proj_rank))
-    } else {
-        None
-    };
-    let proj_v = if inputs.proj_rank > 0 {
-        inputs
-            .proj_v
-            .as_deref()
-            .map(|v| permute_rows(v, &perm, inputs.proj_rank))
-    } else {
-        None
-    };
-    Ok(PermutedApproxInputs {
-        coords: coords_norm,
-        wj,
-        cluster_id: None,
-        xj,
-        xjs,
-        proj_u,
-        proj_v,
-    })
-}
-
-fn handle_approx_scpc(args: &[&str]) -> Result<(), String> {
+fn handle_approx_scpc(args: &[&str], observation_scores: bool) -> Result<(), String> {
     if !(20..=21).contains(&args.len()) {
         return Err(format!(
             "approx_scpc expects 20 or 21 arguments after subcommand, got {}",
@@ -1032,42 +472,17 @@ fn handle_approx_scpc(args: &[&str]) -> Result<(), String> {
         Some(raw) => parse_seed(raw)?,
         None => 1,
     };
-    let loaded = load_stata_scpc_inputs(&parsed)?;
-    let perm_inputs = prepare_permuted_approx_inputs(
+    let loaded = load_stata_scpc_inputs(&parsed, observation_scores)?;
+    match run_model_scpc(
+        loaded.prepare_request(parsed.k_use),
         &loaded.coords,
-        loaded.n_sites,
         parsed.d,
         loaded.metric,
-        parsed.k_use,
-        parsed.uncond,
-        loaded.cluster_id.as_deref(),
-        &loaded.inputs,
-    )?;
-
-    match run_approx_scpc(&ApproxScpcRequest {
-        coords: &perm_inputs.coords,
-        n: loaded.n_sites,
-        d: parsed.d,
-        metric: loaded.metric,
-        avc: parsed.avc,
-        uncond: parsed.uncond,
-        cvs: parsed.cvs,
-        coef: &loaded.b[..parsed.k_use],
-        wj: &perm_inputs.wj,
-        cluster_id: perm_inputs.cluster_id.as_deref(),
-        fe_id: None,
-        xj: perm_inputs.xj.as_deref(),
-        xjs: perm_inputs.xjs.as_deref(),
-        proj_u: perm_inputs.proj_u.as_deref(),
-        proj_v: perm_inputs.proj_v.as_deref(),
-        proj_rank: loaded.inputs.proj_rank,
-        cv_tolerance: DEFAULT_CV_TOL,
-        nthreads: parsed.nthreads,
-        seed,
-        landmarks: DEFAULT_NYSTROM_LANDMARKS,
-        samples: DEFAULT_NYSTROM_SAMPLES,
-        pair_count: DEFAULT_NYSTROM_PAIR_COUNT,
-    }) {
+        parsed.avc,
+        parsed.cvs,
+        parsed.nthreads,
+        Some(seed),
+    ) {
         Ok(out) => write_stata_scpc_outputs(&parsed, &out),
         Err(err) if err.kind() == ErrorKind::TiedEigenspace => {
             if let Some(tied_scal_name) = parsed.tied_scal_name {
@@ -1081,15 +496,48 @@ fn handle_approx_scpc(args: &[&str]) -> Result<(), String> {
     }
 }
 
+fn handle_build_info(args: &[&str]) -> Result<(), String> {
+    if args.is_empty() {
+        stata_spi::display(&format!(
+            "spatial-core {} (spec {}, {}, {}-{}, SCPC API {}, SPUR API {})\n",
+            spatial_core::VERSION, spatial_core::SPEC_VERSION, spatial_core::linalg_provider(),
+            std::env::consts::ARCH, std::env::consts::OS,
+            spatial_core::SCPC_API_VERSION, spatial_core::SPUR_API_VERSION,
+        ));
+        return Ok(());
+    }
+    if args.len() != 3 {
+        return Err(format!(
+            "build_info expected 0 or 3 scalar name arguments, got {}",
+            args.len()
+        ));
+    }
+    for (idx, name) in args.iter().enumerate() {
+        if name.trim().is_empty() {
+            return Err(format!("build_info scalar name #{idx} must not be empty"));
+        }
+    }
+    let is_accelerate = if spatial_core::linalg_provider() == "accelerate" {
+        1.0
+    } else {
+        0.0
+    };
+    save_scalar(args[0], is_accelerate)?;
+    save_scalar(args[1], spatial_core::SCPC_API_VERSION as f64)?;
+    save_scalar(args[2], spatial_core::SPUR_API_VERSION as f64)?;
+    Ok(())
+}
+
 fn dispatch(args: &[&str]) -> Result<(), String> {
     let subcmd = *args
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" | "ping_v6" | "ping_spur_v1"
+        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" | "ping_v6" | "ping_v7" | "ping_spur_v1"
         | "ping_spur_v2" | "ping_spur_v3" => Ok(()),
-        "exact_scpc" => handle_exact_scpc(&args[1..]),
-        "approx_scpc" => handle_approx_scpc(&args[1..]),
+        "build_info" => handle_build_info(&args[1..]),
+        "exact_scpc" | "model_exact_scpc" => handle_exact_scpc(&args[1..], subcmd == "model_exact_scpc"),
+        "approx_scpc" | "model_approx_scpc" => handle_approx_scpc(&args[1..], subcmd == "model_approx_scpc"),
         "spur_i0" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I0),
         "spur_i1" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I1),
         "spur_i0_resid" => {
@@ -1145,6 +593,62 @@ pub unsafe extern "C" fn rs_stata_call(argc: c_int, argv: *const *const c_char) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spatial_core::preparation::{prepare_scpc_inputs, PreparedScpcInputs};
+    use spatial_core::{run_exact_scpc, ExactScpcRequest};
+    const DEFAULT_CV_TOL: f64 = 0.001;
+
+    #[allow(clippy::too_many_arguments)]
+    fn fixture_inputs(
+        n_sites: usize,
+        n_obs: usize,
+        has_cons: bool,
+        n_endog: usize,
+        z_cols: usize,
+        b: &[f64],
+        bread: &[f64],
+        scores: &[f64],
+        raw_x: &[f64],
+        excluded: &[f64],
+        ids: Option<&[usize]>,
+    ) -> Result<PreparedScpcInputs, String> {
+        let design =
+            StataDesign::from_columns(n_obs, b.len(), has_cons, n_endog, z_cols, raw_x, excluded)?;
+        let loaded = LoadedStataScpc {
+            n_sites,
+            n_obs,
+            metric: Metric::Euclidean,
+            coords: Vec::new(),
+            b: b.to_vec(),
+            bread: bread.to_vec(),
+            scores: scores.to_vec(),
+            design: Some(design),
+            cluster_id: ids.map(<[usize]>::to_vec),
+        };
+        prepare_scpc_inputs(loaded.prepare_request(b.len())).map_err(format_core_error)
+    }
+
+    fn ols_fixture_basis(
+        x: &[f64],
+        n: usize,
+        nx: usize,
+        has_cons: bool,
+    ) -> Result<(Vec<f64>, usize), String> {
+        let p = nx + usize::from(has_cons);
+        let res = fixture_inputs(
+            n,
+            n,
+            has_cons,
+            0,
+            0,
+            &vec![0.; p],
+            &vec![0.; p * p],
+            &vec![0.; n * p],
+            x,
+            &[],
+            None,
+        )?;
+        Ok((res.proj_u.unwrap(), res.proj_rank))
+    }
 
     fn load_bench_200_csv() -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
         let path = format!(
@@ -1214,7 +718,7 @@ mod tests {
     fn orthonormal_basis_handles_cons_and_nocons() {
         let n = 4;
         let x_raw = vec![1.0, 2.0, 3.0, 4.0];
-        let (q_cons, rank_cons) = orthonormal_basis_mgs(&x_raw, n, 1, true);
+        let (q_cons, rank_cons) = ols_fixture_basis(&x_raw, n, 1, true).unwrap();
         assert_eq!(rank_cons, 2);
         // Check Q' Q == I_2
         for r1 in 0..2 {
@@ -1226,16 +730,16 @@ mod tests {
                 assert!((dot - exp).abs() < 1e-14);
             }
         }
-        let (q_nocons, rank_nocons) = orthonormal_basis_mgs(&x_raw, n, 1, false);
+        let (q_nocons, rank_nocons) = ols_fixture_basis(&x_raw, n, 1, false).unwrap();
         assert_eq!(rank_nocons, 1);
         let norm2: f64 = q_nocons.iter().map(|v| v * v).sum();
         assert!((norm2 - 1.0).abs() < 1e-14);
 
         // Intercept-only (nx = 0, has_cons = true)
-        let (q_int, rank_int) = orthonormal_basis_mgs(&[], n, 0, true);
+        let (q_int, rank_int) = ols_fixture_basis(&[], n, 0, true).unwrap();
         assert_eq!(rank_int, 1);
         for val in q_int {
-            assert!((val - 0.5).abs() < 1e-14);
+            assert!((val.abs() - 0.5).abs() < 1e-14);
         }
     }
 
@@ -1276,7 +780,7 @@ mod tests {
             }
         }
 
-        let inputs = prepare_ols_inputs(n, n, p, p, true, false, &b, &bread, &scores, &x_raw, None).unwrap();
+        let inputs = fixture_inputs(n, n, true, 0, 0, &b, &bread, &scores, &x_raw, &[], None).unwrap();
         let out_euclid = run_exact_scpc(&ExactScpcRequest {
             coords: &coords_lon_lat,
             n,
@@ -1396,19 +900,7 @@ mod tests {
                 scores_20[i * p + c] = x_design[i * p + c] * resid;
             }
         }
-        let inputs_20 = prepare_ols_inputs(
-            n_tie,
-            n_tie,
-            p,
-            p,
-            true,
-            false,
-            &b_20,
-            &bread_20,
-            &scores_20,
-            &x_raw[..n_tie * nx],
-            None,
-        )
+        let inputs_20 = fixture_inputs(n_tie, n_tie, true, 0, 0, &b_20, &bread_20, &scores_20, &x_raw[..n_tie * nx], &[], None)
         .unwrap();
         let out_20 = run_exact_scpc(&ExactScpcRequest {
             coords: &coords_lon_lat[..n_tie * 2],
@@ -1436,13 +928,13 @@ mod tests {
     }
 
     #[test]
-    fn orthonormal_basis_is_scale_invariant_and_drops_collinear_columns() {
+    fn ols_preparation_is_scale_invariant_and_rejects_collinear_selected_columns() {
         let n = 5;
         let base = [1.0, -2.0, 0.5, 3.0, -1.5];
         // Small-unit regressor 1e-12 * x and extreme tiny 1e-200 * x stay full rank with _cons.
         for scale in [1e-12, 1e-200, 1e12] {
             let x_raw: Vec<f64> = base.iter().map(|&v| v * scale).collect();
-            let (q, rank) = orthonormal_basis_mgs(&x_raw, n, 1, true);
+            let (q, rank) = ols_fixture_basis(&x_raw, n, 1, true).unwrap();
             assert_eq!(rank, 2, "scale={scale}");
             for r1 in 0..2 {
                 for r2 in 0..2 {
@@ -1453,25 +945,19 @@ mod tests {
             }
         }
 
-        // Duplicate/collinear and zero columns drop cleanly while scaled regressor remains.
-        let mut x_raw = Vec::with_capacity(n * 3);
+        let mut x_raw = Vec::new();
         for &v in &base {
             x_raw.extend_from_slice(&[1e-12 * v, 2e-12 * v, 0.0]);
         }
-        let (q, rank) = orthonormal_basis_mgs(&x_raw, n, 3, true);
-        assert_eq!(rank, 2);
-        for r1 in 0..2 {
-            for r2 in 0..2 {
-                let dot: f64 = (0..n).map(|i| q[i * 2 + r1] * q[i * 2 + r2]).sum();
-                let exp = if r1 == r2 { 1.0 } else { 0.0 };
-                assert!((dot - exp).abs() < 1e-14);
-            }
-        }
+        assert!(ols_fixture_basis(&x_raw, n, 3, true)
+            .unwrap_err()
+            .contains("rank deficient"));
     }
 
     #[test]
     fn dispatch_and_exact_scpc_args_support_v3_v4_and_cluster_flag() {
         assert!(dispatch(&["ping"]).is_ok());
+        assert!(dispatch(&["ping_v7"]).is_ok());
         assert!(dispatch(&["ping_v2"]).is_ok());
         assert!(dispatch(&["ping_v3"]).is_ok());
         assert!(dispatch(&["ping_v4"]).is_ok());
@@ -1498,17 +984,17 @@ mod tests {
         assert!(parsed18.has_cluster);
 
         // 17 args enters handle_exact_scpc and reaches plugin_var_count() check (0 under test stubs).
-        let err = handle_exact_scpc(&args17).unwrap_err();
+        let err = handle_exact_scpc(&args17, false).unwrap_err();
         assert!(err.contains("variables in plugin varlist"), "err={err}");
 
         // Wrong argument counts or invalid cluster flags fail cleanly.
-        assert!(handle_exact_scpc(&base16[..15]).is_err());
+        assert!(handle_exact_scpc(&base16[..15], false).is_err());
         let mut args18_bad = args17.clone();
         args18_bad.push("extra");
-        assert!(handle_exact_scpc(&args18_bad).is_err());
+        assert!(handle_exact_scpc(&args18_bad, false).is_err());
         let mut args19 = args18_ok.clone();
         args19.push("extra");
-        assert!(handle_exact_scpc(&args19).is_err());
+        assert!(handle_exact_scpc(&args19, false).is_err());
 
         // Empty tied scalar name or invalid avc/dims fail cleanly.
         let mut bad_tied = base16.to_vec();
@@ -1605,9 +1091,7 @@ mod tests {
             scores[i * p + 1] = x_raw[i * nx + 1] * 0.1;
             scores[i * p + 2] = 0.1;
         }
-        let inputs = prepare_iv_inputs(
-            m_obs, m_obs, p, p, true, false, 1, 1, &b, &bread, &scores, &x_raw, &z_excl, None,
-        )
+        let inputs = fixture_inputs(m_obs, m_obs, true, 1, 1, &b, &bread, &scores, &x_raw, &z_excl, None)
         .unwrap();
         let u = inputs.proj_u.as_ref().unwrap();
         let v = inputs.proj_v.as_ref().unwrap();
@@ -1664,9 +1148,7 @@ mod tests {
         let bread = [1.0, 0.0, 0.0, 1.0];
         let scores = vec![0.1; m_obs * p];
 
-        let inputs = prepare_iv_inputs(
-            m_obs, m_obs, p, p, false, false, 2, p, &b, &bread, &scores, &x_raw, &z_excl, None,
-        )
+        let inputs = fixture_inputs(m_obs, m_obs, false, 2, p, &b, &bread, &scores, &x_raw, &z_excl, None)
         .expect("ill-conditioned kappa ~ 2e7 should succeed without normal equations");
         let u = inputs.proj_u.as_ref().unwrap();
         let v = inputs.proj_v.as_ref().unwrap();
@@ -1688,9 +1170,7 @@ mod tests {
             m[p + 1] = 1.0;
             m
         };
-        let err = prepare_iv_inputs(
-            m_obs, m_obs, p, p, false, false, 2, p, &b, &bread, &scores, &x_irrel, &z_irrel, None,
-        )
+        let err = fixture_inputs(m_obs, m_obs, false, 2, p, &b, &bread, &scores, &x_irrel, &z_irrel, None)
         .err()
         .expect("irrelevant instrument must fail rank check");
         assert!(err.contains("rank deficient"), "unexpected err: {err}");
@@ -1698,9 +1178,7 @@ mod tests {
         // Case 3: Pure numerical roundoff overlap (~1e-13) must also fail 1e-10 SVD rank check
         let mut z_roundoff = z_irrel.clone();
         z_roundoff[0] = 1e-13;
-        let err_roundoff = prepare_iv_inputs(
-            m_obs, m_obs, p, p, false, false, 2, p, &b, &bread, &scores, &x_irrel, &z_roundoff, None,
-        )
+        let err_roundoff = fixture_inputs(m_obs, m_obs, false, 2, p, &b, &bread, &scores, &x_irrel, &z_roundoff, None)
         .err()
         .expect("1e-13 roundoff overlap must fail 1e-10 relative SVD check");
         assert!(
@@ -1711,23 +1189,9 @@ mod tests {
 
     #[test]
     fn iv_svd_rejects_a_uniformly_negligible_projection() {
-        for (width, projection) in [
-            (1, &[1e-16][..]),
-            (1, &[1e-310][..]),
-            (2, &[1e-13, 0.0, 0.0, 1e-13][..]),
-        ] {
-            let err = thin_svd_pseudoinverse_t(projection, width, width).unwrap_err();
-            assert!(err.contains("rank deficient"), "unexpected err: {err}");
-        }
-        let identified = thin_svd_pseudoinverse_t(&[1e-7], 1, 1).unwrap();
-        assert_eq!(identified, [1e7]);
-
-        let err = prepare_iv_inputs(
+        let err = fixture_inputs(
             3,
             3,
-            1,
-            1,
-            false,
             false,
             1,
             1,
@@ -1744,16 +1208,6 @@ mod tests {
     }
 
     #[test]
-    fn zero_unclustered_score_has_positive_sign() {
-        let x = [-3.0, 0.0, 4.0, -0.0];
-        assert_eq!(compute_xjs(4, 4, 1, &x, None), [-1.0, 1.0, 1.0, 1.0]);
-        assert_eq!(
-            compute_xjs(2, 4, 1, &x, Some(&[0, 0, 0, 1])),
-            [-0.6, 0.0, 0.8, 0.0]
-        );
-    }
-
-    #[test]
     fn approx_scpc_args_normalization_permutation_and_cluster_remapping() {
         assert!(parse_seed("1").unwrap() == 1);
         assert!(parse_seed("4294967295").unwrap() == u32::MAX);
@@ -1764,16 +1218,16 @@ mod tests {
             "2", "3", "3", "1", "0.05", "0", "0", "1", "-1", "b", "bread", "stats", "cvs", "c0",
             "cv", "q", "tied", "1", "0", "0",
         ];
-        assert!(handle_approx_scpc(&base20[..19]).is_err());
-        let err = handle_approx_scpc(&base20).unwrap_err();
+        assert!(handle_approx_scpc(&base20[..19], false).is_err());
+        let err = handle_approx_scpc(&base20, false).unwrap_err();
         assert!(err.contains("variables in plugin varlist"), "err={err}");
 
         let mut args21 = base20.to_vec();
         args21.push("7");
-        let err21 = handle_approx_scpc(&args21).unwrap_err();
+        let err21 = handle_approx_scpc(&args21, false).unwrap_err();
         assert!(err21.contains("variables in plugin varlist"), "err21={err21}");
 
-        // Synthetic clustered OLS through prepare_ols_inputs + prepare_permuted_approx_inputs
+        // Run the complete raw-model operation for a permuted, clustered design.
         let n_sites = 12usize;
         let per_cl = 3usize;
         let m_obs = n_sites * per_cl;
@@ -1787,7 +1241,7 @@ mod tests {
         }
         let mut cid = Vec::with_capacity(m_obs);
         let mut x_raw = Vec::with_capacity(m_obs);
-        let mut scores_cl = vec![0.0; n_sites * p];
+        let mut scores_obs = Vec::with_capacity(m_obs * p);
         for g in 0..n_sites {
             for r in 0..per_cl {
                 let obs_i = g * per_cl + r;
@@ -1795,77 +1249,38 @@ mod tests {
                 let u = ((obs_i + 1) as f64 * 0.73).sin() * 0.5;
                 cid.push(g);
                 x_raw.push(xv);
-                scores_cl[g * p] += u * xv;
-                scores_cl[g * p + 1] += u;
+                scores_obs.extend([u * xv, u]);
             }
         }
         let b = [1.2, 0.4];
         let bread = [1.0 / m_obs as f64, 0.0, 0.0, 1.0 / m_obs as f64];
-        let inputs = prepare_ols_inputs(
-            n_sites, m_obs, p, p, true, false, &b, &bread, &scores_cl, &x_raw, Some(&cid),
-        )
-        .unwrap();
-        let perm_cl = prepare_permuted_approx_inputs(
-            &coords_cl,
+        let design = StataDesign::from_columns(m_obs, p, true, 0, 0, &x_raw, &[]).unwrap();
+        let loaded = LoadedStataScpc {
             n_sites,
-            2,
-            Metric::GreatCircleFractionLatLon,
-            p,
-            false,
-            Some(&cid),
-            &inputs,
-        )
-        .unwrap();
-        let out_1 = run_approx_scpc(&ApproxScpcRequest {
-            coords: &perm_cl.coords,
-            n: n_sites,
-            d: 2,
+            n_obs: m_obs,
+            coords: coords_cl,
             metric: Metric::GreatCircleFractionLatLon,
-            avc: 0.1,
-            uncond: false,
-            cvs: true,
-            coef: &b,
-            wj: &perm_cl.wj,
-            cluster_id: perm_cl.cluster_id.as_deref(),
-            fe_id: None,
-            xj: perm_cl.xj.as_deref(),
-            xjs: perm_cl.xjs.as_deref(),
-            proj_u: perm_cl.proj_u.as_deref(),
-            proj_v: perm_cl.proj_v.as_deref(),
-            proj_rank: inputs.proj_rank,
-            cv_tolerance: DEFAULT_CV_TOL,
-            nthreads: Some(1),
-            seed: 5,
-            landmarks: DEFAULT_NYSTROM_LANDMARKS,
-            samples: DEFAULT_NYSTROM_SAMPLES,
-            pair_count: DEFAULT_NYSTROM_PAIR_COUNT,
-        })
-        .unwrap();
-        let out_2 = run_approx_scpc(&ApproxScpcRequest {
-            coords: &perm_cl.coords,
-            n: n_sites,
-            d: 2,
-            metric: Metric::GreatCircleFractionLatLon,
-            avc: 0.1,
-            uncond: false,
-            cvs: true,
-            coef: &b,
-            wj: &perm_cl.wj,
-            cluster_id: perm_cl.cluster_id.as_deref(),
-            fe_id: None,
-            xj: perm_cl.xj.as_deref(),
-            xjs: perm_cl.xjs.as_deref(),
-            proj_u: perm_cl.proj_u.as_deref(),
-            proj_v: perm_cl.proj_v.as_deref(),
-            proj_rank: inputs.proj_rank,
-            cv_tolerance: DEFAULT_CV_TOL,
-            nthreads: Some(2),
-            seed: 5,
-            landmarks: DEFAULT_NYSTROM_LANDMARKS,
-            samples: DEFAULT_NYSTROM_SAMPLES,
-            pair_count: DEFAULT_NYSTROM_PAIR_COUNT,
-        })
-        .unwrap();
+            b: b.to_vec(),
+            bread: bread.to_vec(),
+            cluster_id: Some(cid),
+            scores: scores_obs,
+            design: Some(design),
+        };
+        let run = |threads| {
+            run_model_scpc(
+                loaded.prepare_request(p),
+                &loaded.coords,
+                2,
+                loaded.metric,
+                0.1,
+                true,
+                Some(threads),
+                Some(5),
+            )
+            .unwrap()
+        };
+        let out_1 = run(1);
+        let out_2 = run(2);
         assert_eq!(out_1.q, out_2.q);
         for (&a, &b) in out_1.scpcstats.iter().zip(out_2.scpcstats.iter()) {
             assert!((a - b).abs() < 1e-12);

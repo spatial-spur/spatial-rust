@@ -5,15 +5,17 @@ SPUR_PLUGIN_OUT ?= ../../../spur-stata/spur_rust.plugin
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
-	PLATFORM_CFLAGS := -bundle -DSYSTEM=APPLEMAC
-	PLATFORM_LDFLAGS := -framework Accelerate -Wl,-exported_symbol,_pginit,-exported_symbol,_stata_call
+	MACOSX_DEPLOYMENT_TARGET ?= 11.0
+	export MACOSX_DEPLOYMENT_TARGET
+	PLATFORM_CFLAGS := -bundle -DSYSTEM=APPLEMAC -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)
+	PLATFORM_LDFLAGS := -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET) -framework Accelerate -Wl,-dead_strip -Wl,-exported_symbol,_pginit,-exported_symbol,_stata_call
 	ifeq ($(origin CC),default)
 		CC := clang
 	endif
 else ifeq ($(UNAME_S),Linux)
-	PLATFORM_CFLAGS := -shared -fPIC -DSYSTEM=OPUNIX
+	PLATFORM_CFLAGS := -shared -fPIC -DSYSTEM=OPUNIX -ffunction-sections -fdata-sections
 	PLATFORM_EXPORTS := c/exports.map
-	PLATFORM_LDFLAGS := -Wl,--version-script=$(PLATFORM_EXPORTS) -ldl -lm -lpthread
+	PLATFORM_LDFLAGS := -Wl,--gc-sections -Wl,--version-script=$(PLATFORM_EXPORTS) -ldl -lm -lpthread
 else
 	$(error Building the Stata plugin is supported by this Makefile on macOS and Linux)
 endif

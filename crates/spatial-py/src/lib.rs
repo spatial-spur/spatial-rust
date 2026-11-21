@@ -352,9 +352,9 @@ fn parse_scpc_inputs<'py>(
         let xj_arr = xj.as_ref().ok_or_else(|| {
             PyValueError::new_err("conditional SCPC requires xj direction matrix")
         })?;
-        let xjs_arr = xjs.as_ref().ok_or_else(|| {
-            PyValueError::new_err("conditional SCPC requires xjs scaling matrix")
-        })?;
+        let xjs_arr = xjs
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("conditional SCPC requires xjs scaling matrix"))?;
 
         let (xj_data, xj_rows, xj_cols) =
             extract_2d_row_major_f64(&require_fn, &kwargs, xj_arr, "xj")?;
@@ -430,7 +430,10 @@ fn build_scpc_result_dict<'py>(
     k_use: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let result = PyDict::new_bound(py);
-    result.set_item("scpcstats", vec_to_pyarray2(py, output.scpcstats, k_use, 6)?)?;
+    result.set_item(
+        "scpcstats",
+        vec_to_pyarray2(py, output.scpcstats, k_use, 6)?,
+    )?;
     match output.scpccvs {
         Some(cvs_data) => {
             result.set_item("scpccvs", vec_to_pyarray2(py, cvs_data, k_use, 4)?)?;
@@ -446,6 +449,121 @@ fn build_scpc_result_dict<'py>(
     result.set_item("q", output.q)?;
     result.set_item("tied", output.tied)?;
     Ok(result)
+}
+
+/// Run SCPC on fitted-model inputs. All numerical preparation and row permutations
+/// take place inside the same native call as inference.
+#[pyfunction]
+#[pyo3(signature = (coords, coef, bread, scores, avc, *, design=None, instruments=None,
+    direction_design=None, cluster_id=None, fe_id=None, latlong=false, cvs=false,
+    nthreads=None, seed=None))]
+#[allow(clippy::too_many_arguments)]
+fn run_model_scpc<'py>(
+    py: Python<'py>,
+    coords: &Bound<'py, PyAny>,
+    coef: &Bound<'py, PyAny>,
+    bread: &Bound<'py, PyAny>,
+    scores: &Bound<'py, PyAny>,
+    avc: f64,
+    design: Option<Bound<'py, PyAny>>,
+    instruments: Option<Bound<'py, PyAny>>,
+    direction_design: Option<Bound<'py, PyAny>>,
+    cluster_id: Option<Bound<'py, PyAny>>,
+    fe_id: Option<Bound<'py, PyAny>>,
+    latlong: bool,
+    cvs: bool,
+    nthreads: Option<Bound<'py, PyAny>>,
+    seed: Option<u32>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use spatial_core::preparation::{run_model_scpc as run, ScpcPreparation};
+
+    let nthreads = parse_nthreads(nthreads)?;
+    if !avc.is_finite() || avc <= 0.001 || avc >= 0.99 {
+        return Err(PyValueError::new_err(
+            "avc must lie strictly in (0.001, 0.99)",
+        ));
+    }
+    let (require, kwargs) = make_float64_kwargs(py)?;
+    let (coords, n_sites, d, metric) = parse_coords(&require, &kwargs, coords, latlong)?;
+    let coefficients = extract_1d_f64(&require, &kwargs, coef, "coef")?;
+    let k = coefficients.len();
+    let (scores, n_obs, n_scores) = extract_2d_row_major_f64(&require, &kwargs, scores, "scores")?;
+    let (bread, rows, cols) = extract_2d_row_major_f64(&require, &kwargs, bread, "bread")?;
+    if k == 0 || n_scores < k || (rows, cols) != (k, n_scores) {
+        return Err(PyValueError::new_err(
+            "scores, bread, coefficients and coordinates have incompatible dimensions",
+        ));
+    }
+    let cluster_ids = cluster_id
+        .as_ref()
+        .map(|x| extract_1d_index_id(py, &require, x, n_sites, "cluster_id", "sites"))
+        .transpose()?;
+    if cluster_ids.as_ref().map_or(n_sites, Vec::len) != n_obs {
+        return Err(PyValueError::new_err(
+            "scores must have one row per model observation",
+        ));
+    }
+    let fixed_effects = fe_id
+        .as_ref()
+        .map(|x| extract_1d_index_id(py, &require, x, n_obs, "fe_id", "observations"))
+        .transpose()?;
+    if fixed_effects.as_ref().is_some_and(|fe| fe.len() != n_obs) {
+        return Err(PyValueError::new_err(
+            "fe_id must have one entry per observation",
+        ));
+    }
+    let read_design =
+        |value: Option<Bound<'py, PyAny>>, name: &str| -> PyResult<(Option<Vec<f64>>, usize)> {
+            let Some(value) = value else {
+                return Ok((None, 0));
+            };
+            let (data, rows, cols) = extract_2d_row_major_f64(&require, &kwargs, &value, name)?;
+            if rows != n_obs || cols == 0 {
+                return Err(PyValueError::new_err(format!(
+                    "{name} must have one row per observation and at least one column",
+                )));
+            }
+            Ok((Some(data), cols))
+        };
+    let (design, design_cols) = read_design(design, "design")?;
+    let (instruments, instrument_cols) = read_design(instruments, "instruments")?;
+    let (direction_design, direction_cols) = read_design(direction_design, "direction_design")?;
+    if (direction_design.is_some() && direction_cols != n_scores)
+        || (design.is_none()
+            && (instruments.is_some() || direction_design.is_some() || fixed_effects.is_some()))
+    {
+        return Err(PyValueError::new_err(
+            "conditional model matrices have incompatible dimensions",
+        ));
+    }
+    let output = allow_threads_checked(py, || {
+        run(
+            ScpcPreparation {
+                n_sites,
+                n_obs,
+                n_scores,
+                coefficients: &coefficients,
+                bread: &bread,
+                scores: &scores,
+                design: design.as_deref(),
+                design_cols,
+                instruments: instruments.as_deref(),
+                instrument_cols,
+                direction_design: direction_design.as_deref(),
+                cluster_ids: cluster_ids.as_deref(),
+                fixed_effects: fixed_effects.as_deref(),
+            },
+            &coords,
+            d,
+            metric,
+            avc,
+            cvs,
+            nthreads,
+            seed,
+        )
+    })?
+    .map_err(map_core_err)?;
+    build_scpc_result_dict(py, output, n_sites, k)
 }
 
 #[pyfunction]
@@ -484,8 +602,8 @@ fn run_exact_scpc<'py>(
     fe_id: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let inputs = parse_scpc_inputs(
-        py, coords, coef, wj, avc, latlong, uncond, xj, xjs, proj_u, proj_v, nthreads,
-        cluster_id, fe_id,
+        py, coords, coef, wj, avc, latlong, uncond, xj, xjs, proj_u, proj_v, nthreads, cluster_id,
+        fe_id,
     )?;
     let n = inputs.n;
     let k_use = inputs.coef.len();
@@ -560,8 +678,8 @@ fn run_approx_scpc<'py>(
     pair_count: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let inputs = parse_scpc_inputs(
-        py, coords, coef, wj, avc, latlong, uncond, xj, xjs, proj_u, proj_v, nthreads,
-        cluster_id, fe_id,
+        py, coords, coef, wj, avc, latlong, uncond, xj, xjs, proj_u, proj_v, nthreads, cluster_id,
+        fe_id,
     )?;
     let n = inputs.n;
     let k_use = inputs.coef.len();
@@ -596,9 +714,7 @@ fn run_approx_scpc<'py>(
     build_scpc_result_dict(py, output, n, k_use)
 }
 
-fn make_float64_kwargs<'py>(
-    py: Python<'py>,
-) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyDict>)> {
+fn make_float64_kwargs<'py>(py: Python<'py>) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyDict>)> {
     let np_mod = py.import_bound("numpy")?;
     let require_fn = np_mod.getattr("require")?;
     let float64_dtype = np_mod.getattr("float64")?;
@@ -648,7 +764,7 @@ fn extract_y_matrix_f64<'py>(
     }
 }
 
-fn parse_spur_coords<'py>(
+fn parse_coords<'py>(
     require_fn: &Bound<'py, PyAny>,
     kwargs: &Bound<'py, PyDict>,
     coords: &Bound<'py, PyAny>,
@@ -684,7 +800,10 @@ fn build_spur_i0_dict<'py>(
     result.set_item("cvalue", vec_to_pyarray1(py, out.cvalue))?;
     result.set_item("ha_param", out.ha_param)?;
     let n_rho = out.rho_grid.len();
-    result.set_item("pvalue_mat", vec_to_pyarray2(py, out.pvalue_mat, n_rho, n_y)?)?;
+    result.set_item(
+        "pvalue_mat",
+        vec_to_pyarray2(py, out.pvalue_mat, n_rho, n_y)?,
+    )?;
     result.set_item("cvalue_mat", vec_to_pyarray2(py, out.cvalue_mat, n_rho, 3)?)?;
     result.set_item("rho_grid", vec_to_pyarray1(py, out.rho_grid))?;
     result.set_item("tied", out.tied)?;
@@ -729,7 +848,7 @@ fn run_spur_test_impl<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let nthreads_usize = parse_nthreads(nthreads)?;
     let (require_fn, kwargs) = make_float64_kwargs(py)?;
-    let (coords_vec, n, d, metric) = parse_spur_coords(&require_fn, &kwargs, coords, latlong)?;
+    let (coords_vec, n, d, metric) = parse_coords(&require_fn, &kwargs, coords, latlong)?;
     let (y_vec, _, n_y, _) = extract_y_matrix_f64(&require_fn, &kwargs, y, Some(n), "y")?;
     let (emat_vec, emat_rows, emat_cols) =
         extract_2d_row_major_f64(&require_fn, &kwargs, emat, "emat")?;
@@ -906,7 +1025,7 @@ fn run_spur_halflife<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let nthreads_usize = parse_nthreads(nthreads)?;
     let (require_fn, kwargs) = make_float64_kwargs(py)?;
-    let (coords_vec, n, d, metric) = parse_spur_coords(&require_fn, &kwargs, coords, latlong)?;
+    let (coords_vec, n, d, metric) = parse_coords(&require_fn, &kwargs, coords, latlong)?;
     let y_vec = extract_1d_f64(&require_fn, &kwargs, y, "y")?;
     if y_vec.len() != n {
         return Err(PyValueError::new_err(format!(
@@ -994,7 +1113,7 @@ fn run_spur_transform<'py>(
 
     let (coords_opt, d, metric) = match coords.as_ref() {
         Some(c_obj) => {
-            let (cv, cn, cd, cm) = parse_spur_coords(&require_fn, &kwargs, c_obj, latlong)?;
+            let (cv, cn, cd, cm) = parse_coords(&require_fn, &kwargs, c_obj, latlong)?;
             if cn != n {
                 return Err(PyValueError::new_err(format!(
                     "coords rows {cn} does not match expected n={n}"
@@ -1096,7 +1215,7 @@ fn run_spur_pipeline<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let nthreads_usize = parse_nthreads(nthreads)?;
     let (require_fn, kwargs) = make_float64_kwargs(py)?;
-    let (coords_vec, n, d, metric) = parse_spur_coords(&require_fn, &kwargs, coords, latlong)?;
+    let (coords_vec, n, d, metric) = parse_coords(&require_fn, &kwargs, coords, latlong)?;
     let y_vec = extract_1d_f64(&require_fn, &kwargs, y, "y")?;
     if y_vec.len() != n {
         return Err(PyValueError::new_err(format!(
@@ -1157,10 +1276,24 @@ fn run_spur_pipeline<'py>(
     Ok(result)
 }
 
+#[pyfunction]
+fn build_info<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    let info = PyDict::new_bound(py);
+    info.set_item("version", spatial_core::VERSION)?;
+    info.set_item("spec_version", spatial_core::SPEC_VERSION)?;
+    info.set_item("os", std::env::consts::OS)?;
+    info.set_item("arch", std::env::consts::ARCH)?;
+    info.set_item("linalg_provider", spatial_core::linalg_provider())?;
+    info.set_item("api_version", spatial_core::SCPC_API_VERSION)?;
+    info.set_item("spur_api_version", spatial_core::SPUR_API_VERSION)?;
+    Ok(info)
+}
+
 #[pymodule]
 fn spatial_spur_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("API_VERSION", 6usize)?;
-    m.add("SPUR_API_VERSION", 3usize)?;
+    m.add("API_VERSION", spatial_core::SCPC_API_VERSION)?;
+    m.add("SPUR_API_VERSION", spatial_core::SPUR_API_VERSION)?;
+    m.add("LINALG_PROVIDER", spatial_core::linalg_provider())?;
     m.add(
         "InvalidSampledCovarianceError",
         m.py().get_type_bound::<InvalidSampledCovarianceError>(),
@@ -1169,6 +1302,8 @@ fn spatial_spur_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "TiedEigenspaceError",
         m.py().get_type_bound::<TiedEigenspaceError>(),
     )?;
+    m.add_function(wrap_pyfunction!(build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(run_model_scpc, m)?)?;
     m.add_function(wrap_pyfunction!(run_exact_scpc, m)?)?;
     m.add_function(wrap_pyfunction!(run_approx_scpc, m)?)?;
     m.add_function(wrap_pyfunction!(run_spur_i0, m)?)?;

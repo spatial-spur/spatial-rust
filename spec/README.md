@@ -1,12 +1,13 @@
 # SCPC and SPUR methods specification
 
-Current version **0.3.1**. See the [version 0.3.1 record](0.3.1/README.md) for the IV rank safeguard. Earlier records remain available.
+Current version **0.3.2**. The [version 0.3.2 record](0.3.2/README.md) covers selected-design rank, fixed-effect screening, singular Gaussian tails and SPUR pipeline dispatch. Earlier records remain available.
 
 The inherited theoretical scope covers exact conditional OLS SCPC for unclustered observations and half-life inference for a scalar spatial series. This specification defines the statistical targets and records the finite-sample conventions used to reproduce particular sources. It can be read and checked independently of Rust, the host packages, and their release fixtures.
 
 | Document | Contents |
 | --- | --- |
-| [Current conventions](0.3.1/README.md) | IV numerical rank and fixed-effect projection. |
+| [Current conventions](0.3.2/README.md) | Design preparation, fixed-effect spacing, Gaussian boundaries and tied diagnostics. |
+| [Version 0.3.1 conventions](0.3.1/README.md) | IV numerical rank and fixed-effect projection. |
 | [Version 0.3.0 conventions](0.3.0/README.md) | Sampled covariance validation, unclustered score signs, SPUR pipeline samples and finite simulation. |
 | [IV projection and version 0.2.0 conventions](0.2.0/README.md) | Required transposed IV weights and adopted validation, simulation, and unit policies. |
 | [Conditional OLS SCPC](0.1.0/scpc-conditional-ols.md) | OLS coefficient and scores, spatial basis, recommended component selection, and control over both Gaussian benchmark families. |
