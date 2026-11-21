@@ -4,7 +4,8 @@ mod spur_stata;
 mod stata_spi;
 
 use spatial_core::{
-    preparation::{run_model_scpc, ScpcPreparation}, CoreError, ErrorKind, ExactScpcOutput, Metric,
+    preparation::{run_model_scpc, ScpcPreparation},
+    CoreError, ErrorKind, ExactScpcOutput, Metric,
 };
 use stata_spi::{
     active_obs, error, plugin_var_count, read_matrix, read_var_matrix, save_scalar, write_matrix,
@@ -34,7 +35,9 @@ pub(crate) fn parse_bool_flag(raw: &str, name: &str) -> Result<bool, String> {
     match raw {
         "0" => Ok(false),
         "1" => Ok(true),
-        _ => Err(format!("invalid boolean flag {name}='{raw}' (expected 0 or 1)")),
+        _ => Err(format!(
+            "invalid boolean flag {name}='{raw}' (expected 0 or 1)"
+        )),
     }
 }
 
@@ -57,7 +60,9 @@ pub(crate) fn parse_nthreads(raw: &str) -> Result<Option<usize>, String> {
     if val == -1 {
         Ok(None)
     } else if val >= 1 {
-        Ok(Some(val as usize))
+        let nthreads = Some(val as usize);
+        spatial_core::threads::validate_nthreads(nthreads).map_err(format_core_error)?;
+        Ok(nthreads)
     } else {
         Err(format!("nthreads must be -1 or >= 1, got {val}"))
     }
@@ -136,7 +141,9 @@ fn cluster_coordinates(
 ) -> Result<(usize, Vec<usize>, Vec<f64>), String> {
     let m_obs = cl_raw.len();
     if m_obs < 2 {
-        return Err(format!("too few active observations ({m_obs}) for clustered SCPC"));
+        return Err(format!(
+            "too few active observations ({m_obs}) for clustered SCPC"
+        ));
     }
     let mut cluster_id = Vec::with_capacity(m_obs);
     let mut max_id = 0usize;
@@ -154,7 +161,10 @@ fn cluster_coordinates(
     }
 
     let mut seen = vec![false; n_clust];
-    let mut coords_cl = vec![0.0; n_clust * d];
+    let n_coords = n_clust
+        .checked_mul(d)
+        .ok_or("cluster coordinate size overflow")?;
+    let mut coords_cl = vec![0.0; n_coords];
     for (i, &g) in cluster_id.iter().enumerate() {
         let obs_c = &coords_obs[i * d..(i + 1) * d];
         let cl_c = &mut coords_cl[g * d..(g + 1) * d];
@@ -237,9 +247,7 @@ impl<'a> ExactScpcArgs<'a> {
         };
 
         if d == 0 || p == 0 || k_use == 0 || k_use > p {
-            return Err(format!(
-                "invalid dimensions: d={d}, p={p}, k_use={k_use}"
-            ));
+            return Err(format!("invalid dimensions: d={d}, p={p}, k_use={k_use}"));
         }
         let nx = p - usize::from(has_cons);
         if n_endog > nx {
@@ -260,7 +268,9 @@ impl<'a> ExactScpcArgs<'a> {
             || q_scal_name.is_empty()
             || tied_scal_name.is_some_and(str::is_empty)
         {
-            return Err("matrix and scalar names passed to exact_scpc must be non-empty".to_string());
+            return Err(
+                "matrix and scalar names passed to exact_scpc must be non-empty".to_string(),
+            );
         }
 
         Ok(Self {
@@ -321,7 +331,10 @@ impl LoadedStataScpc {
     }
 }
 
-fn load_stata_scpc_inputs(parsed: &ExactScpcArgs<'_>, observation_scores: bool) -> Result<LoadedStataScpc, String> {
+fn load_stata_scpc_inputs(
+    parsed: &ExactScpcArgs<'_>,
+    observation_scores: bool,
+) -> Result<LoadedStataScpc, String> {
     let nx = parsed.p - usize::from(parsed.has_cons);
     let cl_vars = usize::from(parsed.has_cluster);
     let iv_vars = if !parsed.uncond && parsed.n_endog > 0 {
@@ -425,7 +438,10 @@ fn load_stata_scpc_inputs(parsed: &ExactScpcArgs<'_>, observation_scores: bool) 
     })
 }
 
-fn write_stata_scpc_outputs(parsed: &ExactScpcArgs<'_>, out: &ExactScpcOutput) -> Result<(), String> {
+fn write_stata_scpc_outputs(
+    parsed: &ExactScpcArgs<'_>,
+    out: &ExactScpcOutput,
+) -> Result<(), String> {
     write_matrix(parsed.stats_mat_name, parsed.k_use, 6, &out.scpcstats)?;
     if parsed.cvs {
         let cvs_mat = out
@@ -500,9 +516,13 @@ fn handle_build_info(args: &[&str]) -> Result<(), String> {
     if args.is_empty() {
         stata_spi::display(&format!(
             "spatial-core {} (spec {}, {}, {}-{}, SCPC API {}, SPUR API {})\n",
-            spatial_core::VERSION, spatial_core::SPEC_VERSION, spatial_core::linalg_provider(),
-            std::env::consts::ARCH, std::env::consts::OS,
-            spatial_core::SCPC_API_VERSION, spatial_core::SPUR_API_VERSION,
+            spatial_core::VERSION,
+            spatial_core::SPEC_VERSION,
+            spatial_core::linalg_provider(),
+            std::env::consts::ARCH,
+            std::env::consts::OS,
+            spatial_core::SCPC_API_VERSION,
+            spatial_core::SPUR_API_VERSION,
         ));
         return Ok(());
     }
@@ -533,11 +553,15 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" | "ping_v6" | "ping_v7" | "ping_spur_v1"
-        | "ping_spur_v2" | "ping_spur_v3" => Ok(()),
+        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" | "ping_v6" | "ping_v7"
+        | "ping_spur_v1" | "ping_spur_v2" | "ping_spur_v3" => Ok(()),
         "build_info" => handle_build_info(&args[1..]),
-        "exact_scpc" | "model_exact_scpc" => handle_exact_scpc(&args[1..], subcmd == "model_exact_scpc"),
-        "approx_scpc" | "model_approx_scpc" => handle_approx_scpc(&args[1..], subcmd == "model_approx_scpc"),
+        "exact_scpc" | "model_exact_scpc" => {
+            handle_exact_scpc(&args[1..], subcmd == "model_exact_scpc")
+        }
+        "approx_scpc" | "model_approx_scpc" => {
+            handle_approx_scpc(&args[1..], subcmd == "model_approx_scpc")
+        }
         "spur_i0" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I0),
         "spur_i1" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I1),
         "spur_i0_resid" => {
@@ -780,7 +804,8 @@ mod tests {
             }
         }
 
-        let inputs = fixture_inputs(n, n, true, 0, 0, &b, &bread, &scores, &x_raw, &[], None).unwrap();
+        let inputs =
+            fixture_inputs(n, n, true, 0, 0, &b, &bread, &scores, &x_raw, &[], None).unwrap();
         let out_euclid = run_exact_scpc(&ExactScpcRequest {
             coords: &coords_lon_lat,
             n,
@@ -900,7 +925,19 @@ mod tests {
                 scores_20[i * p + c] = x_design[i * p + c] * resid;
             }
         }
-        let inputs_20 = fixture_inputs(n_tie, n_tie, true, 0, 0, &b_20, &bread_20, &scores_20, &x_raw[..n_tie * nx], &[], None)
+        let inputs_20 = fixture_inputs(
+            n_tie,
+            n_tie,
+            true,
+            0,
+            0,
+            &b_20,
+            &bread_20,
+            &scores_20,
+            &x_raw[..n_tie * nx],
+            &[],
+            None,
+        )
         .unwrap();
         let out_20 = run_exact_scpc(&ExactScpcRequest {
             coords: &coords_lon_lat[..n_tie * 2],
@@ -1057,6 +1094,7 @@ mod tests {
         assert_eq!(parse_nthreads("4").unwrap(), Some(4));
         assert!(parse_nthreads("0").is_err());
         assert!(parse_nthreads("-2").is_err());
+        assert!(parse_nthreads("1025").is_err());
         assert!(!parse_bool_flag("0", "flag").unwrap());
         assert!(parse_bool_flag("1", "flag").unwrap());
         assert!(parse_bool_flag("2", "flag").is_err());
@@ -1091,7 +1129,9 @@ mod tests {
             scores[i * p + 1] = x_raw[i * nx + 1] * 0.1;
             scores[i * p + 2] = 0.1;
         }
-        let inputs = fixture_inputs(m_obs, m_obs, true, 1, 1, &b, &bread, &scores, &x_raw, &z_excl, None)
+        let inputs = fixture_inputs(
+            m_obs, m_obs, true, 1, 1, &b, &bread, &scores, &x_raw, &z_excl, None,
+        )
         .unwrap();
         let u = inputs.proj_u.as_ref().unwrap();
         let v = inputs.proj_v.as_ref().unwrap();
@@ -1148,7 +1188,9 @@ mod tests {
         let bread = [1.0, 0.0, 0.0, 1.0];
         let scores = vec![0.1; m_obs * p];
 
-        let inputs = fixture_inputs(m_obs, m_obs, false, 2, p, &b, &bread, &scores, &x_raw, &z_excl, None)
+        let inputs = fixture_inputs(
+            m_obs, m_obs, false, 2, p, &b, &bread, &scores, &x_raw, &z_excl, None,
+        )
         .expect("ill-conditioned kappa ~ 2e7 should succeed without normal equations");
         let u = inputs.proj_u.as_ref().unwrap();
         let v = inputs.proj_v.as_ref().unwrap();
@@ -1170,7 +1212,9 @@ mod tests {
             m[p + 1] = 1.0;
             m
         };
-        let err = fixture_inputs(m_obs, m_obs, false, 2, p, &b, &bread, &scores, &x_irrel, &z_irrel, None)
+        let err = fixture_inputs(
+            m_obs, m_obs, false, 2, p, &b, &bread, &scores, &x_irrel, &z_irrel, None,
+        )
         .err()
         .expect("irrelevant instrument must fail rank check");
         assert!(err.contains("rank deficient"), "unexpected err: {err}");
@@ -1178,7 +1222,19 @@ mod tests {
         // Case 3: Pure numerical roundoff overlap (~1e-13) must also fail 1e-10 SVD rank check
         let mut z_roundoff = z_irrel.clone();
         z_roundoff[0] = 1e-13;
-        let err_roundoff = fixture_inputs(m_obs, m_obs, false, 2, p, &b, &bread, &scores, &x_irrel, &z_roundoff, None)
+        let err_roundoff = fixture_inputs(
+            m_obs,
+            m_obs,
+            false,
+            2,
+            p,
+            &b,
+            &bread,
+            &scores,
+            &x_irrel,
+            &z_roundoff,
+            None,
+        )
         .err()
         .expect("1e-13 roundoff overlap must fail 1e-10 relative SVD check");
         assert!(
@@ -1225,7 +1281,10 @@ mod tests {
         let mut args21 = base20.to_vec();
         args21.push("7");
         let err21 = handle_approx_scpc(&args21, false).unwrap_err();
-        assert!(err21.contains("variables in plugin varlist"), "err21={err21}");
+        assert!(
+            err21.contains("variables in plugin varlist"),
+            "err21={err21}"
+        );
 
         // Run the complete raw-model operation for a permuted, clustered design.
         let n_sites = 12usize;

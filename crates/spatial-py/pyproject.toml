@@ -1,14 +1,15 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+requires = ["maturin>=1.9.3,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "spatial-spur-rust"
-version = "0.2.3"
+version = "0.3.0"
 description = "Shared PyO3 Rust backend for scpc-python and spur-python"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
-license = { text = "MIT" }
+license = { file = "LICENSE" }
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.txt"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",

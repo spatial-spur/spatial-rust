@@ -2,11 +2,15 @@
 
 use std::ffi::{CStr, CString};
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::os::raw::{c_char, c_double, c_int, c_uchar};
 
 pub const STATA_OK: c_int = 0;
 pub const STATA_ERR: c_int = 198;
+
+fn storable(value: f64) -> bool {
+    value.is_finite() && unsafe { st_is_missing(value) } == 0
+}
 
 #[cfg(not(test))]
 #[allow(dead_code)]
@@ -188,7 +192,9 @@ pub fn read_var_matrix(
         ));
     }
     if c_int::try_from(last_var).is_err() {
-        return Err(format!("{label} variable index {last_var} exceeds c_int range"));
+        return Err(format!(
+            "{label} variable index {last_var} exceeds c_int range"
+        ));
     }
 
     let n = obs.len();
@@ -236,8 +242,10 @@ fn matrix_dims_cstr(name: &str, c_name: &CStr) -> Result<(c_int, c_int), String>
 pub fn matrix_dims(name: &str) -> Result<(usize, usize), String> {
     let c_name = to_cstring(name, "matrix name")?;
     let (rows, cols) = matrix_dims_cstr(name, &c_name)?;
-    let rows_u = usize::try_from(rows).map_err(|_| format!("invalid row count {rows} for '{name}'"))?;
-    let cols_u = usize::try_from(cols).map_err(|_| format!("invalid col count {cols} for '{name}'"))?;
+    let rows_u =
+        usize::try_from(rows).map_err(|_| format!("invalid row count {rows} for '{name}'"))?;
+    let cols_u =
+        usize::try_from(cols).map_err(|_| format!("invalid col count {cols} for '{name}'"))?;
     Ok((rows_u, cols_u))
 }
 
@@ -249,10 +257,12 @@ pub fn read_matrix(
     expected_rows: usize,
     expected_cols: usize,
 ) -> Result<Vec<f64>, String> {
-    let expected_rows_i32 = c_int::try_from(expected_rows)
-        .map_err(|_| format!("Stata matrix '{name}' expected rows {expected_rows} exceeds i32::MAX"))?;
-    let expected_cols_i32 = c_int::try_from(expected_cols)
-        .map_err(|_| format!("Stata matrix '{name}' expected cols {expected_cols} exceeds i32::MAX"))?;
+    let expected_rows_i32 = c_int::try_from(expected_rows).map_err(|_| {
+        format!("Stata matrix '{name}' expected rows {expected_rows} exceeds i32::MAX")
+    })?;
+    let expected_cols_i32 = c_int::try_from(expected_cols).map_err(|_| {
+        format!("Stata matrix '{name}' expected cols {expected_cols} exceeds i32::MAX")
+    })?;
     let c_name = to_cstring(name, "matrix name")?;
     let (mat_rows, mat_cols) = matrix_dims_cstr(name, &c_name)?;
     if mat_rows != expected_rows_i32 || mat_cols != expected_cols_i32 {
@@ -321,17 +331,24 @@ pub fn write_var_matrix(
             obs.len()
         ));
     }
+    c_int::try_from(last_var)
+        .map_err(|_| format!("{label} output variable index exceeds c_int range"))?;
+    if obs.iter().any(|&row| row <= 0) {
+        return Err(format!(
+            "{label} output observation indices must be positive"
+        ));
+    }
+    if let Some(index) = data.iter().position(|&value| !storable(value)) {
+        return Err(format!(
+            "invalid Stata output value in {label} at obs {}, col {}",
+            obs[index / ncols],
+            index % ncols + 1
+        ));
+    }
     for (row_idx, &st_obs) in obs.iter().enumerate() {
         for col_idx in 0..ncols {
-            let var_idx = c_int::try_from(var_1based_start + col_idx)
-                .map_err(|_| format!("{label} output variable index exceeds c_int range"))?;
+            let var_idx = (var_1based_start + col_idx) as c_int;
             let val = data[row_idx * ncols + col_idx];
-            if !val.is_finite() {
-                return Err(format!(
-                    "non-finite output value in {label} at obs {st_obs}, col {}",
-                    col_idx + 1
-                ));
-            }
             let rc = unsafe { st_vstore(var_idx, st_obs, val) };
             if rc != STATA_OK {
                 return Err(format!(
@@ -348,25 +365,42 @@ pub fn read_f64_bin_file(path: &str, expected_len: usize, label: &str) -> Result
     let expected_bytes = expected_len
         .checked_mul(8)
         .ok_or_else(|| format!("{label} byte length overflow"))?;
-    let mut file = File::open(path).map_err(|e| format!("failed to open {label} file '{path}': {e}"))?;
-    let mut buf = Vec::with_capacity(expected_bytes);
-    file.read_to_end(&mut buf)
-        .map_err(|e| format!("failed to read {label} file '{path}': {e}"))?;
-    if buf.len() != expected_bytes {
+    let file =
+        File::open(path).map_err(|e| format!("failed to open {label} file '{path}': {e}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("failed to inspect {label} file '{path}': {e}"))?;
+    if !metadata.is_file() || metadata.len() != expected_bytes as u64 {
         return Err(format!(
             "{label} binary file length {} bytes does not match expected {expected_bytes} bytes",
-            buf.len()
+            metadata.len()
         ));
     }
-    let mut out = Vec::with_capacity(expected_len);
-    for (idx, chunk) in buf.chunks_exact(8).enumerate() {
-        let val = f64::from_le_bytes(chunk.try_into().expect("8-byte chunk"));
-        if !val.is_finite() {
+    let mut reader = BufReader::new(file);
+    let mut out = Vec::new();
+    out.try_reserve_exact(expected_len)
+        .map_err(|e| format!("failed to allocate {label} inputs: {e}"))?;
+    let mut chunk = [0; 8];
+    for idx in 0..expected_len {
+        reader
+            .read_exact(&mut chunk)
+            .map_err(|e| format!("failed to read {label} file '{path}': {e}"))?;
+        let val = f64::from_le_bytes(chunk);
+        if !storable(val) {
             return Err(format!(
-                "non-finite entry in {label} file at index {idx}"
+                "invalid Stata numeric entry in {label} file at index {idx}"
             ));
         }
         out.push(val);
+    }
+    if reader
+        .read(&mut chunk[..1])
+        .map_err(|e| format!("failed to read {label} file '{path}': {e}"))?
+        != 0
+    {
+        return Err(format!(
+            "unexpected trailing bytes in {label} file '{path}'"
+        ));
     }
     Ok(out)
 }
@@ -394,9 +428,9 @@ pub fn write_matrix(name: &str, rows: usize, cols: usize, data: &[f64]) -> Resul
         ));
     }
     for (idx, &val) in data.iter().enumerate() {
-        if !val.is_finite() {
+        if !storable(val) {
             return Err(format!(
-                "cannot store non-finite value into matrix '{name}'[{},{}]",
+                "cannot store non-finite or missing value into matrix '{name}'[{},{}]",
                 idx / cols + 1,
                 idx % cols + 1
             ));
@@ -435,8 +469,10 @@ pub fn write_matrix(name: &str, rows: usize, cols: usize, data: &[f64]) -> Resul
 
 /// Save a finite scalar value into a Stata scalar.
 pub fn save_scalar(name: &str, value: f64) -> Result<(), String> {
-    if !value.is_finite() {
-        return Err(format!("cannot store non-finite scalar '{name}'"));
+    if !storable(value) {
+        return Err(format!(
+            "cannot store non-finite or missing scalar '{name}'"
+        ));
     }
     let c_name = to_cstring(name, "scalar name")?;
     let rc = unsafe { st_scal_save(c_name.as_ptr(), value) };
@@ -450,8 +486,10 @@ pub fn save_scalar(name: &str, value: f64) -> Result<(), String> {
 pub fn save_scalar_or_missing(name: &str, value: Option<f64>) -> Result<(), String> {
     let raw = match value {
         Some(v) => {
-            if !v.is_finite() {
-                return Err(format!("cannot store non-finite scalar '{name}'"));
+            if !storable(v) {
+                return Err(format!(
+                    "cannot store non-finite or missing scalar '{name}'"
+                ));
             }
             v
         }

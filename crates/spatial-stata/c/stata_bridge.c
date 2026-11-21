@@ -5,6 +5,7 @@ extern int rs_stata_call(int argc, char *argv[]);
 
 STDLL stata_call(int argc, char *argv[])
 {
+    if (!_stata_) return 198;
     return rs_stata_call(argc, argv);
 }
 

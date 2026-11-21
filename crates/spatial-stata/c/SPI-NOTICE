@@ -1,0 +1,10 @@
+Stata Plug-in Interface
+=======================
+
+stplugin.c: Copyright (c) 2003, 2006, 2015 StataCorp LP
+stplugin.h: Copyright (c) 2003, 2004, 2006, 2015 StataCorp LP
+
+The files are supplied by StataCorp for building and distributing
+plugins. The SPI source and redistribution statement are available at
+https://www.stata.com/plugins/
+https://www.stata.com/statalist/archive/2007-08/msg01210.html

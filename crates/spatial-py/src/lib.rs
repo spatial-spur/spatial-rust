@@ -178,6 +178,13 @@ where
     Ok(py.allow_threads(f))
 }
 
+fn extract_integer<'py, T: FromPyObject<'py>>(value: &Bound<'py, PyAny>) -> PyResult<T> {
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err("expected an integer, received bool"));
+    }
+    value.extract()
+}
+
 fn parse_nthreads(nthreads: Option<Bound<'_, PyAny>>) -> PyResult<Option<usize>> {
     check_not_forked()?;
     let Some(obj) = nthreads else {
@@ -192,7 +199,10 @@ fn parse_nthreads(nthreads: Option<Bound<'_, PyAny>>) -> PyResult<Option<usize>>
     if val < 1 {
         return Err(PyValueError::new_err("nthreads must be >= 1"));
     }
-    Ok(Some(val as usize))
+    let count =
+        Some(usize::try_from(val).map_err(|_| PyValueError::new_err("nthreads is too large"))?);
+    spatial_core::threads::validate_nthreads(count).map_err(map_core_err)?;
+    Ok(count)
 }
 
 fn extract_1d_index_id<'py>(
@@ -473,7 +483,7 @@ fn run_model_scpc<'py>(
     latlong: bool,
     cvs: bool,
     nthreads: Option<Bound<'py, PyAny>>,
-    seed: Option<u32>,
+    #[pyo3(from_py_with = "extract_integer")] seed: Option<u32>,
 ) -> PyResult<Bound<'py, PyDict>> {
     use spatial_core::preparation::{run_model_scpc as run, ScpcPreparation};
 
@@ -672,10 +682,10 @@ fn run_approx_scpc<'py>(
     nthreads: Option<Bound<'py, PyAny>>,
     cluster_id: Option<Bound<'py, PyAny>>,
     fe_id: Option<Bound<'py, PyAny>>,
-    seed: u32,
-    landmarks: usize,
-    samples: usize,
-    pair_count: usize,
+    #[pyo3(from_py_with = "extract_integer")] seed: u32,
+    #[pyo3(from_py_with = "extract_integer")] landmarks: usize,
+    #[pyo3(from_py_with = "extract_integer")] samples: usize,
+    #[pyo3(from_py_with = "extract_integer")] pair_count: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let inputs = parse_scpc_inputs(
         py, coords, coef, wj, avc, latlong, uncond, xj, xjs, proj_u, proj_v, nthreads, cluster_id,
@@ -929,8 +939,8 @@ fn run_spur_i0<'py>(
     coords: &Bound<'py, PyAny>,
     y: &Bound<'py, PyAny>,
     emat: &Bound<'py, PyAny>,
-    q: usize,
-    nrep: usize,
+    #[pyo3(from_py_with = "extract_integer")] q: usize,
+    #[pyo3(from_py_with = "extract_integer")] nrep: usize,
     latlong: bool,
     nthreads: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -945,8 +955,8 @@ fn run_spur_i1<'py>(
     coords: &Bound<'py, PyAny>,
     y: &Bound<'py, PyAny>,
     emat: &Bound<'py, PyAny>,
-    q: usize,
-    nrep: usize,
+    #[pyo3(from_py_with = "extract_integer")] q: usize,
+    #[pyo3(from_py_with = "extract_integer")] nrep: usize,
     latlong: bool,
     nthreads: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -962,8 +972,8 @@ fn run_spur_i0_resid<'py>(
     y: &Bound<'py, PyAny>,
     x_in: &Bound<'py, PyAny>,
     emat: &Bound<'py, PyAny>,
-    q: usize,
-    nrep: usize,
+    #[pyo3(from_py_with = "extract_integer")] q: usize,
+    #[pyo3(from_py_with = "extract_integer")] nrep: usize,
     latlong: bool,
     nthreads: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -990,8 +1000,8 @@ fn run_spur_i1_resid<'py>(
     y: &Bound<'py, PyAny>,
     x_in: &Bound<'py, PyAny>,
     emat: &Bound<'py, PyAny>,
-    q: usize,
-    nrep: usize,
+    #[pyo3(from_py_with = "extract_integer")] q: usize,
+    #[pyo3(from_py_with = "extract_integer")] nrep: usize,
     latlong: bool,
     nthreads: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -1017,8 +1027,8 @@ fn run_spur_halflife<'py>(
     coords: &Bound<'py, PyAny>,
     y: &Bound<'py, PyAny>,
     emat: &Bound<'py, PyAny>,
-    q: usize,
-    nrep: usize,
+    #[pyo3(from_py_with = "extract_integer")] q: usize,
+    #[pyo3(from_py_with = "extract_integer")] nrep: usize,
     level: f64,
     latlong: bool,
     nthreads: Option<Bound<'py, PyAny>>,
@@ -1077,7 +1087,7 @@ fn run_spur_halflife<'py>(
 fn run_spur_transform<'py>(
     py: Python<'py>,
     kind: &str,
-    n: usize,
+    #[pyo3(from_py_with = "extract_integer")] n: usize,
     y: Option<Bound<'py, PyAny>>,
     coords: Option<Bound<'py, PyAny>>,
     latlong: bool,
@@ -1206,8 +1216,8 @@ fn run_spur_pipeline<'py>(
     y: &Bound<'py, PyAny>,
     x_in: &Bound<'py, PyAny>,
     emat: &Bound<'py, PyAny>,
-    q: usize,
-    nrep: usize,
+    #[pyo3(from_py_with = "extract_integer")] q: usize,
+    #[pyo3(from_py_with = "extract_integer")] nrep: usize,
     transform_vars: &Bound<'py, PyAny>,
     latlong: bool,
     demean_lbmgls: bool,
