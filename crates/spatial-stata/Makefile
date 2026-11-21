@@ -1,5 +1,6 @@
 CARGO_TARGET_DIR ?= ../../target-stata
 RUST_LIB := $(CARGO_TARGET_DIR)/release/libspatial_stata.a
+CORE_SOURCES := $(wildcard ../spatial-core/src/*.rs ../spatial-core/src/*/*.rs)
 PLUGIN_OUT ?= ../../../scpc-stata/src/scpc_rust.plugin
 SPUR_PLUGIN_OUT ?= ../../../spur-stata/spur_rust.plugin
 
@@ -31,7 +32,7 @@ all: $(PLUGIN_OUT) $(SPUR_PLUGIN_OUT)
 rust-lib:
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo build --release --offline --locked -p spatial-stata
 
-$(RUST_LIB): src/*.rs Cargo.toml ../../Cargo.toml ../../Cargo.lock ../spatial-core/Cargo.toml ../spatial-core/src/*.rs
+$(RUST_LIB): src/*.rs Cargo.toml ../../Cargo.toml ../../Cargo.lock ../spatial-core/Cargo.toml $(CORE_SOURCES)
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) cargo build --release --offline --locked -p spatial-stata
 
 # Publish only the entry points in the Stata plugin ABI.

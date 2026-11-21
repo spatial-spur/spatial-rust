@@ -3,10 +3,7 @@
 mod spur_stata;
 mod stata_spi;
 
-use spatial_core::{
-    preparation::{run_model_scpc, ScpcPreparation},
-    CoreError, ErrorKind, ExactScpcOutput, Metric,
-};
+use spatial_core::{run_model_scpc, CoreError, ErrorKind, Metric, ScpcOutput, ScpcPreparation};
 use stata_spi::{
     active_obs, error, plugin_var_count, read_matrix, read_var_matrix, save_scalar, write_matrix,
     STATA_ERR, STATA_OK,
@@ -181,7 +178,7 @@ fn cluster_coordinates(
     Ok((n_clust, cluster_id, coords_cl))
 }
 
-struct ExactScpcArgs<'a> {
+struct ModelScpcArgs<'a> {
     d: usize,
     p: usize,
     k_use: usize,
@@ -198,17 +195,17 @@ struct ExactScpcArgs<'a> {
     c0_scal_name: &'a str,
     cv_scal_name: &'a str,
     q_scal_name: &'a str,
-    tied_scal_name: Option<&'a str>,
+    tied_scal_name: &'a str,
     has_cluster: bool,
     n_endog: usize,
     n_z_excl: usize,
 }
 
-impl<'a> ExactScpcArgs<'a> {
+impl<'a> ModelScpcArgs<'a> {
     fn parse(args: &'a [&'a str]) -> Result<Self, String> {
-        if !(16..=18).contains(&args.len()) && args.len() != 20 {
+        if args.len() != 20 {
             return Err(format!(
-                "exact_scpc expects 16, 17, 18, or 20 arguments after subcommand, got {}",
+                "model_exact_scpc expects 20 arguments after subcommand, got {}",
                 args.len()
             ));
         }
@@ -232,19 +229,10 @@ impl<'a> ExactScpcArgs<'a> {
         let c0_scal_name = args[13];
         let cv_scal_name = args[14];
         let q_scal_name = args[15];
-        let tied_scal_name = args.get(16).copied();
-        let has_cluster = match args.get(17) {
-            Some(flag) => parse_bool_flag(flag, "has_cluster")?,
-            None => false,
-        };
-        let n_endog = match args.get(18) {
-            Some(raw) => parse_usize(raw, "n_endog")?,
-            None => 0,
-        };
-        let n_z_excl = match args.get(19) {
-            Some(raw) => parse_usize(raw, "n_z_excl")?,
-            None => 0,
-        };
+        let tied_scal_name = args[16];
+        let has_cluster = parse_bool_flag(args[17], "has_cluster")?;
+        let n_endog = parse_usize(args[18], "n_endog")?;
+        let n_z_excl = parse_usize(args[19], "n_z_excl")?;
 
         if d == 0 || p == 0 || k_use == 0 || k_use > p {
             return Err(format!("invalid dimensions: d={d}, p={p}, k_use={k_use}"));
@@ -266,11 +254,9 @@ impl<'a> ExactScpcArgs<'a> {
             || c0_scal_name.is_empty()
             || cv_scal_name.is_empty()
             || q_scal_name.is_empty()
-            || tied_scal_name.is_some_and(str::is_empty)
+            || tied_scal_name.is_empty()
         {
-            return Err(
-                "matrix and scalar names passed to exact_scpc must be non-empty".to_string(),
-            );
+            return Err("SCPC model matrix and scalar names must be non-empty".to_string());
         }
 
         Ok(Self {
@@ -331,10 +317,7 @@ impl LoadedStataScpc {
     }
 }
 
-fn load_stata_scpc_inputs(
-    parsed: &ExactScpcArgs<'_>,
-    observation_scores: bool,
-) -> Result<LoadedStataScpc, String> {
+fn load_stata_scpc_inputs(parsed: &ModelScpcArgs<'_>) -> Result<LoadedStataScpc, String> {
     let nx = parsed.p - usize::from(parsed.has_cons);
     let cl_vars = usize::from(parsed.has_cluster);
     let iv_vars = if !parsed.uncond && parsed.n_endog > 0 {
@@ -359,7 +342,7 @@ fn load_stata_scpc_inputs(
 
     // Read all Stata dataset variables and matrices on the calling thread before Rayon.
     let coords_obs = read_var_matrix(&obs, 1, parsed.d, "coordinates (s_*)")?;
-    let mut scores = read_var_matrix(&obs, 1 + parsed.d, parsed.p, "scores (scpc_score*)")?;
+    let scores = read_var_matrix(&obs, 1 + parsed.d, parsed.p, "scores (scpc_score*)")?;
     let cl_raw = if parsed.has_cluster {
         read_var_matrix(&obs, 1 + parsed.d + parsed.p, 1, "cluster index (cl_idx)")?
     } else {
@@ -388,16 +371,6 @@ fn load_stata_scpc_inputs(
 
     let (n_sites, cluster_id_vec, coords) = if parsed.has_cluster {
         let (sites, ids, coords) = cluster_coordinates(&cl_raw, &coords_obs, parsed.d)?;
-        if !observation_scores {
-            // Older ado files repeat a cluster total on every row of the cluster.
-            let mut seen = vec![false; sites];
-            for (&g, row) in ids.iter().zip(scores.chunks_exact_mut(parsed.p)) {
-                if seen[g] {
-                    row.fill(0.0);
-                }
-                seen[g] = true;
-            }
-        }
         (sites, Some(ids), coords)
     } else {
         (m_obs, None, coords_obs)
@@ -438,10 +411,7 @@ fn load_stata_scpc_inputs(
     })
 }
 
-fn write_stata_scpc_outputs(
-    parsed: &ExactScpcArgs<'_>,
-    out: &ExactScpcOutput,
-) -> Result<(), String> {
+fn write_stata_scpc_outputs(parsed: &ModelScpcArgs<'_>, out: &ScpcOutput) -> Result<(), String> {
     write_matrix(parsed.stats_mat_name, parsed.k_use, 6, &out.scpcstats)?;
     if parsed.cvs {
         let cvs_mat = out
@@ -453,42 +423,23 @@ fn write_stata_scpc_outputs(
     save_scalar(parsed.c0_scal_name, out.c0)?;
     save_scalar(parsed.cv_scal_name, out.cvfin)?;
     save_scalar(parsed.q_scal_name, out.q as f64)?;
-    if let Some(tied_scal_name) = parsed.tied_scal_name {
-        save_scalar(tied_scal_name, if out.tied { 1.0 } else { 0.0 })?;
-    }
-    Ok(())
+    save_scalar(parsed.tied_scal_name, if out.tied { 1.0 } else { 0.0 })
 }
 
-fn handle_exact_scpc(args: &[&str], observation_scores: bool) -> Result<(), String> {
-    let parsed = ExactScpcArgs::parse(args)?;
-    let loaded = load_stata_scpc_inputs(&parsed, observation_scores)?;
-    let out = run_model_scpc(
-        loaded.prepare_request(parsed.k_use),
-        &loaded.coords,
-        parsed.d,
-        loaded.metric,
-        parsed.avc,
-        parsed.cvs,
-        parsed.nthreads,
-        None,
-    )
-    .map_err(format_core_error)?;
-    write_stata_scpc_outputs(&parsed, &out)
-}
-
-fn handle_approx_scpc(args: &[&str], observation_scores: bool) -> Result<(), String> {
-    if !(20..=21).contains(&args.len()) {
-        return Err(format!(
-            "approx_scpc expects 20 or 21 arguments after subcommand, got {}",
-            args.len()
-        ));
-    }
-    let parsed = ExactScpcArgs::parse(&args[..20])?;
-    let seed = match args.get(20) {
-        Some(raw) => parse_seed(raw)?,
-        None => 1,
+fn handle_model_scpc(args: &[&str], approximate: bool) -> Result<(), String> {
+    let (parsed, seed) = if approximate {
+        if !(20..=21).contains(&args.len()) {
+            return Err(format!(
+                "model_approx_scpc expects 20 or 21 arguments after subcommand, got {}",
+                args.len()
+            ));
+        }
+        let seed = args.get(20).map_or(Ok(1), |raw| parse_seed(raw))?;
+        (ModelScpcArgs::parse(&args[..20])?, Some(seed))
+    } else {
+        (ModelScpcArgs::parse(args)?, None)
     };
-    let loaded = load_stata_scpc_inputs(&parsed, observation_scores)?;
+    let loaded = load_stata_scpc_inputs(&parsed)?;
     match run_model_scpc(
         loaded.prepare_request(parsed.k_use),
         &loaded.coords,
@@ -497,16 +448,11 @@ fn handle_approx_scpc(args: &[&str], observation_scores: bool) -> Result<(), Str
         parsed.avc,
         parsed.cvs,
         parsed.nthreads,
-        Some(seed),
+        seed,
     ) {
         Ok(out) => write_stata_scpc_outputs(&parsed, &out),
-        Err(err) if err.kind() == ErrorKind::TiedEigenspace => {
-            if let Some(tied_scal_name) = parsed.tied_scal_name {
-                save_scalar(tied_scal_name, 1.0)?;
-                Ok(())
-            } else {
-                Err(format_core_error(err))
-            }
+        Err(err) if approximate && err.kind() == ErrorKind::TiedEigenspace => {
+            save_scalar(parsed.tied_scal_name, 1.0)
         }
         Err(err) => Err(format_core_error(err)),
     }
@@ -553,15 +499,10 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" | "ping_v2" | "ping_v3" | "ping_v4" | "ping_v5" | "ping_v6" | "ping_v7"
-        | "ping_spur_v1" | "ping_spur_v2" | "ping_spur_v3" => Ok(()),
+        "ping" | "ping_v7" | "ping_spur_v1" | "ping_spur_v2" | "ping_spur_v3" => Ok(()),
         "build_info" => handle_build_info(&args[1..]),
-        "exact_scpc" | "model_exact_scpc" => {
-            handle_exact_scpc(&args[1..], subcmd == "model_exact_scpc")
-        }
-        "approx_scpc" | "model_approx_scpc" => {
-            handle_approx_scpc(&args[1..], subcmd == "model_approx_scpc")
-        }
+        "model_exact_scpc" => handle_model_scpc(&args[1..], false),
+        "model_approx_scpc" => handle_model_scpc(&args[1..], true),
         "spur_i0" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I0),
         "spur_i1" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I1),
         "spur_i0_resid" => {
@@ -604,11 +545,11 @@ pub unsafe extern "C" fn rs_stata_call(argc: c_int, argv: *const *const c_char) 
     match res {
         Ok(Ok(())) => STATA_OK,
         Ok(Err(msg)) => {
-            error(&format!("scpc_rust plugin error: {msg}"));
+            error(&format!("spatial Rust plugin error: {msg}"));
             STATA_ERR
         }
         Err(_) => {
-            error("scpc_rust plugin panicked unexpectedly");
+            error("spatial Rust plugin panicked unexpectedly");
             STATA_ERR
         }
     }
@@ -992,60 +933,47 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_and_exact_scpc_args_support_v3_v4_and_cluster_flag() {
-        assert!(dispatch(&["ping"]).is_ok());
-        assert!(dispatch(&["ping_v7"]).is_ok());
-        assert!(dispatch(&["ping_v2"]).is_ok());
-        assert!(dispatch(&["ping_v3"]).is_ok());
-        assert!(dispatch(&["ping_v4"]).is_ok());
+    fn dispatch_supports_only_the_model_scpc_abi() {
+        for cmd in ["ping", "ping_v7", "ping_spur_v3"] {
+            assert!(dispatch(&[cmd]).is_ok());
+        }
+        for cmd in [
+            "ping_v2",
+            "ping_v3",
+            "ping_v4",
+            "ping_v5",
+            "ping_v6",
+            "exact_scpc",
+            "approx_scpc",
+            "unknown",
+        ] {
+            assert!(dispatch(&[cmd])
+                .unwrap_err()
+                .contains("unknown spatial-stata subcommand"));
+        }
         assert!(dispatch(&[]).is_err());
-        assert!(dispatch(&["unknown"]).is_err());
 
-        let base16 = [
+        let args = [
             "2", "3", "3", "1", "0.03", "0", "0", "1", "-1", "b", "bread", "stats", "cvs", "c0",
-            "cv", "q",
+            "cv", "q", "tied", "1", "0", "0",
         ];
-        let parsed16 = ExactScpcArgs::parse(&base16).unwrap();
-        assert_eq!(parsed16.tied_scal_name, None);
-        assert!(!parsed16.has_cluster);
+        let parsed = ModelScpcArgs::parse(&args).unwrap();
+        assert_eq!(parsed.tied_scal_name, "tied");
+        assert!(parsed.has_cluster);
 
-        let mut args17 = base16.to_vec();
-        args17.push("tied");
-        let parsed17 = ExactScpcArgs::parse(&args17).unwrap();
-        assert_eq!(parsed17.tied_scal_name, Some("tied"));
-        assert!(!parsed17.has_cluster);
-
-        let mut args18_ok = args17.clone();
-        args18_ok.push("1");
-        let parsed18 = ExactScpcArgs::parse(&args18_ok).unwrap();
-        assert!(parsed18.has_cluster);
-
-        // 17 args enters handle_exact_scpc and reaches plugin_var_count() check (0 under test stubs).
-        let err = handle_exact_scpc(&args17, false).unwrap_err();
+        // Stubs expose no variables. A valid request reaches the SPI varlist check.
+        let err = handle_model_scpc(&args, false).unwrap_err();
         assert!(err.contains("variables in plugin varlist"), "err={err}");
-
-        // Wrong argument counts or invalid cluster flags fail cleanly.
-        assert!(handle_exact_scpc(&base16[..15], false).is_err());
-        let mut args18_bad = args17.clone();
-        args18_bad.push("extra");
-        assert!(handle_exact_scpc(&args18_bad, false).is_err());
-        let mut args19 = args18_ok.clone();
-        args19.push("extra");
-        assert!(handle_exact_scpc(&args19, false).is_err());
-
-        // Empty tied scalar name or invalid avc/dims fail cleanly.
-        let mut bad_tied = base16.to_vec();
-        bad_tied.push("");
-        assert!(ExactScpcArgs::parse(&bad_tied).is_err());
-
-        let mut bad_latlong = args17.clone();
-        bad_latlong[0] = "3";
+        assert!(ModelScpcArgs::parse(&args[..19]).is_err());
+        for (position, value) in [(16, ""), (17, "extra"), (4, "0.99")] {
+            let mut bad = args;
+            bad[position] = value;
+            assert!(ModelScpcArgs::parse(&bad).is_err());
+        }
+        let mut bad_latlong = args;
+        bad_latlong[0] = "1";
         bad_latlong[5] = "1";
-        assert!(ExactScpcArgs::parse(&bad_latlong).is_err());
-
-        let mut bad_avc = args17;
-        bad_avc[4] = "0.99";
-        assert!(ExactScpcArgs::parse(&bad_avc).is_err());
+        assert!(ModelScpcArgs::parse(&bad_latlong).is_err());
     }
 
     #[test]
@@ -1079,7 +1007,7 @@ mod tests {
             "internal failure: boom"
         );
 
-        let ping_cstr = std::ffi::CString::new("ping_v3").unwrap();
+        let ping_cstr = std::ffi::CString::new("ping_v7").unwrap();
         let argv_ok = [ping_cstr.as_ptr()];
         assert_eq!(unsafe { rs_stata_call(1, argv_ok.as_ptr()) }, STATA_OK);
         assert_eq!(unsafe { rs_stata_call(0, std::ptr::null()) }, STATA_ERR);
@@ -1164,8 +1092,6 @@ mod tests {
             assert_eq!(v[i * p + 1], x_raw[i * nx + 1] / expected_scales[1]);
             assert_eq!(v[i * p + 2], 1.0);
         }
-        assert!(dispatch(&["ping_v5"]).is_ok());
-        assert!(dispatch(&["ping_v6"]).is_ok());
     }
 
     #[test]
@@ -1274,13 +1200,13 @@ mod tests {
             "2", "3", "3", "1", "0.05", "0", "0", "1", "-1", "b", "bread", "stats", "cvs", "c0",
             "cv", "q", "tied", "1", "0", "0",
         ];
-        assert!(handle_approx_scpc(&base20[..19], false).is_err());
-        let err = handle_approx_scpc(&base20, false).unwrap_err();
+        assert!(handle_model_scpc(&base20[..19], true).is_err());
+        let err = handle_model_scpc(&base20, true).unwrap_err();
         assert!(err.contains("variables in plugin varlist"), "err={err}");
 
         let mut args21 = base20.to_vec();
         args21.push("7");
-        let err21 = handle_approx_scpc(&args21, false).unwrap_err();
+        let err21 = handle_model_scpc(&args21, true).unwrap_err();
         assert!(
             err21.contains("variables in plugin varlist"),
             "err21={err21}"

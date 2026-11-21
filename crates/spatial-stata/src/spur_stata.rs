@@ -12,8 +12,8 @@ use spatial_core::{
 };
 use std::collections::HashMap;
 
-/// Earth circumference in meters matching `spur-stata`'s `3.14159265359 * 6371000.009 * 2`.
-pub(crate) const STATA_CIRCUMFERENCE_M: f64 = 3.14159265359 * 6371000.009 * 2.0;
+/// SPUR host convention for converting great-circle fractions to meters.
+pub(crate) const STATA_CIRCUMFERENCE_M: f64 = 2.0 * std::f64::consts::PI * 6_371_000.009;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SpurTestFlavor {

@@ -1,12 +1,13 @@
 # SCPC and SPUR methods specification
 
-Current version **0.3.3**. See the [hardening record](0.3.3/README.md) for numerical limits and supported model conventions. Earlier records remain available.
+Current version **0.3.4**. See the [current record](0.3.4/README.md) for SPUR transformations and the SCPC model boundary. Earlier records remain available.
 
 The inherited theoretical scope covers exact conditional OLS SCPC for unclustered observations and half-life inference for a scalar spatial series. This specification defines the statistical targets and records the finite-sample conventions used to reproduce particular sources. It can be read and checked independently of Rust, the host packages, and their release fixtures.
 
 | Document | Contents |
 | --- | --- |
-| [Current conventions](0.3.3/README.md) | Gaussian tails, coordinate rescaling, varying slopes and component search. |
+| [Current conventions](0.3.4/README.md) | SPUR neighbor and geographic conventions, intercept handling and SCPC model API. |
+| [Version 0.3.3 conventions](0.3.3/README.md) | Gaussian tails, coordinate rescaling, varying slopes and component search. |
 | [Version 0.3.2 conventions](0.3.2/README.md) | Design preparation, fixed-effect spacing, Gaussian boundaries and tied diagnostics. |
 | [Version 0.3.1 conventions](0.3.1/README.md) | IV numerical rank and fixed-effect projection. |
 | [Version 0.3.0 conventions](0.3.0/README.md) | Sampled covariance validation, unclustered score signs, SPUR pipeline samples and finite simulation. |
