@@ -1,6 +1,6 @@
 # SCPC and SPUR methods specification
 
-Current version **0.3.7**. See the [current record](0.3.7/README.md) for continuous half-life inference, exact projected LBM, SPUR simulation, and tied cutoffs.
+Current version **0.3.8**. See the [current record](0.3.8/README.md) for multiscale half-life inversion, SPUR calibration with co-located sites, and fitted-design fidelity.
 
 The inherited theoretical scope covers exact conditional OLS SCPC for unclustered observations and half-life inference for a scalar spatial series. This specification defines the statistical targets and records the finite-sample conventions used to reproduce particular sources. It can be read and checked independently of Rust, the host packages, and their release fixtures.
 
@@ -8,7 +8,8 @@ Published mathematical definitions and independent accuracy checks guide package
 
 | Document | Contents |
 | --- | --- |
-| [Current conventions](0.3.7/README.md) | Continuous half-life inversion and SPUR rank inference. |
+| [Current conventions](0.3.8/README.md) | Multiscale half-life inversion, response projection, attainable SPUR calibration, and fitted SCPC designs. |
+| [Version 0.3.7 conventions](0.3.7/README.md) | Continuous half-life inversion and SPUR rank inference. |
 | [Version 0.3.6 conventions](0.3.6/README.md) | SPUR residual response projection and native methods compatibility. |
 | [Version 0.3.5 conventions](0.3.5/README.md) | Residual SPUR scope, half-life reporting, decay bracketing, SCPC variance and IV. |
 | [Version 0.3.4 conventions](0.3.4/README.md) | SPUR neighbor and geographic conventions, intercept handling and SCPC model API. |

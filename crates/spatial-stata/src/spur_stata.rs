@@ -8,12 +8,13 @@ use crate::{format_core_error, parse_bool_flag, parse_nthreads, parse_usize};
 use spatial_core::{
     run_spur_halflife, run_spur_i0, run_spur_i0_resid, run_spur_i1, run_spur_i1_resid,
     run_spur_pipeline, run_spur_transform, Metric, SpurHalfLifeRequest, SpurPipelineRequest,
-    SpurTestRequest, SpurTransformKind, SpurTransformRequest, HALF_LIFE_MAX_COMPONENTS,
+    SpurTestRequest, SpurTransformKind, SpurTransformRequest,
 };
 use std::collections::HashMap;
 
 /// SPUR host convention for converting great-circle fractions to meters.
 pub(crate) const STATA_CIRCUMFERENCE_M: f64 = 2.0 * std::f64::consts::PI * 6_371_000.009;
+const HALF_LIFE_COMPONENT_ROWS: usize = 65;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SpurTestFlavor {
@@ -185,7 +186,7 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
 
     let obs = active_obs();
     let n = obs.len();
-    if n < 5 {
+    if n < 3 {
         return Err(format!("too few active observations ({n}) for {ctx}"));
     }
 
@@ -342,6 +343,12 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
     })
     .map_err(format_core_error)?;
 
+    if out.components.len() > HALF_LIFE_COMPONENT_ROWS {
+        return Err(format!(
+            "detected {} half-life components, exceeding Stata's output capacity of {HALF_LIFE_COMPONENT_ROWS}",
+            out.components.len()
+        ));
+    }
     save_scalar(tied_scal_name, if out.tied { 1.0 } else { 0.0 })?;
     let max_dist_out = if latlong {
         out.max_dist * STATA_CIRCUMFERENCE_M
@@ -358,11 +365,11 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
         out.ci_upper.is_finite().then_some(out.ci_upper),
     )?;
     save_scalar(n_components_name, out.components.len() as f64)?;
-    let mut data = vec![f64::INFINITY; HALF_LIFE_MAX_COMPONENTS * 2];
+    let mut data = vec![f64::INFINITY; HALF_LIFE_COMPONENT_ROWS * 2];
     for (row, bounds) in data.chunks_exact_mut(2).zip(&out.components) {
         row.copy_from_slice(bounds);
     }
-    write_matrix_with_infinity(components_name, HALF_LIFE_MAX_COMPONENTS, 2, &data)
+    write_matrix_with_infinity(components_name, HALF_LIFE_COMPONENT_ROWS, 2, &data)
 }
 
 pub(crate) fn handle_spur_transform(args: &[&str]) -> Result<(), String> {
@@ -384,7 +391,6 @@ pub(crate) fn handle_spur_transform(args: &[&str]) -> Result<(), String> {
     let n_y = parse_usize(args[5], "n_y")?;
     let nthreads = parse_nthreads(args[6])?;
 
-    let metric = parse_spur_metric(d, latlong)?;
     if n_y == 0 {
         return Err("n_y must be at least 1".to_string());
     }
@@ -431,6 +437,11 @@ pub(crate) fn handle_spur_transform(args: &[&str]) -> Result<(), String> {
         }
     };
 
+    let metric = if has_cluster {
+        Metric::Euclidean
+    } else {
+        parse_spur_metric(d, latlong)?
+    };
     let cl_vars = usize::from(has_cluster);
     let expected_vars = d + cl_vars + 2 * n_y;
     let actual_vars = plugin_var_count();
@@ -442,9 +453,6 @@ pub(crate) fn handle_spur_transform(args: &[&str]) -> Result<(), String> {
 
     let obs = active_obs();
     let n = obs.len();
-    if n < 5 {
-        return Err(format!("too few active observations ({n}) for {CTX}"));
-    }
 
     let coords = read_var_matrix(&obs, 1, d, "coordinates (s_*)")?;
     let cluster_ids = if has_cluster {
@@ -456,7 +464,7 @@ pub(crate) fn handle_spur_transform(args: &[&str]) -> Result<(), String> {
     let y_in = read_var_matrix(&obs, 1 + d + cl_vars, n_y, "input variables (Y)")?;
 
     let transformed = run_spur_transform(&SpurTransformRequest {
-        coords: Some(&coords),
+        coords: (d > 0).then_some(&coords),
         n,
         d,
         metric,
@@ -520,7 +528,7 @@ pub(crate) fn handle_spur_pipeline(args: &[&str]) -> Result<(), String> {
 
     let obs = active_obs();
     let n = obs.len();
-    if n < 5 {
+    if n < 3 {
         return Err(format!("too few active observations ({n}) for {CTX}"));
     }
 
