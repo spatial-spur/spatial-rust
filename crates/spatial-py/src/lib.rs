@@ -492,6 +492,7 @@ fn build_spur_halflife_dict<'py>(
     result.set_item("max_dist", out.max_dist)?;
     result.set_item("pv_mat", vec_to_pyarray1(py, out.pv_mat))?;
     result.set_item("hl_grid_ho", vec_to_pyarray1(py, out.hl_grid_ho))?;
+    result.set_item("components", out.components)?;
     result.set_item("tied", out.tied)?;
     Ok(result)
 }
@@ -514,9 +515,9 @@ fn run_spur_test_impl<'py>(
     let (y_vec, n_y, _) = extract_y_matrix_f64(&require_fn, &kwargs, y, n, "y")?;
     let (emat_vec, emat_rows, emat_cols) =
         extract_2d_row_major_f64(&require_fn, &kwargs, emat, "emat")?;
-    if emat_rows != q || emat_cols != nrep {
+    if Some(emat_rows) != q.checked_mul(2) || emat_cols != nrep {
         return Err(PyValueError::new_err(format!(
-            "emat shape ({emat_rows}, {emat_cols}) does not match expected ({q}, {nrep})"
+            "emat shape ({emat_rows}, {emat_cols}) does not match expected (2*q, nrep) for q={q}, nrep={nrep}"
         )));
     }
     let (x_vec, k_x) = match x_in {
@@ -858,9 +859,9 @@ fn run_spur_pipeline<'py>(
     }
     let (emat_vec, emat_rows, emat_cols) =
         extract_2d_row_major_f64(&require_fn, &kwargs, emat, "emat")?;
-    if emat_rows != q || emat_cols != nrep {
+    if Some(emat_rows) != q.checked_mul(2) || emat_cols != nrep {
         return Err(PyValueError::new_err(format!(
-            "emat shape ({emat_rows}, {emat_cols}) does not match expected ({q}, {nrep})"
+            "emat shape ({emat_rows}, {emat_cols}) does not match expected (2*q, nrep) for q={q}, nrep={nrep}"
         )));
     }
     let (tr_vec, tr_rows, n_tr) =

@@ -69,7 +69,7 @@ jobs:
           import numpy as np
           import spatial_spur_rust as native
           info = native.build_info()
-          assert info['api_version'] == 7 and info['spur_api_version'] == 4
+          assert info['api_version'] == 7 and info['spur_api_version'] == 5
           assert not hasattr(native, 'run_exact_scpc') and not hasattr(native, 'run_approx_scpc')
           coords = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], dtype=np.float64)
           res = native.run_model_scpc(

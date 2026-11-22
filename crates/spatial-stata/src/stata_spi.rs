@@ -374,6 +374,26 @@ pub fn read_f64_bin_file(path: &str, expected_len: usize, label: &str) -> Result
 ///
 /// Stata SPI v3 `SF_mat_store` uses 1-based row/col indices (`1..=rows`, `1..=cols`).
 pub fn write_matrix(name: &str, rows: usize, cols: usize, data: &[f64]) -> Result<(), String> {
+    write_matrix_values(name, rows, cols, data, false)
+}
+
+/// Stata represents an unbounded endpoint or unreachable cutoff with a missing value.
+pub fn write_matrix_with_infinity(
+    name: &str,
+    rows: usize,
+    cols: usize,
+    data: &[f64],
+) -> Result<(), String> {
+    write_matrix_values(name, rows, cols, data, true)
+}
+
+fn write_matrix_values(
+    name: &str,
+    rows: usize,
+    cols: usize,
+    data: &[f64],
+    allow_infinity: bool,
+) -> Result<(), String> {
     if rows == 0 || cols == 0 {
         return Err(format!(
             "target Stata matrix '{name}' dimensions must be positive (got {rows}x{cols})"
@@ -393,7 +413,7 @@ pub fn write_matrix(name: &str, rows: usize, cols: usize, data: &[f64]) -> Resul
         ));
     }
     for (idx, &val) in data.iter().enumerate() {
-        if !storable(val) {
+        if !storable(val) && !(allow_infinity && val == f64::INFINITY) {
             return Err(format!(
                 "cannot store non-finite or missing value into matrix '{name}'[{},{}]",
                 idx / cols + 1,
@@ -421,6 +441,11 @@ pub fn write_matrix(name: &str, rows: usize, cols: usize, data: &[f64]) -> Resul
             let c_i32 = c_int::try_from(c + 1)
                 .map_err(|_| format!("Stata matrix '{name}' col index overflow"))?;
             let val = data[r * cols + c];
+            let val = if val == f64::INFINITY {
+                unsafe { st_missval() }
+            } else {
+                val
+            };
             let rc = unsafe { st_mat_store(c_name.as_ptr(), r_i32, c_i32, val) };
             if rc != STATA_OK {
                 return Err(format!(

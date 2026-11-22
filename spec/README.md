@@ -1,12 +1,16 @@
 # SCPC and SPUR methods specification
 
-Current version **0.3.5**. See the [current record](0.3.5/README.md) for estimator scope, SPUR calibration, and SCPC variance and cluster conventions. Earlier records remain available.
+Current version **0.3.7**. See the [current record](0.3.7/README.md) for continuous half-life inference, exact projected LBM, SPUR simulation, and tied cutoffs.
 
 The inherited theoretical scope covers exact conditional OLS SCPC for unclustered observations and half-life inference for a scalar spatial series. This specification defines the statistical targets and records the finite-sample conventions used to reproduce particular sources. It can be read and checked independently of Rust, the host packages, and their release fixtures.
 
+Published mathematical definitions and independent accuracy checks guide package defaults. Historical author conventions remain recorded for source comparison.
+
 | Document | Contents |
 | --- | --- |
-| [Current conventions](0.3.5/README.md) | Residual SPUR scope, half-life reporting, decay bracketing, SCPC variance and IV. |
+| [Current conventions](0.3.7/README.md) | Continuous half-life inversion and SPUR rank inference. |
+| [Version 0.3.6 conventions](0.3.6/README.md) | SPUR residual response projection and native methods compatibility. |
+| [Version 0.3.5 conventions](0.3.5/README.md) | Residual SPUR scope, half-life reporting, decay bracketing, SCPC variance and IV. |
 | [Version 0.3.4 conventions](0.3.4/README.md) | SPUR neighbor and geographic conventions, intercept handling and SCPC model API. |
 | [Version 0.3.3 conventions](0.3.3/README.md) | Gaussian tails, coordinate rescaling, varying slopes and component search. |
 | [Version 0.3.2 conventions](0.3.2/README.md) | Design preparation, fixed-effect spacing, Gaussian boundaries and tied diagnostics. |

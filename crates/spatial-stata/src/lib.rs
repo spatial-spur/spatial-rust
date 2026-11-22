@@ -475,13 +475,40 @@ fn handle_build_info(args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+fn method_version(version: &str) -> Option<[u32; 3]> {
+    let mut parts = version.split('.');
+    let result = [
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ];
+    parts.next().is_none().then_some(result)
+}
+
+fn require_spec(args: &[&str]) -> Result<(), String> {
+    let [minimum] = args else {
+        return Err("require_spec takes one minimum methods version".to_string());
+    };
+    let required = method_version(minimum).ok_or("invalid minimum methods version")?;
+    let found =
+        method_version(spatial_core::SPEC_VERSION).ok_or("invalid compiled methods version")?;
+    if found < required {
+        return Err(format!(
+            "requires methods spec {minimum} or newer, found {}",
+            spatial_core::SPEC_VERSION
+        ));
+    }
+    Ok(())
+}
+
 fn dispatch(args: &[&str]) -> Result<(), String> {
     let subcmd = *args
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" | "ping_v7" | "ping_spur_v4" => Ok(()),
+        "ping" | "ping_v7" | "ping_spur_v5" => Ok(()),
         "build_info" => handle_build_info(&args[1..]),
+        "require_spec" => require_spec(&args[1..]),
         "model_exact_scpc" => handle_model_scpc(&args[1..], false),
         "model_approx_scpc" => handle_model_scpc(&args[1..], true),
         "spur_i0" => spur_stata::handle_spur_test(&args[1..], spur_stata::SpurTestFlavor::I0),
@@ -898,6 +925,15 @@ mod tests {
         assert!(ols_fixture_basis(&x_raw, n, 3, true)
             .unwrap_err()
             .contains("rank deficient"));
+    }
+
+    #[test]
+    fn methods_version_check_uses_numeric_components() {
+        assert!(dispatch(&["require_spec", spatial_core::SPEC_VERSION]).is_ok());
+        assert!(dispatch(&["require_spec", "0.3.5"]).is_ok());
+        assert!(dispatch(&["require_spec", "999.0.0"]).is_err());
+        assert!(dispatch(&["require_spec", "0.3"]).is_err());
+        assert!(method_version("0.3.10").unwrap() > method_version("0.3.6").unwrap());
     }
 
     #[test]

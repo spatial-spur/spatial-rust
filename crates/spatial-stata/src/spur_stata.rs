@@ -2,13 +2,13 @@
 
 use crate::stata_spi::{
     active_obs, plugin_var_count, read_f64_bin_file, read_var_matrix, save_scalar,
-    save_scalar_or_missing, write_matrix, write_var_matrix,
+    save_scalar_or_missing, write_matrix, write_matrix_with_infinity, write_var_matrix,
 };
 use crate::{format_core_error, parse_bool_flag, parse_nthreads, parse_usize};
 use spatial_core::{
     run_spur_halflife, run_spur_i0, run_spur_i0_resid, run_spur_i1, run_spur_i1_resid,
     run_spur_pipeline, run_spur_transform, Metric, SpurHalfLifeRequest, SpurPipelineRequest,
-    SpurTestRequest, SpurTransformKind, SpurTransformRequest,
+    SpurTestRequest, SpurTransformKind, SpurTransformRequest, HALF_LIFE_MAX_COMPONENTS,
 };
 use std::collections::HashMap;
 
@@ -113,7 +113,11 @@ fn normalize_cluster_ids(raw: &[f64]) -> Result<Vec<usize>, String> {
         if !val.is_finite() {
             return Err("missing or non-finite cluster value".to_string());
         }
-        let key = if val == 0.0 { 0.0_f64.to_bits() } else { val.to_bits() };
+        let key = if val == 0.0 {
+            0.0_f64.to_bits()
+        } else {
+            val.to_bits()
+        };
         let next_id = map.len();
         let id = *map.entry(key).or_insert(next_id);
         ids.push(id);
@@ -157,12 +161,12 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
         return Err(format!("invalid simulation dimensions: q={q}, nrep={nrep}"));
     }
     if !flavor.is_residual() && (k_x_raw != 0 || include_intercept) {
-        return Err(format!(
-            "{ctx} requires k_x_raw=0 and include_intercept=0"
-        ));
+        return Err(format!("{ctx} requires k_x_raw=0 and include_intercept=0"));
     }
     if flavor.is_residual() && k_x_raw + usize::from(include_intercept) == 0 {
-        return Err(format!("{ctx} requires at least one regressor or intercept"));
+        return Err(format!(
+            "{ctx} requires at least one regressor or intercept"
+        ));
     }
     require_non_empty(emat_path, "emat_path", ctx)?;
     require_non_empty(cv_mat_name, "cv_mat_name", ctx)?;
@@ -198,7 +202,7 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
     } else {
         (None, 0)
     };
-    let emat = read_emat_checked(emat_path, q, nrep)?;
+    let emat = read_emat_checked(emat_path, q.checked_mul(2).ok_or("q overflow")?, nrep)?;
 
     let req = SpurTestRequest {
         coords: &coords,
@@ -259,7 +263,7 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
     };
 
     save_scalar(tied_scal_name, if summary.tied { 1.0 } else { 0.0 })?;
-    write_matrix(cv_mat_name, 3, 1, &summary.cvalue)?;
+    write_matrix_with_infinity(cv_mat_name, 3, 1, &summary.cvalue)?;
     save_scalar(stat_scal_name, summary.lr)?;
     save_scalar(p_scal_name, summary.pvalue)?;
     save_scalar(ha_scal_name, summary.ha_param)?;
@@ -268,9 +272,9 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
 
 pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
     const CTX: &str = "spur_halflife";
-    if args.len() != 11 {
+    if args.len() != 13 {
         return Err(format!(
-            "{CTX} expects 11 arguments after subcommand, got {}",
+            "{CTX} expects 13 arguments after subcommand, got {}",
             args.len()
         ));
     }
@@ -288,13 +292,17 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
     let ci_u_scal_name = args[8];
     let max_dist_scal_name = args[9];
     let tied_scal_name = args[10];
+    let components_name = args[11];
+    let n_components_name = args[12];
 
     let metric = parse_spur_metric(d, latlong)?;
     if q == 0 || nrep == 0 {
         return Err(format!("invalid simulation dimensions: q={q}, nrep={nrep}"));
     }
     if !level_pct.is_finite() || level_pct <= 0.0 || level_pct >= 100.0 {
-        return Err(format!("level must lie strictly in (0, 100), got {level_pct}"));
+        return Err(format!(
+            "level must lie strictly in (0, 100), got {level_pct}"
+        ));
     }
     require_non_empty(emat_path, "emat_path", CTX)?;
     require_non_empty(ci_l_scal_name, "ci_l_scal_name", CTX)?;
@@ -312,7 +320,7 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
 
     let obs = active_obs();
     let n = obs.len();
-    if n < 5 {
+    if n < 3 {
         return Err(format!("too few active observations ({n}) for {CTX}"));
     }
 
@@ -341,14 +349,20 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
         out.max_dist
     };
     save_scalar(max_dist_scal_name, max_dist_out)?;
-    if out.ci_lower.is_finite() && out.ci_upper.is_finite() {
-        save_scalar_or_missing(ci_l_scal_name, Some(out.ci_lower))?;
-        save_scalar_or_missing(ci_u_scal_name, Some(out.ci_upper))?;
-    } else {
-        save_scalar_or_missing(ci_l_scal_name, None)?;
-        save_scalar_or_missing(ci_u_scal_name, None)?;
+    save_scalar_or_missing(
+        ci_l_scal_name,
+        out.ci_lower.is_finite().then_some(out.ci_lower),
+    )?;
+    save_scalar_or_missing(
+        ci_u_scal_name,
+        out.ci_upper.is_finite().then_some(out.ci_upper),
+    )?;
+    save_scalar(n_components_name, out.components.len() as f64)?;
+    let mut data = vec![f64::INFINITY; HALF_LIFE_MAX_COMPONENTS * 2];
+    for (row, bounds) in data.chunks_exact_mut(2).zip(&out.components) {
+        row.copy_from_slice(bounds);
     }
-    Ok(())
+    write_matrix_with_infinity(components_name, HALF_LIFE_MAX_COMPONENTS, 2, &data)
 }
 
 pub(crate) fn handle_spur_transform(args: &[&str]) -> Result<(), String> {
@@ -512,7 +526,7 @@ pub(crate) fn handle_spur_pipeline(args: &[&str]) -> Result<(), String> {
 
     let coords = read_var_matrix(&obs, 1, d, "coordinates (s_*)")?;
     let y_and_x = read_var_matrix(&obs, 1 + d, n_vars_tr, "spur variables (depvar indepvars)")?;
-    let emat = read_emat_checked(emat_path, q, nrep)?;
+    let emat = read_emat_checked(emat_path, q.checked_mul(2).ok_or("q overflow")?, nrep)?;
 
     let k_x = k_x_raw + usize::from(include_intercept);
     let mut y = Vec::with_capacity(n);
@@ -567,7 +581,7 @@ pub(crate) fn handle_spur_pipeline(args: &[&str]) -> Result<(), String> {
     cvs.extend_from_slice(&out.i1resid.cvalue);
 
     write_matrix(diag_mat_name, 4, 3, &diag)?;
-    write_matrix(cvs_mat_name, 4, 3, &cvs)?;
+    write_matrix_with_infinity(cvs_mat_name, 4, 3, &cvs)?;
     write_var_matrix(
         &obs,
         1 + d + n_vars_tr,
@@ -584,7 +598,7 @@ mod tests {
 
     #[test]
     fn ping_and_spur_arg_validation_work() {
-        assert!(dispatch(&["ping_spur_v4"]).is_ok());
+        assert!(dispatch(&["ping_spur_v5"]).is_ok());
         for retired in ["ping_spur_v1", "ping_spur_v2", "ping_spur_v3"] {
             assert!(dispatch(&[retired]).is_err());
         }
@@ -610,34 +624,59 @@ mod tests {
 
         // Residual test with empty regressor + no intercept errors cleanly
         assert!(dispatch(&[
-            "spur_i0_resid", "2", "0", "0", "1", "15", "100", "-1", "e.bin", "cv", "st", "p", "ha",
+            "spur_i0_resid",
+            "2",
+            "0",
+            "0",
+            "1",
+            "15",
+            "100",
+            "-1",
+            "e.bin",
+            "cv",
+            "st",
+            "p",
+            "ha",
             "t"
         ])
         .is_err());
 
         // Invalid halflife level
         assert!(dispatch(&[
-            "spur_halflife", "2", "1", "15", "100", "100", "-1", "e.bin", "cil", "ciu", "md", "t"
+            "spur_halflife",
+            "2",
+            "1",
+            "15",
+            "100",
+            "100",
+            "-1",
+            "e.bin",
+            "cil",
+            "ciu",
+            "md",
+            "t"
         ])
         .is_err());
 
         // Invalid transform combinations
-        assert!(dispatch(&[
-            "spur_transform", "2", "iso", "1", "0", "0", "1", "-1"
-        ])
-        .is_err());
-        assert!(dispatch(&[
-            "spur_transform", "2", "cluster", "0", "-1", "0", "1", "-1"
-        ])
-        .is_err());
-        assert!(dispatch(&[
-            "spur_transform", "2", "bogus", "0", "-1", "0", "1", "-1"
-        ])
-        .is_err());
+        assert!(dispatch(&["spur_transform", "2", "iso", "1", "0", "0", "1", "-1"]).is_err());
+        assert!(dispatch(&["spur_transform", "2", "cluster", "0", "-1", "0", "1", "-1"]).is_err());
+        assert!(dispatch(&["spur_transform", "2", "bogus", "0", "-1", "0", "1", "-1"]).is_err());
 
         // Invalid pipeline k_x_raw=0
         assert!(dispatch(&[
-            "spur_pipeline", "2", "0", "1", "1", "15", "100", "-1", "e.bin", "d", "c", "t"
+            "spur_pipeline",
+            "2",
+            "0",
+            "1",
+            "1",
+            "15",
+            "100",
+            "-1",
+            "e.bin",
+            "d",
+            "c",
+            "t"
         ])
         .is_err());
     }
