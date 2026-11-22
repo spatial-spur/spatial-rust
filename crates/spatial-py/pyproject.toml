@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "spatial-spur-rust"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Shared PyO3 Rust backend for scpc-python and spur-python"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
