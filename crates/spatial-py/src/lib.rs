@@ -143,7 +143,7 @@ fn check_not_forked() -> PyResult<()> {
     #[cfg(unix)]
     {
         use std::sync::atomic::Ordering;
-        let parent = NATIVE_PID.load(Ordering::Relaxed);
+        let parent = NATIVE_PID.load(Ordering::Acquire);
         if parent != 0 && parent != std::process::id() {
             return Err(fork_error());
         }
@@ -157,7 +157,7 @@ fn mark_native_used() -> PyResult<()> {
         use std::sync::atomic::Ordering;
         let pid = std::process::id();
         if let Err(parent) =
-            NATIVE_PID.compare_exchange(0, pid, Ordering::Relaxed, Ordering::Relaxed)
+            NATIVE_PID.compare_exchange(0, pid, Ordering::AcqRel, Ordering::Acquire)
         {
             if parent != pid {
                 return Err(fork_error());
@@ -761,7 +761,7 @@ fn run_spur_transform<'py>(
     y: Option<Bound<'py, PyAny>>,
     coords: Option<Bound<'py, PyAny>>,
     latlong: bool,
-    radius: Option<f64>,
+    radius: Option<Bound<'py, PyAny>>,
     strict_lt: bool,
     exclude_zero_distances: bool,
     cluster_id: Option<Bound<'py, PyAny>>,
@@ -776,7 +776,11 @@ fn run_spur_transform<'py>(
             exclude_zero_distances,
         },
         "iso" => {
-            let r = radius.ok_or_else(|| PyValueError::new_err("iso requires radius"))?;
+            let r_obj = radius.ok_or_else(|| PyValueError::new_err("iso requires radius"))?;
+            if r_obj.is_instance_of::<PyBool>() {
+                return Err(PyTypeError::new_err("radius must be a float, not bool"));
+            }
+            let r: f64 = r_obj.extract()?;
             SpurTransformKind::Iso {
                 radius: r,
                 strict_lt,

@@ -8,7 +8,7 @@ version = "0.3.0"
 description = "Shared PyO3 Rust backend for scpc-python and spur-python"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
-license = { file = "LICENSE" }
+license = "MIT"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.txt"]
 classifiers = [
     "Programming Language :: Rust",

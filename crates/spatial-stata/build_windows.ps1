@@ -18,28 +18,50 @@ if ($env:VSCMD_ARG_TGT_ARCH -ne 'x64') {
     Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
 }
 
+$cargoArgs = @('rustc', '--color', 'never', '--release', '--locked', '--target', $target, '--target-dir', $targetDir, '--lib')
+if ($env:CARGO_NET_OFFLINE -eq 'true') {
+    $cargoArgs += '--offline'
+}
+$cargoArgs += @('--', '--print', 'native-static-libs')
+
+$rustArchive = Join-Path $targetDir "$target/release/spatial_stata.lib"
+$libraryPrefix = 'note: native-static-libs: '
+$libraryLine = $null
+
 Push-Location $PSScriptRoot
 try {
     # Ask rustc for the system libraries required by this toolchain's static archive.
-    $build = & cargo rustc --color never --release --locked --offline --target $target --target-dir $targetDir --lib -- --print native-static-libs 2>&1
-    $build | ForEach-Object { Write-Host $_ }
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Building the Stata Rust archive failed.'
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $build = & cargo @cargoArgs 2>&1
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevPref
+        $build | ForEach-Object { Write-Host $_ }
+        if ($exitCode -ne 0) {
+            throw 'Building the Stata Rust archive failed.'
+        }
+        $libraryLine = $build | ForEach-Object { "$_" } | Where-Object { $_.StartsWith($libraryPrefix) } | Select-Object -Last 1
+        if ($libraryLine) {
+            break
+        }
+        # If the archive was already fresh, remove it so the second invocation prints native-static-libs.
+        if ($attempt -eq 0 -and (Test-Path $rustArchive)) {
+            Remove-Item $rustArchive -Force
+        }
     }
 } finally {
     Pop-Location
 }
 
-$libraryPrefix = 'note: native-static-libs: '
-$libraryLine = $build | ForEach-Object { "$_" } | Where-Object { $_.StartsWith($libraryPrefix) } | Select-Object -Last 1
 if (-not $libraryLine) {
     throw 'Rust did not report the libraries required to link the Stata plugin.'
 }
 $libraries = $libraryLine.Substring($libraryPrefix.Length).Trim() -split '\s+'
-$rustArchive = Join-Path $targetDir "$target/release/spatial_stata.lib"
 $source = Join-Path $PSScriptRoot 'c'
+$tmpLinkDir = (New-Item -ItemType Directory -Force -Path (Join-Path $targetDir 'win-link-tmp')).FullName
 
-Push-Location $output
+Push-Location $tmpLinkDir
 try {
     & cl.exe /nologo /LD /MD /O2 /DSYSTEM=STWIN32 "/I$source" "$source/stplugin.c" "$source/stata_bridge.c" $rustArchive @libraries /Fe:scpc_rust.plugin
     if ($LASTEXITCODE -ne 0) {
@@ -52,7 +74,8 @@ try {
     if ($LASTEXITCODE -ne 0 -or ($exportedNames -join ' ') -ne 'pginit stata_call') {
         throw 'The Stata plugin must export pginit and stata_call.'
     }
-    Copy-Item scpc_rust.plugin spur_rust.plugin -Force
+    Copy-Item scpc_rust.plugin (Join-Path $output 'scpc_rust.plugin') -Force
+    Copy-Item scpc_rust.plugin (Join-Path $output 'spur_rust.plugin') -Force
 } finally {
     Pop-Location
 }

@@ -32,13 +32,17 @@ output_dir="$(cd "$orig_pwd" && cd "$2" && pwd)"
 
 (
   cd "$staging/$package/src/rust"
-  if cargo vendor --offline --locked vendor > vendor-config.toml 2>/dev/null; then
+  if ! command -v cargo-vendor-filterer >/dev/null 2>&1; then
+    echo "cargo-vendor-filterer is required to build < 5 MB CRAN source archives. Install with: cargo install --locked cargo-vendor-filterer" >&2
+    exit 1
+  fi
+  if cargo vendor-filterer --offline vendor > vendor-config.toml 2>/dev/null; then
     :
   else
-    cargo vendor --locked vendor > vendor-config.toml
+    cargo vendor-filterer vendor > vendor-config.toml
   fi
 
-  # Package the complete locked registry sources, including their original checksums.
+  # Package filtered locked registry sources (platform-reachable targets only) to keep archives < 5 MB.
   if [[ "$(tar --version)" == bsdtar* ]]; then
     if command -v xz >/dev/null 2>&1; then
       COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -cf - vendor | xz -9e > vendor.tar.xz
@@ -56,3 +60,10 @@ output_dir="$(cd "$orig_pwd" && cd "$2" && pwd)"
 )
 cd "$output_dir"
 R CMD build --no-build-vignettes "$staging/$package"
+tarball="$(ls -t "${output_dir}/${package}_"*.tar.gz | head -n 1)"
+tarball_bytes="$(wc -c < "$tarball" | tr -d '[:space:]')"
+echo "Built ${tarball} (${tarball_bytes} bytes)"
+if [[ "$tarball_bytes" -ge 5000000 ]]; then
+  echo "ERROR: ${tarball} is ${tarball_bytes} bytes (>= 5000000-byte CRAN threshold)" >&2
+  exit 1
+fi
