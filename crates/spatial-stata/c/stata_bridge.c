@@ -29,16 +29,6 @@ ST_int st_in2(void)
     return SF_in2();
 }
 
-ST_int st_nobs(void)
-{
-    return SF_nobs();
-}
-
-ST_int st_nvar(void)
-{
-    return SF_nvar();
-}
-
 ST_int st_nvars(void)
 {
     return SF_nvars();

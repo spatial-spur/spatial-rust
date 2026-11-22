@@ -380,26 +380,23 @@ pub(crate) fn handle_spur_transform(args: &[&str]) -> Result<(), String> {
             if has_cluster {
                 return Err("has_cluster=1 is only allowed for cluster transform".to_string());
             }
-            SpurTransformKind::Nn {
-                exclude_zero_distances: true,
-            }
+            SpurTransformKind::Nn
         }
         "iso" => {
             if has_cluster {
                 return Err("has_cluster=1 is only allowed for cluster transform".to_string());
             }
             if !radius.is_finite() || radius <= 0.0 {
-                return Err(format!("iso radius must be positive and finite, got {radius}"));
+                return Err(format!(
+                    "iso radius must be positive and finite, got {radius}"
+                ));
             }
             let eff_radius = if latlong {
                 radius / STATA_CIRCUMFERENCE_M
             } else {
                 radius
             };
-            SpurTransformKind::Iso {
-                radius: eff_radius,
-                strict_lt: false,
-            }
+            SpurTransformKind::Iso { radius: eff_radius }
         }
         "cluster" => {
             if !has_cluster {
@@ -444,30 +441,24 @@ pub(crate) fn handle_spur_transform(args: &[&str]) -> Result<(), String> {
     };
     let y_in = read_var_matrix(&obs, 1 + d + cl_vars, n_y, "input variables (Y)")?;
 
-    let out = run_spur_transform(&SpurTransformRequest {
+    let transformed = run_spur_transform(&SpurTransformRequest {
         coords: Some(&coords),
         n,
         d,
         metric,
         kind,
         cluster_id: cluster_ids.as_deref(),
-        y: Some(&y_in),
+        y: &y_in,
         n_y,
-        return_matrix: false,
-        demean_lbmgls: true,
         nthreads,
     })
     .map_err(format_core_error)?;
 
-    let transformed = out
-        .transformed
-        .as_deref()
-        .ok_or_else(|| "missing transformed vector output".to_string())?;
     write_var_matrix(
         &obs,
         1 + d + cl_vars + n_y,
         n_y,
-        transformed,
+        &transformed,
         "transformed variables",
     )
 }
@@ -548,7 +539,6 @@ pub(crate) fn handle_spur_pipeline(args: &[&str]) -> Result<(), String> {
         nrep,
         transform_vars: &y_and_x,
         n_transform_vars: n_vars_tr,
-        demean_lbmgls: true,
         nthreads,
     })
     .map_err(format_core_error)?;
@@ -594,9 +584,10 @@ mod tests {
 
     #[test]
     fn ping_and_spur_arg_validation_work() {
-        assert!(dispatch(&["ping_spur_v1"]).is_ok());
-        assert!(dispatch(&["ping_spur_v2"]).is_ok());
-        assert!(dispatch(&["ping_spur_v3"]).is_ok());
+        assert!(dispatch(&["ping_spur_v4"]).is_ok());
+        for retired in ["ping_spur_v1", "ping_spur_v2", "ping_spur_v3"] {
+            assert!(dispatch(&[retired]).is_err());
+        }
 
         // Wrong arity errors cleanly
         assert!(dispatch(&["spur_i0", "2"]).is_err());

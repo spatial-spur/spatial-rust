@@ -1,7 +1,7 @@
-use numpy::ndarray::{Array1, Array2};
+use numpy::ndarray::{Array1, Array2, Dimension};
 use numpy::{
-    IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
-    PyUntypedArrayMethods,
+    IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray, PyReadonlyArray1,
+    PyReadonlyArray2, PyReadonlyArrayDyn, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::marker::Ungil;
@@ -56,6 +56,29 @@ fn require_c_aligned_f64<'py>(
     require_fn.call((obj,), Some(kwargs))
 }
 
+fn copy_finite_f64<D: Dimension>(
+    arr: &PyReadonlyArray<'_, f64, D>,
+    name: &str,
+) -> PyResult<Vec<f64>> {
+    if arr.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !arr.is_c_contiguous() || (arr.data() as usize) % align_of::<f64>() != 0 {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be aligned and C-contiguous"
+        )));
+    }
+    let data = arr
+        .as_slice()
+        .map_err(|_| PyValueError::new_err(format!("{name} must be C-contiguous")))?;
+    if data.iter().any(|v| !v.is_finite()) {
+        return Err(PyValueError::new_err(format!(
+            "{name} must contain only finite values"
+        )));
+    }
+    Ok(data.to_vec())
+}
+
 fn extract_1d_f64<'py>(
     require_fn: &Bound<'py, PyAny>,
     kwargs: &Bound<'py, PyDict>,
@@ -64,24 +87,7 @@ fn extract_1d_f64<'py>(
 ) -> PyResult<Vec<f64>> {
     let aligned = require_c_aligned_f64(require_fn, kwargs, obj, name)?;
     let arr: PyReadonlyArray1<'py, f64> = aligned.extract()?;
-    let data = if arr.is_empty() {
-        Vec::new()
-    } else {
-        if !arr.is_c_contiguous() || (arr.data() as usize) % align_of::<f64>() != 0 {
-            return Err(PyValueError::new_err(format!(
-                "{name} must be aligned and C-contiguous"
-            )));
-        }
-        arr.as_slice()
-            .map_err(|_| PyValueError::new_err(format!("{name} must be C-contiguous")))?
-            .to_vec()
-    };
-    if data.iter().any(|v| !v.is_finite()) {
-        return Err(PyValueError::new_err(format!(
-            "{name} must contain only finite values"
-        )));
-    }
-    Ok(data)
+    copy_finite_f64(&arr, name)
 }
 
 fn extract_2d_row_major_f64<'py>(
@@ -94,24 +100,7 @@ fn extract_2d_row_major_f64<'py>(
     let arr: PyReadonlyArray2<'py, f64> = aligned.extract()?;
     let shape = arr.shape();
     let (rows, cols) = (shape[0], shape[1]);
-    let data = if arr.is_empty() {
-        Vec::new()
-    } else {
-        if !arr.is_c_contiguous() || (arr.data() as usize) % align_of::<f64>() != 0 {
-            return Err(PyValueError::new_err(format!(
-                "{name} must be aligned and C-contiguous"
-            )));
-        }
-        arr.as_slice()
-            .map_err(|_| PyValueError::new_err(format!("{name} must be C-contiguous")))?
-            .to_vec()
-    };
-    if data.iter().any(|v| !v.is_finite()) {
-        return Err(PyValueError::new_err(format!(
-            "{name} must contain only finite values"
-        )));
-    }
-    Ok((data, rows, cols))
+    Ok((copy_finite_f64(&arr, name)?, rows, cols))
 }
 
 fn vec_to_pyarray1<'py>(py: Python<'py>, data: Vec<f64>) -> Bound<'py, PyArray1<f64>> {
@@ -409,34 +398,27 @@ fn extract_y_matrix_f64<'py>(
     require_fn: &Bound<'py, PyAny>,
     kwargs: &Bound<'py, PyDict>,
     obj: &Bound<'py, PyAny>,
-    expected_n: Option<usize>,
+    expected_n: usize,
     name: &str,
-) -> PyResult<(Vec<f64>, usize, usize, bool)> {
+) -> PyResult<(Vec<f64>, usize, bool)> {
     let aligned = require_c_aligned_f64(require_fn, kwargs, obj, name)?;
-    let ndim: usize = aligned.getattr("ndim")?.extract()?;
-    match ndim {
-        1 => {
-            let v = extract_1d_f64(require_fn, kwargs, &aligned, name)?;
-            let n = v.len();
-            if let Some(exp) = expected_n {
-                if n != exp {
-                    return Err(PyValueError::new_err(format!(
-                        "{name} length {n} does not match expected {exp}"
-                    )));
-                }
+    let arr: PyReadonlyArrayDyn<'py, f64> = aligned.extract()?;
+    match *arr.shape() {
+        [n] => {
+            if n != expected_n {
+                return Err(PyValueError::new_err(format!(
+                    "{name} length {n} does not match expected {expected_n}"
+                )));
             }
-            Ok((v, n, 1, true))
+            Ok((copy_finite_f64(&arr, name)?, 1, true))
         }
-        2 => {
-            let (v, rows, cols) = extract_2d_row_major_f64(require_fn, kwargs, &aligned, name)?;
-            if let Some(exp) = expected_n {
-                if rows != exp {
-                    return Err(PyValueError::new_err(format!(
-                        "{name} shape ({rows}, {cols}) does not match expected rows {exp}"
-                    )));
-                }
+        [rows, cols] => {
+            if rows != expected_n {
+                return Err(PyValueError::new_err(format!(
+                    "{name} shape ({rows}, {cols}) does not match expected rows {expected_n}"
+                )));
             }
-            Ok((v, rows, cols, false))
+            Ok((copy_finite_f64(&arr, name)?, cols, false))
         }
         _ => Err(PyValueError::new_err(format!(
             "{name} must be a 1D or 2D float array"
@@ -529,7 +511,7 @@ fn run_spur_test_impl<'py>(
     let nthreads_usize = parse_nthreads(nthreads)?;
     let (require_fn, kwargs) = make_float64_kwargs(py)?;
     let (coords_vec, n, d, metric) = parse_coords(&require_fn, &kwargs, coords, latlong)?;
-    let (y_vec, _, n_y, _) = extract_y_matrix_f64(&require_fn, &kwargs, y, Some(n), "y")?;
+    let (y_vec, n_y, _) = extract_y_matrix_f64(&require_fn, &kwargs, y, n, "y")?;
     let (emat_vec, emat_rows, emat_cols) =
         extract_2d_row_major_f64(&require_fn, &kwargs, emat, "emat")?;
     if emat_rows != q || emat_cols != nrep {
@@ -742,15 +724,11 @@ fn run_spur_halflife<'py>(
 #[pyo3(signature = (
     kind,
     n,
-    y = None,
+    y,
     coords = None,
     latlong = false,
     radius = None,
-    strict_lt = true,
-    exclude_zero_distances = false,
     cluster_id = None,
-    return_matrix = false,
-    demean_lbmgls = false,
     nthreads = None
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -758,33 +736,24 @@ fn run_spur_transform<'py>(
     py: Python<'py>,
     kind: &str,
     #[pyo3(from_py_with = "extract_integer")] n: usize,
-    y: Option<Bound<'py, PyAny>>,
+    y: &Bound<'py, PyAny>,
     coords: Option<Bound<'py, PyAny>>,
     latlong: bool,
     radius: Option<Bound<'py, PyAny>>,
-    strict_lt: bool,
-    exclude_zero_distances: bool,
     cluster_id: Option<Bound<'py, PyAny>>,
-    return_matrix: bool,
-    demean_lbmgls: bool,
     nthreads: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let nthreads_usize = parse_nthreads(nthreads)?;
     let (require_fn, kwargs) = make_float64_kwargs(py)?;
     let transform_kind = match kind {
-        "nn" => SpurTransformKind::Nn {
-            exclude_zero_distances,
-        },
+        "nn" => SpurTransformKind::Nn,
         "iso" => {
             let r_obj = radius.ok_or_else(|| PyValueError::new_err("iso requires radius"))?;
             if r_obj.is_instance_of::<PyBool>() {
                 return Err(PyTypeError::new_err("radius must be a float, not bool"));
             }
             let r: f64 = r_obj.extract()?;
-            SpurTransformKind::Iso {
-                radius: r,
-                strict_lt,
-            }
+            SpurTransformKind::Iso { radius: r }
         }
         "cluster" => SpurTransformKind::Cluster,
         "lbmgls" => SpurTransformKind::LbmGls,
@@ -820,14 +789,7 @@ fn run_spur_transform<'py>(
         None => None,
     };
 
-    let (y_opt, n_y, y_was_1d) = match y.as_ref() {
-        Some(y_obj) => {
-            let (yv, _, ny, is_1d) =
-                extract_y_matrix_f64(&require_fn, &kwargs, y_obj, Some(n), "y")?;
-            (Some(yv), ny, is_1d)
-        }
-        None => (None, 0, false),
-    };
+    let (y_vec, n_y, y_was_1d) = extract_y_matrix_f64(&require_fn, &kwargs, y, n, "y")?;
 
     let output = allow_threads_checked(py, || {
         core_run_spur_transform(&SpurTransformRequest {
@@ -837,35 +799,18 @@ fn run_spur_transform<'py>(
             metric,
             kind: transform_kind,
             cluster_id: cluster_opt.as_deref(),
-            y: y_opt.as_deref(),
+            y: &y_vec,
             n_y,
-            return_matrix,
-            demean_lbmgls,
             nthreads: nthreads_usize,
         })
     })?
     .map_err(map_core_err)?;
 
     let result = PyDict::new_bound(py);
-    match output.matrix {
-        Some(mat) => {
-            result.set_item("matrix", vec_to_pyarray2(py, mat, n, n)?)?;
-        }
-        None => {
-            result.set_item("matrix", py.None())?;
-        }
-    }
-    match output.transformed {
-        Some(tr) => {
-            if y_was_1d {
-                result.set_item("transformed", vec_to_pyarray1(py, tr))?;
-            } else {
-                result.set_item("transformed", vec_to_pyarray2(py, tr, n, n_y)?)?;
-            }
-        }
-        None => {
-            result.set_item("transformed", py.None())?;
-        }
+    if y_was_1d {
+        result.set_item("transformed", vec_to_pyarray1(py, output))?;
+    } else {
+        result.set_item("transformed", vec_to_pyarray2(py, output, n, n_y)?)?;
     }
     Ok(result)
 }
@@ -880,7 +825,6 @@ fn run_spur_transform<'py>(
     nrep,
     transform_vars,
     latlong = false,
-    demean_lbmgls = false,
     nthreads = None
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -894,7 +838,6 @@ fn run_spur_pipeline<'py>(
     #[pyo3(from_py_with = "extract_integer")] nrep: usize,
     transform_vars: &Bound<'py, PyAny>,
     latlong: bool,
-    demean_lbmgls: bool,
     nthreads: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let nthreads_usize = parse_nthreads(nthreads)?;
@@ -942,7 +885,6 @@ fn run_spur_pipeline<'py>(
             nrep,
             transform_vars: &tr_vec,
             n_transform_vars: n_tr,
-            demean_lbmgls,
             nthreads: nthreads_usize,
         })
     })?

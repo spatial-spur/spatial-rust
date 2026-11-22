@@ -428,13 +428,13 @@ fn write_stata_scpc_outputs(parsed: &ModelScpcArgs<'_>, out: &ScpcOutput) -> Res
 
 fn handle_model_scpc(args: &[&str], approximate: bool) -> Result<(), String> {
     let (parsed, seed) = if approximate {
-        if !(20..=21).contains(&args.len()) {
+        if args.len() != 21 {
             return Err(format!(
-                "model_approx_scpc expects 20 or 21 arguments after subcommand, got {}",
+                "model_approx_scpc expects 21 arguments after subcommand, got {}",
                 args.len()
             ));
         }
-        let seed = args.get(20).map_or(Ok(1), |raw| parse_seed(raw))?;
+        let seed = parse_seed(args[20])?;
         (ModelScpcArgs::parse(&args[..20])?, Some(seed))
     } else {
         (ModelScpcArgs::parse(args)?, None)
@@ -459,38 +459,19 @@ fn handle_model_scpc(args: &[&str], approximate: bool) -> Result<(), String> {
 }
 
 fn handle_build_info(args: &[&str]) -> Result<(), String> {
-    if args.is_empty() {
-        stata_spi::display(&format!(
-            "spatial-core {} (spec {}, {}, {}-{}, SCPC API {}, SPUR API {})\n",
-            spatial_core::VERSION,
-            spatial_core::SPEC_VERSION,
-            spatial_core::linalg_provider(),
-            std::env::consts::ARCH,
-            std::env::consts::OS,
-            spatial_core::SCPC_API_VERSION,
-            spatial_core::SPUR_API_VERSION,
-        ));
-        return Ok(());
+    if !args.is_empty() {
+        return Err("build_info takes no arguments".to_string());
     }
-    if args.len() != 3 {
-        return Err(format!(
-            "build_info expected 0 or 3 scalar name arguments, got {}",
-            args.len()
-        ));
-    }
-    for (idx, name) in args.iter().enumerate() {
-        if name.trim().is_empty() {
-            return Err(format!("build_info scalar name #{idx} must not be empty"));
-        }
-    }
-    let is_accelerate = if spatial_core::linalg_provider() == "accelerate" {
-        1.0
-    } else {
-        0.0
-    };
-    save_scalar(args[0], is_accelerate)?;
-    save_scalar(args[1], spatial_core::SCPC_API_VERSION as f64)?;
-    save_scalar(args[2], spatial_core::SPUR_API_VERSION as f64)?;
+    stata_spi::display(&format!(
+        "spatial-core {} (spec {}, {}, {}-{}, SCPC API {}, SPUR API {})",
+        spatial_core::VERSION,
+        spatial_core::SPEC_VERSION,
+        spatial_core::linalg_provider(),
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        spatial_core::SCPC_API_VERSION,
+        spatial_core::SPUR_API_VERSION,
+    ));
     Ok(())
 }
 
@@ -499,7 +480,7 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" | "ping_v7" | "ping_spur_v1" | "ping_spur_v2" | "ping_spur_v3" => Ok(()),
+        "ping" | "ping_v7" | "ping_spur_v4" => Ok(()),
         "build_info" => handle_build_info(&args[1..]),
         "model_exact_scpc" => handle_model_scpc(&args[1..], false),
         "model_approx_scpc" => handle_model_scpc(&args[1..], true),
@@ -559,8 +540,35 @@ pub unsafe extern "C" fn rs_stata_call(argc: c_int, argv: *const *const c_char) 
 mod tests {
     use super::*;
     use spatial_core::preparation::{prepare_scpc_inputs, PreparedScpcInputs};
-    use spatial_core::{run_exact_scpc, ExactScpcRequest};
-    const DEFAULT_CV_TOL: f64 = 0.001;
+
+    #[allow(clippy::too_many_arguments)]
+    fn fixture_model(
+        n_sites: usize,
+        n_obs: usize,
+        has_cons: bool,
+        n_endog: usize,
+        z_cols: usize,
+        b: &[f64],
+        bread: &[f64],
+        scores: &[f64],
+        raw_x: &[f64],
+        excluded: &[f64],
+        ids: Option<&[usize]>,
+    ) -> Result<LoadedStataScpc, String> {
+        let design =
+            StataDesign::from_columns(n_obs, b.len(), has_cons, n_endog, z_cols, raw_x, excluded)?;
+        Ok(LoadedStataScpc {
+            n_sites,
+            n_obs,
+            metric: Metric::Euclidean,
+            coords: Vec::new(),
+            b: b.to_vec(),
+            bread: bread.to_vec(),
+            scores: scores.to_vec(),
+            design: Some(design),
+            cluster_id: ids.map(<[usize]>::to_vec),
+        })
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn fixture_inputs(
@@ -576,20 +584,10 @@ mod tests {
         excluded: &[f64],
         ids: Option<&[usize]>,
     ) -> Result<PreparedScpcInputs, String> {
-        let design =
-            StataDesign::from_columns(n_obs, b.len(), has_cons, n_endog, z_cols, raw_x, excluded)?;
-        let loaded = LoadedStataScpc {
-            n_sites,
-            n_obs,
-            metric: Metric::Euclidean,
-            coords: Vec::new(),
-            b: b.to_vec(),
-            bread: bread.to_vec(),
-            scores: scores.to_vec(),
-            design: Some(design),
-            cluster_id: ids.map(<[usize]>::to_vec),
-        };
-        prepare_scpc_inputs(loaded.prepare_request(b.len())).map_err(format_core_error)
+        let model = fixture_model(
+            n_sites, n_obs, has_cons, n_endog, z_cols, b, bread, scores, raw_x, excluded, ids,
+        )?;
+        prepare_scpc_inputs(model.prepare_request(b.len())).map_err(format_core_error)
     }
 
     fn ols_fixture_basis(
@@ -745,28 +743,18 @@ mod tests {
             }
         }
 
-        let inputs =
-            fixture_inputs(n, n, true, 0, 0, &b, &bread, &scores, &x_raw, &[], None).unwrap();
-        let out_euclid = run_exact_scpc(&ExactScpcRequest {
-            coords: &coords_lon_lat,
-            n,
-            d: 2,
-            metric: Metric::Euclidean,
-            avc: 0.03,
-            uncond: false,
-            cvs: true,
-            coef: &b,
-            wj: &inputs.wj,
-            cluster_id: None,
-            fe_id: None,
-            xj: inputs.xj.as_deref(),
-            xjs: inputs.xjs.as_deref(),
-            proj_u: inputs.proj_u.as_deref(),
-            proj_v: inputs.proj_v.as_deref(),
-            proj_rank: inputs.proj_rank,
-            cv_tolerance: DEFAULT_CV_TOL,
-            nthreads: Some(2),
-        })
+        let model =
+            fixture_model(n, n, true, 0, 0, &b, &bread, &scores, &x_raw, &[], None).unwrap();
+        let out_euclid = run_model_scpc(
+            model.prepare_request(p),
+            &coords_lon_lat,
+            2,
+            Metric::Euclidean,
+            0.03,
+            true,
+            Some(2),
+            None,
+        )
         .unwrap();
         assert_eq!(out_euclid.q, 19);
         let dist_euclid =
@@ -792,26 +780,16 @@ mod tests {
         for pair in coords_lon_lat.chunks_exact(2) {
             coords_lat_lon.extend_from_slice(&[pair[1], pair[0]]);
         }
-        let out_geo = run_exact_scpc(&ExactScpcRequest {
-            coords: &coords_lat_lon,
-            n,
-            d: 2,
-            metric: Metric::GreatCircleFractionLatLon,
-            avc: 0.03,
-            uncond: false,
-            cvs: true,
-            coef: &b,
-            wj: &inputs.wj,
-            cluster_id: None,
-            fe_id: None,
-            xj: inputs.xj.as_deref(),
-            xjs: inputs.xjs.as_deref(),
-            proj_u: inputs.proj_u.as_deref(),
-            proj_v: inputs.proj_v.as_deref(),
-            proj_rank: inputs.proj_rank,
-            cv_tolerance: DEFAULT_CV_TOL,
-            nthreads: Some(2),
-        })
+        let out_geo = run_model_scpc(
+            model.prepare_request(p),
+            &coords_lat_lon,
+            2,
+            Metric::GreatCircleFractionLatLon,
+            0.03,
+            true,
+            Some(2),
+            None,
+        )
         .unwrap();
         assert_eq!(out_geo.q, 18);
         let dist_geo = spatial_core::distance::distance_matrix(
@@ -866,7 +844,7 @@ mod tests {
                 scores_20[i * p + c] = x_design[i * p + c] * resid;
             }
         }
-        let inputs_20 = fixture_inputs(
+        let model_20 = fixture_model(
             n_tie,
             n_tie,
             true,
@@ -880,26 +858,16 @@ mod tests {
             None,
         )
         .unwrap();
-        let out_20 = run_exact_scpc(&ExactScpcRequest {
-            coords: &coords_lon_lat[..n_tie * 2],
-            n: n_tie,
-            d: 2,
-            metric: Metric::Euclidean,
-            avc: 0.03,
-            uncond: false,
-            cvs: false,
-            coef: &b_20,
-            wj: &inputs_20.wj,
-            cluster_id: None,
-            fe_id: None,
-            xj: inputs_20.xj.as_deref(),
-            xjs: inputs_20.xjs.as_deref(),
-            proj_u: inputs_20.proj_u.as_deref(),
-            proj_v: inputs_20.proj_v.as_deref(),
-            proj_rank: inputs_20.proj_rank,
-            cv_tolerance: DEFAULT_CV_TOL,
-            nthreads: Some(1),
-        })
+        let out_20 = run_model_scpc(
+            model_20.prepare_request(p),
+            &coords_lon_lat[..n_tie * 2],
+            2,
+            Metric::Euclidean,
+            0.03,
+            false,
+            Some(1),
+            None,
+        )
         .unwrap();
         assert_eq!(out_20.q, 7);
         assert!(out_20.tied);
@@ -934,7 +902,7 @@ mod tests {
 
     #[test]
     fn dispatch_supports_only_the_model_scpc_abi() {
-        for cmd in ["ping", "ping_v7", "ping_spur_v3"] {
+        for cmd in ["ping", "ping_v7"] {
             assert!(dispatch(&[cmd]).is_ok());
         }
         for cmd in [
@@ -1202,7 +1170,7 @@ mod tests {
         ];
         assert!(handle_model_scpc(&base20[..19], true).is_err());
         let err = handle_model_scpc(&base20, true).unwrap_err();
-        assert!(err.contains("variables in plugin varlist"), "err={err}");
+        assert!(err.contains("expects 21 arguments"), "err={err}");
 
         let mut args21 = base20.to_vec();
         args21.push("7");

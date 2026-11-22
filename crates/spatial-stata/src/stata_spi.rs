@@ -13,14 +13,11 @@ fn storable(value: f64) -> bool {
 }
 
 #[cfg(not(test))]
-#[allow(dead_code)]
 extern "C" {
     fn st_error(message: *const c_char) -> c_int;
     fn st_display(message: *const c_char) -> c_int;
     fn st_in1() -> c_int;
     fn st_in2() -> c_int;
-    fn st_nobs() -> c_int;
-    fn st_nvar() -> c_int;
     fn st_nvars() -> c_int;
     fn st_ifobs(obs: c_int) -> c_uchar;
     fn st_is_missing(z: c_double) -> c_uchar;
@@ -35,7 +32,6 @@ extern "C" {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 mod test_stubs {
     use super::*;
 
@@ -49,12 +45,6 @@ mod test_stubs {
         1
     }
     pub(super) unsafe fn st_in2() -> c_int {
-        0
-    }
-    pub(super) unsafe fn st_nobs() -> c_int {
-        0
-    }
-    pub(super) unsafe fn st_nvar() -> c_int {
         0
     }
     pub(super) unsafe fn st_nvars() -> c_int {
@@ -120,7 +110,6 @@ fn ensure_newline_cstring(message: &str) -> CString {
 }
 
 /// Print an informational message to the Stata console.
-#[allow(dead_code)]
 pub fn display(message: &str) {
     let cstr = ensure_newline_cstring(message);
     unsafe {
@@ -134,18 +123,6 @@ pub fn error(message: &str) {
     unsafe {
         let _ = st_error(cstr.as_ptr());
     }
-}
-
-/// Return total dataset observation count (`SF_nobs`).
-#[allow(dead_code)]
-pub fn total_obs() -> usize {
-    usize::try_from(unsafe { st_nobs() }).unwrap_or(0)
-}
-
-/// Return total dataset variable count (`SF_nvar`).
-#[allow(dead_code)]
-pub fn dataset_var_count() -> usize {
-    usize::try_from(unsafe { st_nvar() }).unwrap_or(0)
 }
 
 /// Return number of variables in the `plugin call` varlist (`SF_nvars`).
@@ -235,18 +212,6 @@ fn matrix_dims_cstr(name: &str, c_name: &CStr) -> Result<(c_int, c_int), String>
         ));
     }
     Ok((rows, cols))
-}
-
-/// Query Stata matrix dimensions `(rows, cols)`.
-#[allow(dead_code)]
-pub fn matrix_dims(name: &str) -> Result<(usize, usize), String> {
-    let c_name = to_cstring(name, "matrix name")?;
-    let (rows, cols) = matrix_dims_cstr(name, &c_name)?;
-    let rows_u =
-        usize::try_from(rows).map_err(|_| format!("invalid row count {rows} for '{name}'"))?;
-    let cols_u =
-        usize::try_from(cols).map_err(|_| format!("invalid col count {cols} for '{name}'"))?;
-    Ok((rows_u, cols_u))
 }
 
 /// Read a Stata matrix into a row-major `expected_rows x expected_cols` `Vec<f64>`.
