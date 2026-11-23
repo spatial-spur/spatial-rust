@@ -897,21 +897,40 @@ mod tests {
         assert!(parse_seed("-1").is_err());
         assert!(parse_seed("4294967296").is_err());
 
-        let base20 = [
-            "2", "3", "3", "1", "0.05", "0", "0", "1", "-1", "b", "bread", "stats", "cvs", "c0",
-            "cv", "q", "tied", "1", "0", "0",
+        let args = [
+            "2",
+            "3",
+            "3",
+            "1",
+            "0",
+            "0",
+            "1",
+            "0",
+            "0.05",
+            "0",
+            "1",
+            "-1",
+            "nystrom",
+            "7",
+            "1000",
+            "20",
+            "0.001",
+            "b",
+            "stats",
+            "cvs",
+            "effective",
+            "meta",
+            "_",
         ];
-        assert!(handle_model_scpc(&base20[..19], true).is_err());
-        let err = handle_model_scpc(&base20, true).unwrap_err();
-        assert!(err.contains("expects 21 arguments"), "err={err}");
-
-        let mut args21 = base20.to_vec();
-        args21.push("7");
-        let err21 = handle_model_scpc(&args21, true).unwrap_err();
-        assert!(
-            err21.contains("variables in plugin varlist"),
-            "err21={err21}"
-        );
+        assert!(fitted::run_scpc(&args[..22])
+            .unwrap_err()
+            .contains("argument count"));
+        let mut bad_seed = args;
+        bad_seed[13] = "-1";
+        assert!(fitted::run_scpc(&bad_seed).unwrap_err().contains("seed"));
+        assert!(fitted::run_scpc(&args)
+            .unwrap_err()
+            .contains("fitted dimensions"));
 
         // Run the complete raw-model operation for a permuted, clustered design.
         let n_sites = 12usize;
