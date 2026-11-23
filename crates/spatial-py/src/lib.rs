@@ -33,14 +33,14 @@ use exceptions::{InvalidSampledCovarianceError, TiedEigenspaceError};
 fn map_core_err(err: CoreError) -> PyErr {
     match err.kind() {
         ErrorKind::InvalidInput | ErrorKind::CalibrationFailed | ErrorKind::DegenerateVariance => {
-            PyValueError::new_err(err.message())
+            PyValueError::new_err(err.to_string())
         }
-        ErrorKind::UnsupportedCase => PyNotImplementedError::new_err(err.message()),
-        ErrorKind::TiedEigenspace => TiedEigenspaceError::new_err(err.message()),
+        ErrorKind::UnsupportedCase => PyNotImplementedError::new_err(err.to_string()),
+        ErrorKind::TiedEigenspace => TiedEigenspaceError::new_err(err.to_string()),
         ErrorKind::InvalidSampledCovariance => {
-            InvalidSampledCovarianceError::new_err(err.message())
+            InvalidSampledCovarianceError::new_err(err.to_string())
         }
-        ErrorKind::InternalFailure => PyRuntimeError::new_err(err.message()),
+        ErrorKind::InternalFailure => PyRuntimeError::new_err(err.to_string()),
     }
 }
 
@@ -460,6 +460,7 @@ fn build_spur_i0_dict<'py>(
     result.set_item("lr", vec_to_pyarray1(py, out.lr))?;
     result.set_item("pvalue", vec_to_pyarray1(py, out.pvalue))?;
     result.set_item("cvalue", vec_to_pyarray1(py, out.cvalue))?;
+    result.set_item("best_tuning_power", out.best_tuning_power)?;
     result.set_item("ha_param", out.ha_param)?;
     let n_rho = out.rho_grid.len();
     result.set_item(
@@ -468,6 +469,7 @@ fn build_spur_i0_dict<'py>(
     )?;
     result.set_item("cvalue_mat", vec_to_pyarray2(py, out.cvalue_mat, n_rho, 3)?)?;
     result.set_item("rho_grid", vec_to_pyarray1(py, out.rho_grid))?;
+    result.set_item("all_directions", out.all_directions)?;
     result.set_item("tied", out.tied)?;
     Ok(result)
 }
@@ -477,7 +479,9 @@ fn build_spur_i1_dict<'py>(py: Python<'py>, out: SpurI1Output) -> PyResult<Bound
     result.set_item("lr", vec_to_pyarray1(py, out.lr))?;
     result.set_item("pvalue", vec_to_pyarray1(py, out.pvalue))?;
     result.set_item("cvalue", vec_to_pyarray1(py, out.cvalue))?;
+    result.set_item("best_tuning_power", out.best_tuning_power)?;
     result.set_item("ha_param", out.ha_param)?;
+    result.set_item("all_directions", out.all_directions)?;
     result.set_item("tied", out.tied)?;
     Ok(result)
 }
@@ -493,6 +497,7 @@ fn build_spur_halflife_dict<'py>(
     result.set_item("pv_mat", vec_to_pyarray1(py, out.pv_mat))?;
     result.set_item("hl_grid_ho", vec_to_pyarray1(py, out.hl_grid_ho))?;
     result.set_item("components", out.components)?;
+    result.set_item("all_directions", out.all_directions)?;
     result.set_item("tied", out.tied)?;
     Ok(result)
 }

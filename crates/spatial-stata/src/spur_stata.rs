@@ -131,7 +131,15 @@ struct SpurTestSummary {
     pvalue: f64,
     cvalue: Vec<f64>,
     ha_param: f64,
-    tied: bool,
+    info: [f64; 3],
+}
+
+fn diagnostic_info(tied: bool, all: bool, best: Option<f64>) -> [f64; 3] {
+    [
+        f64::from(tied),
+        f64::from(all),
+        best.unwrap_or(f64::INFINITY),
+    ]
 }
 
 pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<(), String> {
@@ -155,7 +163,7 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
     let stat_scal_name = args[9];
     let p_scal_name = args[10];
     let ha_scal_name = args[11];
-    let tied_scal_name = args[12];
+    let info_mat_name = args[12];
 
     let metric = parse_spur_metric(d, latlong)?;
     if q == 0 || nrep == 0 {
@@ -174,7 +182,7 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
     require_non_empty(stat_scal_name, "stat_scal_name", ctx)?;
     require_non_empty(p_scal_name, "p_scal_name", ctx)?;
     require_non_empty(ha_scal_name, "ha_scal_name", ctx)?;
-    require_non_empty(tied_scal_name, "tied_scal_name", ctx)?;
+    require_non_empty(info_mat_name, "info_mat_name", ctx)?;
 
     let expected_vars = d + 1 + k_x_raw;
     let actual_vars = plugin_var_count();
@@ -228,7 +236,7 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
                 pvalue: out.pvalue[0],
                 cvalue: out.cvalue,
                 ha_param: out.ha_param,
-                tied: out.tied,
+                info: diagnostic_info(out.tied, out.all_directions, out.best_tuning_power),
             }
         }
         SpurTestFlavor::I1 => {
@@ -238,7 +246,7 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
                 pvalue: out.pvalue[0],
                 cvalue: out.cvalue,
                 ha_param: out.ha_param,
-                tied: out.tied,
+                info: diagnostic_info(out.tied, out.all_directions, out.best_tuning_power),
             }
         }
         SpurTestFlavor::I0Resid => {
@@ -248,7 +256,7 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
                 pvalue: out.pvalue[0],
                 cvalue: out.cvalue,
                 ha_param: out.ha_param,
-                tied: out.tied,
+                info: diagnostic_info(out.tied, out.all_directions, out.best_tuning_power),
             }
         }
         SpurTestFlavor::I1Resid => {
@@ -258,12 +266,12 @@ pub(crate) fn handle_spur_test(args: &[&str], flavor: SpurTestFlavor) -> Result<
                 pvalue: out.pvalue[0],
                 cvalue: out.cvalue,
                 ha_param: out.ha_param,
-                tied: out.tied,
+                info: diagnostic_info(out.tied, out.all_directions, out.best_tuning_power),
             }
         }
     };
 
-    save_scalar(tied_scal_name, if summary.tied { 1.0 } else { 0.0 })?;
+    write_matrix_with_infinity(info_mat_name, 1, 3, &summary.info)?;
     write_matrix_with_infinity(cv_mat_name, 3, 1, &summary.cvalue)?;
     save_scalar(stat_scal_name, summary.lr)?;
     save_scalar(p_scal_name, summary.pvalue)?;
@@ -283,6 +291,11 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
     let d = parse_usize(args[0], "d")?;
     let latlong = parse_bool_flag(args[1], "latlong")?;
     let q = parse_usize(args[2], "q")?;
+    if q > 100 {
+        return Err(format!(
+            "q={q} exceeds the validated half-life quadrature limit of 100"
+        ));
+    }
     let nrep = parse_usize(args[3], "nrep")?;
     let level_pct = args[4]
         .parse::<f64>()
@@ -292,7 +305,7 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
     let ci_l_scal_name = args[7];
     let ci_u_scal_name = args[8];
     let max_dist_scal_name = args[9];
-    let tied_scal_name = args[10];
+    let info_mat_name = args[10];
     let components_name = args[11];
     let n_components_name = args[12];
 
@@ -309,7 +322,7 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
     require_non_empty(ci_l_scal_name, "ci_l_scal_name", CTX)?;
     require_non_empty(ci_u_scal_name, "ci_u_scal_name", CTX)?;
     require_non_empty(max_dist_scal_name, "max_dist_scal_name", CTX)?;
-    require_non_empty(tied_scal_name, "tied_scal_name", CTX)?;
+    require_non_empty(info_mat_name, "info_mat_name", CTX)?;
 
     let expected_vars = d + 1;
     let actual_vars = plugin_var_count();
@@ -349,7 +362,12 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
             out.components.len()
         ));
     }
-    save_scalar(tied_scal_name, if out.tied { 1.0 } else { 0.0 })?;
+    write_matrix_with_infinity(
+        info_mat_name,
+        1,
+        3,
+        &diagnostic_info(out.tied, out.all_directions, None),
+    )?;
     let max_dist_out = if latlong {
         out.max_dist * STATA_CIRCUMFERENCE_M
     } else {
@@ -504,7 +522,7 @@ pub(crate) fn handle_spur_pipeline(args: &[&str]) -> Result<(), String> {
     let emat_path = args[7];
     let diag_mat_name = args[8];
     let cvs_mat_name = args[9];
-    let tied_scal_name = args[10];
+    let info_mat_name = args[10];
 
     let metric = parse_spur_metric(d, latlong)?;
     if k_x_raw == 0 || q == 0 || nrep == 0 {
@@ -515,7 +533,7 @@ pub(crate) fn handle_spur_pipeline(args: &[&str]) -> Result<(), String> {
     require_non_empty(emat_path, "emat_path", CTX)?;
     require_non_empty(diag_mat_name, "diag_mat_name", CTX)?;
     require_non_empty(cvs_mat_name, "cvs_mat_name", CTX)?;
-    require_non_empty(tied_scal_name, "tied_scal_name", CTX)?;
+    require_non_empty(info_mat_name, "info_mat_name", CTX)?;
 
     let n_vars_tr = 1 + k_x_raw;
     let expected_vars = d + 2 * n_vars_tr;
@@ -565,8 +583,21 @@ pub(crate) fn handle_spur_pipeline(args: &[&str]) -> Result<(), String> {
     })
     .map_err(format_core_error)?;
 
-    let any_tied = out.i0.tied || out.i1.tied || out.i0resid.tied || out.i1resid.tied;
-    save_scalar(tied_scal_name, if any_tied { 1.0 } else { 0.0 })?;
+    let info = [
+        diagnostic_info(out.i0.tied, out.i0.all_directions, out.i0.best_tuning_power),
+        diagnostic_info(out.i1.tied, out.i1.all_directions, out.i1.best_tuning_power),
+        diagnostic_info(
+            out.i0resid.tied,
+            out.i0resid.all_directions,
+            out.i0resid.best_tuning_power,
+        ),
+        diagnostic_info(
+            out.i1resid.tied,
+            out.i1resid.all_directions,
+            out.i1resid.best_tuning_power,
+        ),
+    ];
+    write_matrix_with_infinity(info_mat_name, 4, 3, info.as_flattened())?;
 
     let diag = [
         out.i0.lr[0],
@@ -606,7 +637,7 @@ mod tests {
 
     #[test]
     fn ping_and_spur_arg_validation_work() {
-        assert!(dispatch(&["ping_spur_v5"]).is_ok());
+        assert!(dispatch(&["ping_spur_v6"]).is_ok());
         for retired in ["ping_spur_v1", "ping_spur_v2", "ping_spur_v3"] {
             assert!(dispatch(&[retired]).is_err());
         }

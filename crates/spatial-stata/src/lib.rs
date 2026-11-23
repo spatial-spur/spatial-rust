@@ -506,7 +506,7 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
         .first()
         .ok_or_else(|| "missing plugin subcommand".to_string())?;
     match subcmd {
-        "ping" | "ping_v7" | "ping_spur_v5" => Ok(()),
+        "ping" | "ping_v7" | "ping_spur_v6" => Ok(()),
         "build_info" => handle_build_info(&args[1..]),
         "require_spec" => require_spec(&args[1..]),
         "model_exact_scpc" => handle_model_scpc(&args[1..], false),
