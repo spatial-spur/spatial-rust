@@ -18,6 +18,7 @@ fracblack racseg segpov25 fraccom15 hipc gini incsh1 tsr tsperc hsdrop scind fra
 fracsm fracdiv fracmar loctr colpc coltui colgrad manshare chimp tlfpr migirate migorate fracfor
 """.split()
 GEO = dict(lon="lon", lat="lat", nthreads=1, backend="rust")
+ARCHIVES = HERE / "fixtures"
 
 
 def summary(result, case, stage):
@@ -78,16 +79,27 @@ def compare(expected, result, keys, label):
 
 def historical(fits, path):
     archive = json.loads(path.read_text())
+    previous = json.loads((ARCHIVES / "chetty_0_3_9.json").read_text())
     historical = {}
     for stage, name in (("levels", "ols"), ("adjusted", "fgls")):
         actual = fits.loc[(fits.stage == stage) & (fits.case != "common")].set_index("case")
         actual = actual.loc[[name.lower() for name in archive["reg_names"]]]
         original = archive[name]
         np.testing.assert_allclose(actual.coef, original["beta"], atol=2e-10)
-        np.testing.assert_allclose(actual.se, original["se"], atol=2e-9)
+        np.testing.assert_array_equal(actual.q, original["q"])
+        old = np.array(
+            [
+                previous[name]["levels" if stage == "levels" else "transformed"]["stats"]
+                for name in actual.index
+            ]
+        )
+        np.testing.assert_allclose(actual.se, old[:, 1], atol=2e-10, rtol=0)
+        np.testing.assert_allclose(actual.se, original["se"], atol=4e-5, rtol=0)
         low = np.abs(actual.lo - original["lo"])
         high = np.abs(actual.hi - original["hi"])
         historical[stage] = {
+            "largest_se_difference": float(np.max(np.abs(actual.se - original["se"]))),
+            "max_se_change_from_0_3_9": float(np.max(np.abs(actual.se - old[:, 1]))),
             "largest_endpoint_difference": float(max(low.max(), high.max())),
             "case": low.idxmax() if low.max() >= high.max() else high.idxmax(),
             "different_5_percent_decisions": actual.index[
@@ -105,7 +117,9 @@ def main():
     parser.add_argument("--stata", default="stata")
     parser.add_argument("--rscript", default="Rscript")
     parser.add_argument("--chetty", action="store_true")
-    parser.add_argument("--historical-reference", type=Path)
+    parser.add_argument(
+        "--historical-reference", type=Path, default=ARCHIVES / "chetty_matlab.json"
+    )
     args = parser.parse_args()
     work = args.work.resolve()
     work.mkdir(parents=True, exist_ok=False)

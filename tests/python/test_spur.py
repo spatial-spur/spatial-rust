@@ -62,3 +62,42 @@ def test_half_life_saved_units_and_components():
     np.testing.assert_allclose(raw.components, normalized.components * raw.max_dist)
     np.testing.assert_allclose(raw.hl_grid, normalized.hl_grid * raw.max_dist)
     assert raw.simulation.tuning_draws == 0
+
+
+def test_i1_gaussian_calibration_against_independent_angular_ratio():
+    from reference.spatial import i1_calibration
+    from spatial_spur import spurtest_i1
+
+    rng = np.random.default_rng(713)
+    d = pd.DataFrame(rng.normal(size=(36, 3)), columns=["a", "b", "y"])
+    normals = rng.standard_normal((8, 253))
+    result = spurtest_i1(
+        "y",
+        d,
+        coords_euclidean=["a", "b"],
+        q=4,
+        nthreads=1,
+        draws=normals[:4],
+        tuning_draws=normals[4:],
+    )
+    dmat = distances(d[["a", "b"]].to_numpy())
+    lr, pvalue, cutoffs = i1_calibration(d.y.to_numpy(), dmat, 4, result.ha_param, normals[:4])
+    assert result.pvalue == pvalue
+    np.testing.assert_allclose(result.lr, lr, rtol=1e-11)
+    np.testing.assert_allclose(result.cvalue, cutoffs, rtol=1e-11)
+
+
+def test_nn_tolerance_preserves_ties_and_distinguishes_resolved_neighbors():
+    matrix = np.array([[0, 0], [1, 0], [0, 1], [-1, 0]], dtype=float)
+    theta = 0.381
+    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    options = dict(coords_euclidean=["a", "b"], nthreads=1, transformation="nn")
+    origin = np.array([520_000, 4_510_000])
+
+    def transformed(points):
+        data = pd.DataFrame(points @ rotation + origin, columns=["a", "b"])
+        return spurtransform("y", data.assign(y=[1, -1, 2, -2]), **options).h_y.iloc[0]
+
+    assert transformed(matrix) == pytest.approx(4 / 3)
+    matrix[2:] *= 1.000001
+    assert transformed(matrix) == 2

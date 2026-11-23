@@ -164,3 +164,35 @@ def angular_log_density(covariance, z):
 
 def rank_pvalue(observed, simulated):
     return (1 + np.count_nonzero(simulated >= observed)) / (len(simulated) + 1)
+
+
+def i1_calibration(y, d, q, rate, draws):
+    """Dense levels I(1) reference given the alternative rate selected by tuning."""
+    d = d / d.max()
+    p = center(len(d))
+    brownian = -0.5 * p @ d @ p
+    values, vectors = np.linalg.eigh(brownian)
+    basis = vectors[:, -q:][:, ::-1]
+    for col in basis.T:
+        absolute = np.abs(col)
+        anchor = col[np.flatnonzero(absolute >= (1 - 1e-12) * absolute.max())[0]]
+        col *= np.sign(anchor)
+    alternative = basis.T @ np.exp(-rate * d) @ basis
+    null = np.diag(values[-q:][::-1])
+    l0 = np.linalg.cholesky(null)
+    la = np.linalg.cholesky(alternative)
+
+    def ratio(z):
+        return np.sum(np.linalg.solve(l0, z) ** 2, axis=0) / np.sum(
+            np.linalg.solve(la, z) ** 2, axis=0
+        )
+
+    statistic = ratio(basis.T @ (y - y.mean()))
+    simulated = ratio(l0 @ draws)
+    ranked = np.sort(simulated)[::-1]
+    ranks = [(len(simulated) + 1) // quantile for quantile in [100, 20, 10]]
+    return (
+        statistic,
+        rank_pvalue(statistic, simulated),
+        [ranked[rank - 1] if rank else np.inf for rank in ranks],
+    )
