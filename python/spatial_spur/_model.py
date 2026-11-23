@@ -91,7 +91,9 @@ def _extract_statsmodels(model) -> Fit:
     residuals = np.asarray(model.resid, dtype=float)
     data = base.data
     frame = getattr(data, "frame", None)
-    labels = pd.Index(data.row_labels) if data.row_labels is not None else None
+    labels = data.row_labels
+    if labels is not None:
+        labels = labels.copy() if isinstance(labels, pd.Index) else pd.Index(labels)
     if isinstance(frame, pd.DataFrame) and labels is not None and frame.index.is_unique:
         frame = frame.loc[labels]
     else:
@@ -177,8 +179,19 @@ def extract_fit(model) -> Fit:
     raise ValueError("SCPC supports unweighted Statsmodels OLS and PyFixest OLS or ordinary 2SLS")
 
 
+def _has_missing_labels(labels: pd.Index) -> bool:
+    if isinstance(labels, pd.MultiIndex):
+        return any((codes < 0).any() for codes in labels.codes)
+    return labels.hasnans
+
+
 def _match_keys(fitted: pd.Index, supplied: pd.Index, name: str) -> NDArray[np.intp]:
-    if not fitted.is_unique or not supplied.is_unique or fitted.hasnans or supplied.hasnans:
+    if (
+        not fitted.is_unique
+        or not supplied.is_unique
+        or _has_missing_labels(fitted)
+        or _has_missing_labels(supplied)
+    ):
         raise ValueError(f"{name} must uniquely identify fitted and supplied rows")
     positions = supplied.get_indexer(fitted)
     if (positions < 0).any():

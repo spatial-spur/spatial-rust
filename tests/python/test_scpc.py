@@ -167,3 +167,14 @@ def test_chetty_fracfor_independence_limit_sets_cutoff():
         bound = critical([out.w.T @ out.w, wc.T @ wc])
         assert abs(bound - 3.441575) < 2e-6
         assert abs(out.critical_95[0] - bound) < 2e-6
+
+
+def test_statsmodels_panel_index_aligns_by_observation():
+    d = fixture()
+    d.index = pd.MultiIndex.from_arrays([d.g, d.id], names=["unit", "row"])
+    model = smf.ols("y ~ x", d).fit()
+    options = dict(coords_euclidean=["a", "b"], nthreads=1)
+    aligned = scpc(model, d, **options)
+    shuffled = scpc(model, d.iloc[::-1], **options)
+    assert aligned.observations.equals(d.index)
+    np.testing.assert_array_equal(aligned.scpcstats, shuffled.scpcstats)

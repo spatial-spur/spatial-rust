@@ -91,6 +91,14 @@ program scpc, eclass sortpreserve
     }
     if "`method'" == "auto" local method = cond(`n_sites' >= 4500, "nystrom", "exact")
     quietly predict double `residual' if `esample', residuals
+    tempvar squared_residual
+    quietly gen double `squared_residual' = `residual'^2 if `esample'
+    quietly summarize `squared_residual', meanonly
+    if r(N) != e(N) | reldif(r(sum), e(rss)) > 1e-9 {
+        di as error "The current observations no longer reproduce the fitted regression residuals"
+        exit 198
+    }
+
 
     tempname estimates omitted subset
     matrix `estimates' = e(b)

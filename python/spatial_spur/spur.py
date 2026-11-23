@@ -58,6 +58,14 @@ class TestResult:
     def backend(self) -> str:
         return "rust"
 
+    @property
+    def n_obs(self) -> int:
+        return len(self.observations)
+
+    @property
+    def n_sites(self) -> int:
+        return len(self.observations)
+
 
 @dataclass(frozen=True)
 class HalfLifeResult:
@@ -79,6 +87,14 @@ class HalfLifeResult:
     @property
     def backend(self) -> str:
         return "rust"
+
+    @property
+    def n_obs(self) -> int:
+        return len(self.observations)
+
+    @property
+    def n_sites(self) -> int:
+        return len(self.observations)
 
     def __str__(self) -> str:
         units = "sample diameters" if self.normdist else self.distance_units

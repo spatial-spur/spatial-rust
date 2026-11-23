@@ -72,6 +72,13 @@ assert !missing(h_x)
 assert h_yy == 7
 assert `"`c(rngstate)'"' == `"`state'"'
 
+quietly regress y x
+preserve
+quietly replace y = y + 1
+capture quietly scpc
+assert _rc == 198
+restore
+
 quietly areg y x, absorb(g)
 capture quietly scpc
 assert _rc == 198
