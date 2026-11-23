@@ -62,6 +62,8 @@ extern "C" {
 pub struct ScpcBasis {
     /// Row-major weights `n x (q + 1)`, with a normalized constant in column 0.
     pub weights: Vec<f64>,
+    /// Eigenvalues corresponding to the nonconstant weight columns.
+    pub eigenvalues: Vec<f64>,
     /// True when leading eigenvalues are numerically tied or degenerate across the cutoff.
     pub tied: bool,
     /// Complete positive eigenspace sizes within the computed prefix.
@@ -113,6 +115,7 @@ pub fn scpc_basis(
     }
     Ok(ScpcBasis {
         weights: result,
+        eigenvalues: eigen.values,
         tied: blocks.tied,
         candidates: blocks.ends,
         cutoff_tied: blocks.cutoff_tied,

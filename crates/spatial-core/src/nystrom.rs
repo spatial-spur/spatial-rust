@@ -207,10 +207,24 @@ pub fn landmark_basis(
                 })?;
                 break (local, retained);
             };
+            let mut inverse_roots = Vec::with_capacity(retained);
+            let mut start = 0;
+            for &end in &local.candidates {
+                // A common eigenvalue scale leaves a numerically tied block
+                // invariant to the provider's orientation of its eigenvectors.
+                let mean = local.eigenvalues[start..end].iter().sum::<f64>() / (end - start) as f64;
+                inverse_roots.resize(end, mean.sqrt().recip());
+                start = end;
+            }
             let weights = local
                 .weights
                 .chunks_exact(requested + 1)
-                .flat_map(|row| row[1..=retained].iter().copied())
+                .flat_map(|row| {
+                    row[1..=retained]
+                        .iter()
+                        .zip(&inverse_roots)
+                        .map(|(v, scale)| v * scale)
+                })
                 .collect::<Vec<_>>();
             let projected = project_landmarks(&distance, n, subset, &weights, retained, decay[0])?;
             Ok((projected, retained))
@@ -318,14 +332,25 @@ fn combine_landmarks(
         row[1..].fill(0.0);
     }
     if rank > 0 {
-        let v = &eigen.vectors[..rank * columns];
-        let mut directions = crate::zeroed(&[rank, n], "pooled landmark basis")?;
-        linalg::multiply(v, wall, &mut directions, rank, columns, n, false);
-        for (j, col) in directions.chunks_exact(n).enumerate() {
-            let inv_norm = eigen.values[j].sqrt().recip();
-            for (row, &value) in weights.chunks_exact_mut(q + 1).zip(col) {
-                row[j + 1] = value * inv_norm;
+        // The working matrix is n × columns. The right singular vectors
+        // arrive one vector per row and must become columns before W V.
+        let mut right = crate::zeroed(&[columns, rank], "right landmark directions")?;
+        for (j, vector) in eigen.vectors[..rank * columns]
+            .chunks_exact(columns)
+            .enumerate()
+        {
+            let inverse = eigen.values[j].sqrt().recip();
+            for (row, value) in right.chunks_exact_mut(rank).zip(vector) {
+                row[j] = value * inverse;
             }
+        }
+        let mut directions = crate::zeroed(&[n, rank], "pooled landmark basis")?;
+        linalg::multiply(wall, &right, &mut directions, n, columns, rank, false);
+        for (row, direction) in weights
+            .chunks_exact_mut(q + 1)
+            .zip(directions.chunks_exact(rank))
+        {
+            row[1..=rank].copy_from_slice(direction);
         }
     }
     Ok((weights, blocks))
@@ -350,6 +375,24 @@ mod tests {
                     .len(),
                 8
             );
+        }
+    }
+
+    #[test]
+    fn pooled_landmarks_recover_left_singular_directions() {
+        // Centered, orthogonal embedded columns with singular values sqrt(2) and sqrt(18).
+        let wall = [1., 0., -1., 0., 0., 3., 0., -3., 0., 0.];
+        let (out, blocks) = combine_landmarks(&wall, 5, 2, 2).unwrap();
+        assert_eq!(blocks.ends, [1, 2]);
+        let large = [0., 0., 1. / 2.0_f64.sqrt(), -1. / 2.0_f64.sqrt(), 0.];
+        let small = [1. / 2.0_f64.sqrt(), -1. / 2.0_f64.sqrt(), 0., 0., 0.];
+        for (column, expected) in [(1, large), (2, small)] {
+            let dot: f64 = out
+                .chunks_exact(3)
+                .zip(expected)
+                .map(|(r, e)| r[column] * e)
+                .sum();
+            assert!((dot.abs() - 1.0).abs() < 1e-14);
         }
     }
 

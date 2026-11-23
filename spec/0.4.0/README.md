@@ -89,7 +89,8 @@ samples landmarks in lexicographic coordinate order with a recorded seed.
 Euclidean coordinates are centered at the bounding midpoint and divided by
 the largest absolute centered coordinate. Geographic points are canonicalized.
 Embed complete positive landmark blocks by applying the covariance to
-landmark directions. Use one Frobenius scale per embedded sample to preserve
+landmark eigenvectors divided by the square roots of their eigenvalues. Use a
+common eigenvalue scale within each numerical tie. Use one Frobenius scale per embedded sample to preserve
 rotation invariance and take the leading pooled subspace. The complete
 landmark sample gives the exact working subspace. The finite covariance grid
 is projected by tiles over all sites, including K(∞), so random pair sampling

@@ -63,6 +63,7 @@ def test_clustered_public_weights_reconstruct_standard_errors(method):
         nthreads=1,
     )
     eig = out.w[:, 1:]
+    np.testing.assert_allclose(out.w.T @ out.w, np.eye(out.q + 1), atol=2e-12)
     score = m.model.exog * m.resid.to_numpy()[:, None] @ m.normalized_cov_params.to_numpy()
     by_site = np.zeros((out.n_sites, score.shape[1]))
     np.add.at(by_site, np.asarray(out.site_membership), score)
