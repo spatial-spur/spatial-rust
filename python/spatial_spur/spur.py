@@ -7,9 +7,8 @@ from importlib.resources import files
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-import statsmodels.formula.api as smf
-from patsy import EvalEnvironment
 from numpy.typing import ArrayLike
+from patsy import INTERCEPT, EvalEnvironment, dmatrices
 
 from . import _native
 from ._model import (
@@ -182,19 +181,18 @@ def _response(data, column):
     return values
 
 
-def _formula_fit(formula, data, environment):
+def _formula_design(formula, data, environment):
     if not isinstance(data, pd.DataFrame) or not data.columns.is_unique:
         raise ValueError("data must be a pandas DataFrame with unique columns")
     if not data.index.is_unique:
         raise ValueError("Use a unique index to identify fitted regression rows")
-    base = smf.ols(formula, data, eval_env=environment)
-    sample = data.loc[base.data.row_labels]
-    y = np.asarray(base.endog, dtype=float)
-    x = numeric_matrix(base.exog, "Fitted SPUR design")
-    if y.ndim != 1 or not np.isfinite(y).all():
+    # Keep the design and its term slices together across Statsmodels versions.
+    response, design = dmatrices(formula, data, eval_env=environment, return_type="dataframe")
+    if response.shape[1] != 1 or not np.isfinite(response.to_numpy()).all():
         raise ValueError("SPUR requires one finite numeric response")
-    coefficient_bread(x, tuple(base.exog_names))
-    return base, sample, y, x
+    x = numeric_matrix(design, "Fitted SPUR design")
+    coefficient_bread(x, tuple(design.columns))
+    return response.iloc[:, 0], design, data.loc[design.index]
 
 
 def spurtest(
@@ -219,8 +217,8 @@ def spurtest(
     execution = native_info(backend, nthreads)
     if test.endswith("resid"):
         environment = _environment or EvalEnvironment.capture(1)
-        _, sample, y, x = _formula_fit(formula, data, environment)
-        model_inputs = (y, x)
+        response, design, sample = _formula_design(formula, data, environment)
+        model_inputs = (response.to_numpy(), design.to_numpy())
     else:
         sample = data
         column, _, rhs = formula.partition("~")
@@ -402,12 +400,12 @@ def spur(
     nthreads: int | None = None,
 ) -> PipelineResult:
     execution = native_info(backend, nthreads)
-    base, sample, y, x = _formula_fit(formula, data, EvalEnvironment.capture(1))
-    terms = base.data.design_info.term_name_slices
-    if "Intercept" not in terms:
+    response, design, sample = _formula_design(formula, data, EvalEnvironment.capture(1))
+    intercept = design.design_info.term_slices.get(INTERCEPT)
+    if intercept is None:
         raise ValueError("The SPUR pipeline requires a fitted intercept")
-    intercept = terms["Intercept"].start
-    regressors = [i for i in range(x.shape[1]) if i != intercept]
+    y, x = response.to_numpy(), design.to_numpy()
+    regressors = [i for i in range(x.shape[1]) if i != intercept.start]
     coords, geographic = _coordinates(sample, lon, lat, coords_euclidean)
     if integer(q, "q", 2) > len(coords) - x.shape[1]:
         raise ValueError("q exceeds the residual degrees of freedom")
@@ -430,7 +428,7 @@ def spur(
     raw = out["transformed_vars"]
     transformed_design = x.copy()
     transformed_design[:, regressors] = raw[:, 1:]
-    column_names = base.exog_names
+    column_names = design.columns
     transformed_fit = sm.OLS(
         pd.Series(raw[:, 0], index=sample.index),
         pd.DataFrame(transformed_design, index=sample.index, columns=column_names),
@@ -446,9 +444,9 @@ def spur(
         backend=backend,
         nthreads=nthreads,
     )
-    levels = scpc(base.fit(), **options)
+    levels = scpc(sm.OLS(response, design).fit(), **options)
     transformed = scpc(transformed_fit, **options)
-    names = [base.endog_names, *(column_names[i] for i in regressors)]
+    names = [response.name, *(column_names[i] for i in regressors)]
     transformed_data = sample.copy()
     for name, values in zip(names, raw.T, strict=True):
         column = f"h_{name}"

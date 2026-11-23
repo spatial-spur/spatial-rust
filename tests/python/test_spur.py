@@ -3,7 +3,14 @@ import pandas as pd
 import pytest
 
 from reference.spatial import brownian_gls, distances
-from spatial_spur import load_chetty_data, spur, spurhalflife, spurtest_i0, spurtransform
+from spatial_spur import (
+    load_chetty_data,
+    spur,
+    spurhalflife,
+    spurtest_i0,
+    spurtest_i1resid,
+    spurtransform,
+)
 
 
 def test_geographic_nearest_neighbors_and_iso_radius():
@@ -49,6 +56,40 @@ def test_lbmgls_and_pipeline_use_fitted_sample_and_named_inputs():
     assert single.simulation.seed is None
     with pytest.raises(ValueError, match="separate tuning draw"):
         spurtest_i0("y", clean, q=4, draws=draws, **options)
+
+
+def test_pipeline_and_residual_diagnostics_preserve_formula_terms():
+    rng = np.random.default_rng(27)
+    data = pd.DataFrame(rng.normal(size=(60, 4)), columns=["a", "b", "y", "x"])
+    data["group"] = pd.Categorical(np.tile(["a", "b", "c"], 20))
+    data.loc[14, "x"] = np.nan
+
+    def squared(values):
+        return values**2
+
+    draws = rng.standard_normal((4, 240))
+    options = dict(
+        coords_euclidean=["a", "b"],
+        q=4,
+        draws=draws,
+        tuning_draws=rng.standard_normal(draws.shape),
+        nthreads=1,
+    )
+    formula = "y ~ C(group) + squared(x)"
+    result = spur(formula, data, **options)
+    assert result.levels.table.index.tolist() == [
+        "Intercept",
+        "C(group)[T.b]",
+        "C(group)[T.c]",
+        "squared(x)",
+    ]
+    assert result.levels.observations.equals(data.index.delete(14))
+    assert "h_squared(x)" in result.transformed_data
+    direct = spurtest_i1resid(formula, data, **options)
+    assert direct.pvalue == result.tests["i1resid"].pvalue
+    np.testing.assert_allclose(direct.lr, result.tests["i1resid"].lr)
+    with pytest.raises(ValueError, match="requires a fitted intercept"):
+        spur("y ~ 0 + Intercept + x", data.assign(Intercept=1.0), **options)
 
 
 def test_half_life_saved_units_and_components():

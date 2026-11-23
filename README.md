@@ -80,7 +80,8 @@ preserve unique row identifiers. A PyFixest fit needs stored data and either
 matching fitted row values or an explicit `row_id` column. For R fixest, use
 `demeaned = TRUE, data.save = TRUE`. Explicit coordinate matrices are accepted
 in fitted order. A spatial cluster must identify one actual site with constant
-coordinates across its fitted observations.
+coordinates across its fitted observations. Python's SPUR formula workflows
+build their design in Patsy and fit it with Statsmodels.
 
 SCPC returns coefficient-specific 95% critical values and separate
 location-only `cv`. Python and R return spatial weights in the reported site
