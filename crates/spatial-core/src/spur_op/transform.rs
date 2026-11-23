@@ -2,6 +2,7 @@
 
 use super::{center_columns, SpurGeometry};
 use crate::distance::{Distances, Metric};
+use crate::neighbors::NeighborIndex;
 use crate::threads::{is_serial, run_with_threads};
 use crate::{basis, checked_len, linalg, CoreError};
 use rayon::prelude::*;
@@ -43,10 +44,38 @@ fn transform_by_neighbors(
             return Ok(());
         }
         let weight = (neighbors.len() as f64).recip();
-        row.copy_from_slice(&req.y[i * width..(i + 1) * width]);
-        for &j in neighbors.iter() {
-            for (out, &value) in row.iter_mut().zip(&req.y[j * width..(j + 1) * width]) {
-                *out -= weight * value;
+        for (col, out) in row.iter_mut().enumerate() {
+            let center = req.y[i * width + col];
+            let mut correction = 0.0;
+            for &j in neighbors.iter() {
+                let other = req.y[j * width + col];
+                let diff = center - other;
+                let scaled = if diff.is_finite() {
+                    diff * weight
+                } else {
+                    center * weight - other * weight
+                };
+                let term = scaled - correction;
+                let next = *out + term;
+                correction = (next - *out) - term;
+                *out = next;
+            }
+            if !out.is_finite() {
+                let scale = neighbors
+                    .iter()
+                    .map(|&j| req.y[j * width + col].abs())
+                    .fold(center.abs(), f64::max);
+                let origin = center / scale;
+                *out = scale
+                    * neighbors
+                        .iter()
+                        .map(|&j| (origin - req.y[j * width + col] / scale) * weight)
+                        .sum::<f64>();
+            }
+            if !out.is_finite() {
+                return Err(CoreError::invalid_input(
+                    "neighbor contrast exceeds the floating-point range",
+                ));
             }
         }
         Ok(())
@@ -71,57 +100,14 @@ fn neighbor_transform(
     req: &SpurTransformRequest<'_>,
     coords: &[f64],
 ) -> Result<Vec<f64>, CoreError> {
-    let n = req.n;
-    let distances = Distances::new(coords, n, req.d, req.metric)?;
-    let distance = |i: usize, j: usize| {
-        let value = distances.pair(i.max(j), i.min(j));
-        if !value.is_finite() {
-            return Err(CoreError::invalid_input(
-                "pairwise distance exceeds the floating-point range",
-            ));
-        }
-        Ok(value)
-    };
+    let index = NeighborIndex::new(Distances::new(coords, req.n, req.d, req.metric)?)?;
     match req.kind {
-        SpurTransformKind::Nn => transform_by_neighbors(req, |i, neighbors| {
-            let mut nearest = f64::INFINITY;
-            for j in 0..n {
-                if i == j {
-                    continue;
-                }
-                // Comparing raw distances preserves distinctions that can
-                // disappear when dividing by a much larger diameter.
-                let d = distance(i, j)?;
-                if d == 0.0 {
-                    continue;
-                }
-                if d < nearest {
-                    nearest = d;
-                    neighbors.clear();
-                }
-                if d == nearest {
-                    neighbors.push(j);
-                }
-            }
-            if neighbors.is_empty() {
-                return Err(CoreError::invalid_input(
-                    "nearest-neighbor transform requires at least two distinct locations",
-                ));
-            }
-            Ok(())
-        }),
-        SpurTransformKind::Iso { radius } => transform_by_neighbors(req, |i, neighbors| {
-            for j in 0..n {
-                if i == j {
-                    continue;
-                }
-                let d = distance(i, j)?;
-                if d < radius {
-                    neighbors.push(j);
-                }
-            }
-            Ok(())
-        }),
+        SpurTransformKind::Nn => {
+            transform_by_neighbors(req, |i, neighbors| index.nearest(i, neighbors))
+        }
+        SpurTransformKind::Iso { radius } => {
+            transform_by_neighbors(req, |i, neighbors| index.within(i, radius, neighbors))
+        }
         _ => unreachable!("neighbor transform requires NN or ISO"),
     }
 }
@@ -193,7 +179,7 @@ pub fn run_spur_transform(req: &SpurTransformRequest<'_>) -> Result<Vec<f64>, Co
                 .coords
                 .ok_or_else(|| CoreError::invalid_input("lbmgls transform requires coordinates"))?;
             let geom = SpurGeometry::from_coords(coords, n, req.d, req.metric)?;
-            apply_lbmgls(geom.sigma_lbm_dm(), n, req.y, req.n_y)
+            apply_lbmgls(geom.sigma_lbm_dm()?, n, req.y, req.n_y)
         }
     })?
 }
@@ -206,6 +192,15 @@ pub(super) fn apply_lbmgls(
 ) -> Result<Vec<f64>, CoreError> {
     let pairs = basis::dense_eigenpairs(&mut sigdm, n, n)?;
     drop(sigdm);
+    apply_lbmgls_eigen(&pairs, n, y, n_y)
+}
+
+pub(super) fn apply_lbmgls_eigen(
+    pairs: &basis::Eigenpairs,
+    n: usize,
+    y: &[f64],
+    n_y: usize,
+) -> Result<Vec<f64>, CoreError> {
     // Eigenvalues are in descending order and each eigenvector is contiguous.
     let rank = pairs
         .values
@@ -222,7 +217,15 @@ pub(super) fn apply_lbmgls(
     let mut vt_y = vec![0.0_f64; rank * n_y];
     let mut centered = y.to_vec();
     crate::preparation::within(&mut centered, n_y, &vec![0; n], false)?;
-    linalg::multiply(&pairs.vectors, &centered, &mut vt_y, rank, n, n_y, false);
+    linalg::multiply(
+        &pairs.vectors[..rank * n],
+        &centered,
+        &mut vt_y,
+        rank,
+        n,
+        n_y,
+        false,
+    );
     let mut v_scaled = vec![0.0_f64; n * rank];
     for (j, &value) in pairs.values[..rank].iter().enumerate() {
         let inv_sqrt = value.sqrt().recip();

@@ -4,6 +4,7 @@ use super::halflife::{
     invert_half_life, log_sum_exp, quadratic_form_from_lower, MAX_HALFLIFE_TILE_BYTES,
 };
 use super::*;
+use crate::distance::distance_matrix;
 use crate::ErrorKind;
 
 fn load_bench_200_spur() -> (Vec<f64>, Vec<f64>, Vec<f64>) {
@@ -243,7 +244,11 @@ fn spur_decay_brackets_large_roots_and_checks_the_colocation_floor() {
     let roots = geom.get_cbar_batch(&targets).unwrap();
     for (&target, root) in targets.iter().zip(roots) {
         assert!(root > 10_240.0);
-        assert!((deterministic_mean_exp(&geom.lower_tri, root) - target).abs() < 1e-12);
+        assert!(
+            (crate::calibration::avg_correlation(root, &geom.pair_distances().unwrap()) - target)
+                .abs()
+                < 1e-12
+        );
         assert_eq!(geom.get_cbar(target), Ok(root));
     }
     let mut colocated =
@@ -298,9 +303,8 @@ fn spur_cbar_and_diagnostics_are_deterministic_and_thread_invariant() {
     let c099 = geom.get_cbar(0.999).unwrap();
     let c099_cached = geom.get_cbar(0.999).unwrap();
     assert_eq!(c099.to_bits(), c099_cached.to_bits());
-    assert!((c099 - 0.002_662_372_394_202_289_4).abs() < 1e-12);
-    let mean_rho = deterministic_mean_exp(&geom.lower_tri, c099);
-    assert!((mean_rho - 0.999).abs() < 1e-3, "mean_rho={mean_rho}");
+    let mean_rho = crate::calibration::avg_correlation(c099, &geom.pair_distances().unwrap());
+    assert!((mean_rho - 0.999).abs() < 1e-12, "mean_rho={mean_rho}");
 
     // Pipeline vs individual tests match to machine precision and are thread invariant.
     let pipe_1 = run_spur_pipeline(&SpurPipelineRequest {
@@ -492,7 +496,7 @@ fn spur_halflife_and_lbmgls_invariance_and_colocation() {
 
     // Reference H = V diag(lambda^-1/2) V' for the centered covariance -P D P / 2.
     let geometry = SpurGeometry::from_coords(&coords_col, 5, 2, Metric::Euclidean).unwrap();
-    let mut sigma: Vec<f64> = geometry.norm_distmat.iter().map(|d| -0.5 * d).collect();
+    let mut sigma: Vec<f64> = geometry.dense_brownian().unwrap();
     double_demean(&mut sigma, 5);
     let pairs = basis::dense_eigenpairs(&mut sigma, 5, 5).unwrap();
     let mut h = [0.0; 25];
@@ -842,18 +846,18 @@ fn optimized_omega_grid_quantiles_halflife_and_tiny_coords_match_reference() {
     let (_, _, coords_200) = load_bench_200_spur();
     let geom_200 = SpurGeometry::from_coords(&coords_200, 200, 2, Metric::Euclidean).unwrap();
     let (basis_200, _, mr_200, _) =
-        prepare_lbm_basis(&geom_200.sigma_lbm_dm(), &geom_200, 8).unwrap();
+        prepare_lbm_basis(&geom_200.sigma_lbm_dm().unwrap(), &geom_200, 8).unwrap();
     let c_vals = [0.25, 1.5, 8.0, 42.0, 120.0];
     let grid_serial = run_with_threads(Some(1), || {
-        geom_200.projected_omega_grid(&c_vals, &mr_200, 8)
+        geom_200.projected_omega_grid(&c_vals, &mr_200, 8).unwrap()
     })
     .unwrap();
     let grid_par = run_with_threads(Some(4), || {
-        geom_200.projected_omega_grid(&c_vals, &mr_200, 8)
+        geom_200.projected_omega_grid(&c_vals, &mr_200, 8).unwrap()
     })
     .unwrap();
     for (idx, &c) in c_vals.iter().enumerate() {
-        let ref_om = geom_200.projected_omega_from_mr(c, &mr_200, 8);
+        let ref_om = geom_200.projected_omega_from_mr(c, &mr_200, 8).unwrap();
         for k in 0..64 {
             assert!(
                 (grid_serial[idx][k] - ref_om[k]).abs() < 1e-12,
@@ -873,17 +877,18 @@ fn optimized_omega_grid_quantiles_halflife_and_tiny_coords_match_reference() {
         })
         .collect();
     let geom_big = SpurGeometry::from_coords(&coords_big, n_big, 2, Metric::Euclidean).unwrap();
-    let (_, _, mr_big, _) = prepare_lbm_basis(&geom_big.sigma_lbm_dm(), &geom_big, 6).unwrap();
+    let (_, _, mr_big, _) =
+        prepare_lbm_basis(&geom_big.sigma_lbm_dm().unwrap(), &geom_big, 6).unwrap();
     let big_serial = run_with_threads(Some(1), || {
-        geom_big.projected_omega_grid(&c_vals, &mr_big, 6)
+        geom_big.projected_omega_grid(&c_vals, &mr_big, 6).unwrap()
     })
     .unwrap();
     let big_par = run_with_threads(Some(4), || {
-        geom_big.projected_omega_grid(&c_vals, &mr_big, 6)
+        geom_big.projected_omega_grid(&c_vals, &mr_big, 6).unwrap()
     })
     .unwrap();
     for (idx, &c) in c_vals.iter().enumerate() {
-        let ref_om = geom_big.projected_omega_from_mr(c, &mr_big, 6);
+        let ref_om = geom_big.projected_omega_from_mr(c, &mr_big, 6).unwrap();
         for k in 0..36 {
             assert!((big_serial[idx][k] - ref_om[k]).abs() < 1e-12);
             assert_eq!(big_serial[idx][k].to_bits(), big_par[idx][k].to_bits());
@@ -921,7 +926,7 @@ fn optimized_omega_grid_quantiles_halflife_and_tiny_coords_match_reference() {
 
         // Reference log-sum-exp evaluation without the packed fast path.
         let g = SpurGeometry::from_coords(coords_hl, n_hl, 2, Metric::Euclidean).unwrap();
-        let sigdm_bm = g.sigma_lbm_dm();
+        let sigdm_bm = g.sigma_lbm_dm().unwrap();
         let (basis_r, _) = select_leading_basis(&sigdm_bm, &g, q_hl).unwrap();
         let mut mr = basis_r.clone();
         center_columns(&mut mr, n_hl, q_hl);
@@ -929,6 +934,7 @@ fn optimized_omega_grid_quantiles_halflife_and_tiny_coords_match_reference() {
         let min_distance = g.min_positive_distance();
         let compact = half_life_search_grid(min_distance);
         let ho_f: Vec<_> = half_life_covariances(&g, &mr, q_hl, &compact)
+            .unwrap()
             .iter()
             .map(|omega| factor_omega(omega, q_hl).unwrap())
             .collect();
@@ -937,7 +943,7 @@ fn optimized_omega_grid_quantiles_halflife_and_tiny_coords_match_reference() {
             .iter()
             .map(|&h| {
                 let c = std::f64::consts::LN_2 / h;
-                factor_omega(&g.projected_omega_from_mr(c, &mr, q_hl), q_hl).unwrap()
+                factor_omega(&g.projected_omega_from_mr(c, &mr, q_hl).unwrap(), q_hl).unwrap()
             })
             .collect();
         let q_f = q_hl as f64;
@@ -1206,6 +1212,7 @@ fn half_life_mixture_resolves_the_close_pair_contrast() {
     let (half_lives, weights) = half_life_mixture(geom.min_positive_distance());
     let points: Vec<_> = half_lives.iter().map(|h| h / (1.0 + h)).collect();
     let mixture: f64 = half_life_covariances(&geom, &basis, 4, &points)
+        .unwrap()
         .iter()
         .zip(weights)
         .map(|(omega, weight)| {

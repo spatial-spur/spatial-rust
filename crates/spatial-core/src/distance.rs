@@ -2,6 +2,7 @@
 
 use crate::{checked_len, CoreError};
 use rayon::prelude::*;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Metric {
@@ -25,22 +26,78 @@ struct GeographicPoint {
 }
 
 impl GeographicPoint {
-    fn new(lat: f64, lon: f64) -> Self {
-        let lat = lat.to_radians();
-        Self {
-            lat,
-            lon: lon.to_radians(),
-            cos_lat: lat.cos(),
+    fn new(lat: f64, lon: f64) -> Result<Self, CoreError> {
+        if lat.abs() > 90.0 {
+            return Err(CoreError::invalid_input(
+                "latitude must be between -90 and 90 degrees",
+            ));
         }
+        let (lat, lon, pole) = (
+            positive_zero(lat),
+            canonical_longitude(lon),
+            lat.abs() == 90.0,
+        );
+        Ok(Self {
+            lat,
+            lon: if pole { 0.0 } else { lon },
+            cos_lat: if pole { 0.0 } else { lat.to_radians().cos() },
+        })
     }
 
     fn half_angle(self, other: Self) -> f64 {
-        let lat = ((self.lat - other.lat) * 0.5).sin();
-        let lon = ((self.lon - other.lon) * 0.5).sin();
-        (lat * lat + self.cos_lat * other.cos_lat * lon * lon)
-            .clamp(0.0, 1.0)
-            .sqrt()
+        // Difference in degrees first. Converting positions separately breaks
+        // symmetry on grids, and subtracting 360 near the seam loses precision.
+        let lo = self.lon.min(other.lon);
+        let hi = self.lon.max(other.lon);
+        let delta = if hi - lo > 180.0 {
+            (180.0 - hi) + (lo + 180.0)
+        } else {
+            hi - lo
+        };
+        let lat = (0.5 * (self.lat - other.lat).abs()).to_radians().sin();
+        let lon = (0.5 * delta).to_radians().sin();
+        lat.hypot((self.cos_lat * other.cos_lat).sqrt() * lon)
+            .min(1.0)
             .asin()
+    }
+}
+
+fn positive_zero(value: f64) -> f64 {
+    if value == 0.0 {
+        0.0
+    } else {
+        value
+    }
+}
+
+fn canonical_longitude(lon: f64) -> f64 {
+    let lon = lon % 360.0;
+    positive_zero(if lon >= 180.0 {
+        lon - 360.0
+    } else if lon < -180.0 {
+        lon + 360.0
+    } else {
+        lon
+    })
+}
+
+/// The distinction between repeated observations at a location and separately
+/// declared regression sites belongs to the caller. This map is for geometry.
+pub(crate) struct Locations {
+    pub ids: Vec<usize>,
+    pub representatives: Vec<usize>,
+}
+
+impl Locations {
+    pub fn pair_fraction(&self) -> f64 {
+        let mut counts = vec![0.0; self.representatives.len()];
+        let mut matching = 0.0;
+        for &g in &self.ids {
+            matching += counts[g];
+            counts[g] += 1.0;
+        }
+        let n = self.ids.len() as f64;
+        matching / (n * (n - 1.0) * 0.5)
     }
 }
 
@@ -49,6 +106,7 @@ pub(crate) struct Distances<'a> {
     width: usize,
     geographic: Option<Vec<GeographicPoint>>,
     multiplier: f64,
+    metric: Metric,
 }
 
 impl<'a> Distances<'a> {
@@ -68,30 +126,18 @@ impl<'a> Distances<'a> {
         }
         let geographic = match metric {
             Metric::Euclidean => None,
-            Metric::GreatCircleFractionLatLon | Metric::GreatCircle { .. } => {
+            _ => {
                 if width != 2 {
                     return Err(CoreError::invalid_input(
                         "geographic coordinates require two columns",
                     ));
                 }
+                let lat = usize::from(metric == Metric::GreatCircleFractionLonLat);
                 Some(
                     coordinates
                         .chunks_exact(2)
-                        .map(|row| GeographicPoint::new(row[0], row[1]))
-                        .collect(),
-                )
-            }
-            Metric::GreatCircleFractionLonLat => {
-                if width != 2 {
-                    return Err(CoreError::invalid_input(
-                        "geographic coordinates require two columns",
-                    ));
-                }
-                Some(
-                    coordinates
-                        .chunks_exact(2)
-                        .map(|row| GeographicPoint::new(row[1], row[0]))
-                        .collect(),
+                        .map(|row| GeographicPoint::new(row[lat], row[1 - lat]))
+                        .collect::<Result<_, _>>()?,
                 )
             }
         };
@@ -112,6 +158,83 @@ impl<'a> Distances<'a> {
             width,
             geographic,
             multiplier,
+            metric,
+        })
+    }
+
+    pub fn canonical_coordinates(&self) -> Option<Vec<f64>> {
+        self.geographic.as_ref().map(|points| {
+            let lat_first = self.metric != Metric::GreatCircleFractionLonLat;
+            points
+                .iter()
+                .flat_map(|p| {
+                    if lat_first {
+                        [p.lat, p.lon]
+                    } else {
+                        [p.lon, p.lat]
+                    }
+                })
+                .collect()
+        })
+    }
+
+    pub fn coordinate_order(&self) -> Vec<usize> {
+        let mut rows: Vec<_> = (0..self.coordinates.len() / self.width).collect();
+        rows.sort_by(|&i, &j| {
+            if let Some(points) = &self.geographic {
+                return points[i]
+                    .lat
+                    .total_cmp(&points[j].lat)
+                    .then(points[i].lon.total_cmp(&points[j].lon));
+            }
+            self.coordinates[i * self.width..(i + 1) * self.width]
+                .iter()
+                .zip(&self.coordinates[j * self.width..(j + 1) * self.width])
+                .map(|(&a, &b)| positive_zero(a).total_cmp(&positive_zero(b)))
+                .find(|ord| !ord.is_eq())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        rows
+    }
+
+    pub fn locations(&self) -> Locations {
+        let mut ids = Vec::with_capacity(self.coordinates.len() / self.width);
+        let mut representatives = Vec::new();
+        let mut groups = HashMap::new();
+        for (i, row) in self.coordinates.chunks_exact(self.width).enumerate() {
+            let point;
+            let coords = if let Some(geographic) = &self.geographic {
+                point = [geographic[i].lat, geographic[i].lon];
+                &point[..]
+            } else {
+                row
+            };
+            let key: Vec<_> = coords.iter().map(|&v| positive_zero(v).to_bits()).collect();
+            let id = groups.entry(key).or_insert_with(|| {
+                representatives.push(i);
+                representatives.len() - 1
+            });
+            ids.push(*id);
+        }
+        Locations {
+            ids,
+            representatives,
+        }
+    }
+
+    pub fn rounding_resolution(&self, i: usize) -> f64 {
+        if self.geographic.is_some() {
+            return 0.0;
+        }
+        let row = &self.coordinates[i * self.width..(i + 1) * self.width];
+        row.iter().fold(0.0_f64, |norm, &v| {
+            let bits = v.abs().to_bits();
+            let next = f64::from_bits(if v.abs() == f64::MAX {
+                bits - 1
+            } else {
+                bits + 1
+            });
+            norm.hypot((next - v.abs()).abs())
         })
     }
 
@@ -137,6 +260,27 @@ impl<'a> Distances<'a> {
             }
         }
     }
+
+    pub(crate) fn fill_tile(&self, i: usize, j: usize, nj: usize, scale: f64, tile: &mut [f64]) {
+        for (row, values) in tile.chunks_exact_mut(nj).enumerate() {
+            for (col, value) in values.iter_mut().enumerate() {
+                *value = self.pair(i + row, j + col) / scale;
+            }
+        }
+    }
+}
+
+/// Canonical coordinate encoding used for exact co-location checks.
+pub fn canonical_coordinates(
+    coordinates: &[f64],
+    n: usize,
+    width: usize,
+    metric: Metric,
+) -> Result<Vec<f64>, CoreError> {
+    let distances = Distances::new(coordinates, n, width, metric)?;
+    Ok(distances
+        .canonical_coordinates()
+        .unwrap_or_else(|| coordinates.to_vec()))
 }
 
 /// The full symmetric distance matrix in row-major order.
@@ -147,7 +291,7 @@ pub fn distance_matrix(
     metric: Metric,
 ) -> Result<Vec<f64>, CoreError> {
     let distances = Distances::new(coordinates, n, width, metric)?;
-    let mut matrix = vec![0.0; checked_len(&[n, n])?];
+    let mut matrix = crate::zeroed(&[n, n], "dense distance matrix")?;
     if n == 0 {
         return Ok(matrix);
     }

@@ -43,7 +43,7 @@ pub(crate) fn check_native_process() -> Result<(), CoreError> {
         );
         if inherited_accelerate_state() {
             return Err(CoreError::unsupported(
-                "Accelerate was used before this process forked. Use a fresh process or the host fallback.",
+                "Accelerate was used before this process forked. Start a fresh process before calling Spatial SPUR.",
             ));
         }
     }

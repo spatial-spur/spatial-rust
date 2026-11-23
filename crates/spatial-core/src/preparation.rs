@@ -1,6 +1,9 @@
 //! Regression-side preparation for exact and Nyström SCPC. All matrices are row-major.
 
-use crate::scpc_op::{run_approx_scpc, run_exact_scpc, ApproxScpcRequest, ExactScpcRequest};
+use crate::scpc_op::{
+    run_approx_scpc_with_projection, run_exact_scpc_with_projection, ApproxScpcRequest,
+    ExactScpcRequest, Residualize,
+};
 use crate::{checked_len, linalg, nystrom::normalize_coords, CoreError, Metric, ScpcOutput};
 
 const RANK_TOL: f64 = 1e-10;
@@ -11,14 +14,14 @@ pub struct ScpcPreparation<'a> {
     pub n_sites: usize,
     pub n_obs: usize,
     pub n_scores: usize,
-    /// The first k coefficients being reported.
+    /// Estimates of the selected coefficients, in the order of the bread rows.
     pub coefficients: &'a [f64],
-    /// First k rows of the fitted model's bread (k × n_scores).
+    /// Selected rows of the inverse total Hessian (k × n_scores), in fitted score order.
     pub bread: &'a [f64],
     /// Fitted score contribution for each observation (n_obs × n_scores).
     pub scores: &'a [f64],
     /// Actual regressor columns, including the fitted intercept, before FE absorption.
-    /// For IV these are structural regressors. None selects unconditional inference.
+    /// For IV these are the fitted structural regressors. Conditional inference requires them.
     pub design: Option<&'a [f64]>,
     pub design_cols: usize,
     /// Full instrument design, including exogenous regressors and the fitted intercept.
@@ -379,6 +382,70 @@ fn product(
     Ok(result)
 }
 
+/// Form unweighted OLS or 2SLS score contributions from fitted design
+/// columns and structural residuals. The bread uses the inverse total cross
+/// product, without any residual-variance or degrees-of-freedom factor.
+pub fn regression_scores(
+    x: &[f64],
+    residuals: &[f64],
+    columns: usize,
+    instruments: Option<(&[f64], usize)>,
+) -> Result<(Vec<f64>, Vec<f64>), CoreError> {
+    let n = residuals.len();
+    if columns == 0 || columns > n || n > i32::MAX as usize {
+        return Err(CoreError::invalid_input(
+            "invalid fitted regression dimensions",
+        ));
+    }
+    check_matrix(x, n, columns)?;
+    check_matrix(residuals, n, 1)?;
+    let fitted = if let Some((z, width)) = instruments {
+        if width < columns || width > i32::MAX as usize {
+            return Err(CoreError::invalid_input("too few fitted instruments"));
+        }
+        check_matrix(z, n, width)?;
+        let mut scaled = z.to_vec();
+        equilibrate(&mut scaled, width);
+        let z = thin_svd(&scaled, n, width, false)?;
+        let rank = z.s.iter().take_while(|&&v| v > z.s[0] * RANK_TOL).count();
+        if rank < columns {
+            return Err(CoreError::invalid_input(
+                "fitted instruments have insufficient rank",
+            ));
+        }
+        let q: Vec<_> =
+            z.u.chunks_exact(z.s.len())
+                .flat_map(|row| row[..rank].iter().copied())
+                .collect();
+        let qtx = product(&q, x, rank, n, columns, true)?;
+        product(&q, &qtx, n, rank, columns, false)?
+    } else {
+        x.to_vec()
+    };
+    let mut scaled = fitted.clone();
+    let scales = equilibrate(&mut scaled, columns);
+    let fit = thin_svd(&scaled, n, columns, true)?;
+    if fit.s[columns - 1] <= fit.s[0] * RANK_TOL || scales.contains(&0.0) {
+        return Err(CoreError::invalid_input(
+            "fitted coefficients are not separately identified (rank-deficient design)",
+        ));
+    }
+    let mut dual = fit.vt;
+    for (row, s) in dual.chunks_exact_mut(columns).zip(fit.s) {
+        for (v, scale) in row.iter_mut().zip(&scales) {
+            *v = (*v / s) / scale;
+        }
+    }
+    let bread = product(&dual, &dual, columns, columns, columns, true)?;
+    let mut scores = fitted;
+    for (row, &u) in scores.chunks_exact_mut(columns).zip(residuals) {
+        for value in row {
+            *value *= u;
+        }
+    }
+    Ok((scores, bread))
+}
+
 fn transpose(a: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     let mut result = vec![0.0; a.len()];
     for i in 0..rows {
@@ -575,9 +642,173 @@ pub fn prepare_scpc_inputs(req: ScpcPreparation<'_>) -> Result<PreparedScpcInput
     Ok(out)
 }
 
-/// Prepare and run the host model as one operation. `seed=None` uses exact SCPC.
-/// For Nyström, coordinates and every aligned site/observation vector are put
-/// in the same canonical order before entering the prepared-input API.
+/// Statistical procedure requested by the host adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScpcInference {
+    ConditionalOls,
+    ConditionalTwoStageLeastSquares,
+    Unconditional,
+}
+
+/// Approximation and its sampling settings. An exact request has no random inputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScpcGeometry {
+    Exact,
+    Nystrom {
+        seed: u32,
+        landmarks: usize,
+        samples: usize,
+    },
+}
+
+impl ScpcGeometry {
+    pub const fn nystrom(seed: u32) -> Self {
+        Self::Nystrom {
+            seed,
+            landmarks: 1000,
+            samples: 20,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ScpcOptions {
+    pub inference: ScpcInference,
+    pub geometry: ScpcGeometry,
+    pub avc: f64,
+    pub cvs: bool,
+    pub cv_tolerance: f64,
+    pub nthreads: Option<usize>,
+}
+
+/// A fitted model with separate observation and site orderings. If the host passes
+/// within-transformed fitted matrices, the fixed-effect projection is applied only
+/// to spatial directions. A host residualizer is called on the initiating thread.
+#[allow(clippy::too_many_arguments)]
+pub fn run_fitted_scpc(
+    mut prep: ScpcPreparation<'_>,
+    coords: &[f64],
+    d: usize,
+    metric: Metric,
+    options: ScpcOptions,
+    within_design: bool,
+    residualize: Option<&Residualize<'_>>,
+) -> Result<ScpcOutput, CoreError> {
+    let n = prep.n_sites;
+    let k = prep.coefficients.len();
+    let uncond = options.inference == ScpcInference::Unconditional;
+    crate::threads::validate_nthreads(options.nthreads)?;
+    if d == 0 || coords.len() != checked_len(&[n, d])? {
+        return Err(CoreError::invalid_input(
+            "invalid SCPC coordinate dimensions",
+        ));
+    }
+    match options.inference {
+        ScpcInference::Unconditional => {
+            prep.design = None;
+            prep.design_cols = 0;
+            prep.instruments = None;
+            prep.instrument_cols = 0;
+            prep.direction_design = None;
+        }
+        ScpcInference::ConditionalOls if prep.design.is_some() && prep.instruments.is_none() => {}
+        ScpcInference::ConditionalTwoStageLeastSquares
+            if prep.design.is_some() && prep.instruments.is_some() => {}
+        _ => {
+            return Err(CoreError::invalid_input(
+                "fitted design does not match the requested SCPC procedure",
+            ))
+        }
+    }
+    if residualize.is_some() && (!within_design || prep.fixed_effects.is_some()) {
+        return Err(CoreError::invalid_input(
+            "host projection requires stored within-transformed matrices",
+        ));
+    }
+    let fe_id = prep.fixed_effects;
+    if within_design {
+        prep.fixed_effects = None;
+    }
+    let inputs = prepare_scpc_inputs(prep)?;
+    let ScpcGeometry::Nystrom {
+        seed,
+        landmarks,
+        samples,
+    } = options.geometry
+    else {
+        return run_exact_scpc_with_projection(
+            &ExactScpcRequest {
+                coords,
+                n,
+                d,
+                metric,
+                avc: options.avc,
+                uncond,
+                cvs: options.cvs,
+                coef: prep.coefficients,
+                wj: &inputs.wj,
+                cluster_id: prep.cluster_ids,
+                fe_id,
+                xj: inputs.xj.as_deref(),
+                xjs: inputs.xjs.as_deref(),
+                proj_u: inputs.proj_u.as_deref(),
+                proj_v: inputs.proj_v.as_deref(),
+                proj_rank: inputs.proj_rank,
+                cv_tolerance: options.cv_tolerance,
+                nthreads: options.nthreads,
+            },
+            residualize,
+        );
+    };
+    let (coords, perm, scale) = normalize_coords(coords, n, d, metric)?;
+    let wj: Vec<_> = perm
+        .iter()
+        .flat_map(|&old| inputs.wj[old * k..(old + 1) * k].iter().copied())
+        .collect();
+    let mut inverse = vec![0; n];
+    for (i, &old) in perm.iter().enumerate() {
+        inverse[old] = i;
+    }
+    // Keep observation-indexed arrays in fitted order even when sites are reordered.
+    let cluster_ids = prep.cluster_ids.map_or(inverse.clone(), |ids| {
+        ids.iter().map(|&g| inverse[g]).collect()
+    });
+    let mut out = run_approx_scpc_with_projection(
+        &ApproxScpcRequest {
+            coords: &coords,
+            n,
+            d,
+            metric,
+            avc: options.avc,
+            uncond,
+            cvs: options.cvs,
+            coef: prep.coefficients,
+            wj: &wj,
+            cluster_id: Some(&cluster_ids),
+            fe_id,
+            xj: inputs.xj.as_deref(),
+            xjs: inputs.xjs.as_deref(),
+            proj_u: inputs.proj_u.as_deref(),
+            proj_v: inputs.proj_v.as_deref(),
+            proj_rank: inputs.proj_rank,
+            cv_tolerance: options.cv_tolerance,
+            nthreads: options.nthreads,
+            seed,
+            landmarks,
+            samples,
+        },
+        residualize,
+    )?;
+    out.distance_scale = scale;
+    let width = out.q + 1;
+    out.wfin = inverse
+        .into_iter()
+        .flat_map(|i| out.wfin[i * width..(i + 1) * width].iter().copied())
+        .collect();
+    Ok(out)
+}
+
+/// Compatibility boundary for the original Stata SPI and fixtures.
 #[allow(clippy::too_many_arguments)]
 pub fn run_model_scpc(
     prep: ScpcPreparation<'_>,
@@ -589,94 +820,30 @@ pub fn run_model_scpc(
     nthreads: Option<usize>,
     seed: Option<u32>,
 ) -> Result<ScpcOutput, CoreError> {
-    let n = prep.n_sites;
-    let k = prep.coefficients.len();
-    let uncond = prep.design.is_none();
-    crate::threads::validate_nthreads(nthreads)?;
-    if d == 0 || coords.len() != checked_len(&[n, d])? {
-        return Err(CoreError::invalid_input(
-            "invalid SCPC coordinate dimensions",
-        ));
-    }
-    let mut inputs = prepare_scpc_inputs(prep)?;
-    let Some(seed) = seed else {
-        return run_exact_scpc(&ExactScpcRequest {
-            coords,
-            n,
-            d,
-            metric,
-            avc,
-            uncond,
-            cvs,
-            coef: prep.coefficients,
-            wj: &inputs.wj,
-            cluster_id: prep.cluster_ids,
-            fe_id: prep.fixed_effects,
-            xj: inputs.xj.as_deref(),
-            xjs: inputs.xjs.as_deref(),
-            proj_u: inputs.proj_u.as_deref(),
-            proj_v: inputs.proj_v.as_deref(),
-            proj_rank: inputs.proj_rank,
-            cv_tolerance: 0.001,
-            nthreads,
-        });
-    };
-    let (coords, perm) = normalize_coords(coords, n, d, metric)?;
-    let permute = |a: &[f64], width: usize| -> Vec<f64> {
-        perm.iter()
-            .flat_map(|&old| a[old * width..(old + 1) * width].iter().copied())
-            .collect()
-    };
-    inputs.wj = permute(&inputs.wj, k);
-    let mut fe = prep.fixed_effects.map(std::borrow::Cow::Borrowed);
-    let clusters = if let Some(ids) = prep.cluster_ids {
-        let mut inverse = vec![0; n];
-        for (i, &old) in perm.iter().enumerate() {
-            inverse[old] = i;
-        }
-        Some(ids.iter().map(|&g| inverse[g]).collect::<Vec<_>>())
+    let inference = if prep.design.is_none() {
+        ScpcInference::Unconditional
+    } else if prep.instruments.is_some() {
+        ScpcInference::ConditionalTwoStageLeastSquares
     } else {
-        for (v, width) in [
-            (&mut inputs.xj, k),
-            (&mut inputs.xjs, k),
-            (&mut inputs.proj_u, inputs.proj_rank),
-            (&mut inputs.proj_v, inputs.proj_rank),
-        ] {
-            if let Some(a) = v {
-                *a = permute(a, width);
-            }
-        }
-        if let Some(ids) = prep.fixed_effects {
-            fe = Some(std::borrow::Cow::Owned(
-                perm.iter().map(|&i| ids[i]).collect(),
-            ));
-        }
-        None
+        ScpcInference::ConditionalOls
     };
-    run_approx_scpc(&ApproxScpcRequest {
-        coords: &coords,
-        n,
+    let geometry = seed.map_or(ScpcGeometry::Exact, ScpcGeometry::nystrom);
+    run_fitted_scpc(
+        prep,
+        coords,
         d,
         metric,
-        avc,
-        uncond,
-        cvs,
-        coef: prep.coefficients,
-        wj: &inputs.wj,
-        cluster_id: clusters.as_deref(),
-        fe_id: fe.as_deref(),
-        xj: inputs.xj.as_deref(),
-        xjs: inputs.xjs.as_deref(),
-        proj_u: inputs.proj_u.as_deref(),
-        proj_v: inputs.proj_v.as_deref(),
-        proj_rank: inputs.proj_rank,
-        cv_tolerance: 0.001,
-        nthreads,
-        seed,
-        landmarks: 1000,
-        samples: 20,
-        pair_count: 1_000_000,
-    })
+        ScpcOptions {
+            inference,
+            geometry,
+            avc,
+            cvs,
+            cv_tolerance: 0.001,
+            nthreads,
+        },
+        false,
+        None,
+    )
 }
 
 #[cfg(test)]

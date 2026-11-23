@@ -63,19 +63,18 @@ $tmpLinkDir = (New-Item -ItemType Directory -Force -Path (Join-Path $targetDir '
 
 Push-Location $tmpLinkDir
 try {
-    & cl.exe /nologo /LD /MD /O2 /DSYSTEM=STWIN32 "/I$source" "$source/stplugin.c" "$source/stata_bridge.c" $rustArchive @libraries /Fe:scpc_rust.plugin
+    & cl.exe /nologo /LD /MD /O2 /DSYSTEM=STWIN32 "/I$source" "$source/stplugin.c" "$source/stata_bridge.c" $rustArchive @libraries /Fe:spatial_spur.plugin
     if ($LASTEXITCODE -ne 0) {
         throw 'Linking the Stata plugin failed.'
     }
-    $exports = & dumpbin.exe /nologo /exports scpc_rust.plugin
+    $exports = & dumpbin.exe /nologo /exports spatial_spur.plugin
     $exportedNames = $exports | ForEach-Object {
         if ($_ -match '^\s+\d+\s+[0-9a-fA-F]+\s+[0-9a-fA-F]+\s+(\w+)\s*$') { $Matches[1] }
     }
     if ($LASTEXITCODE -ne 0 -or ($exportedNames -join ' ') -ne 'pginit stata_call') {
         throw 'The Stata plugin must export pginit and stata_call.'
     }
-    Copy-Item scpc_rust.plugin (Join-Path $output 'scpc_rust.plugin') -Force
-    Copy-Item scpc_rust.plugin (Join-Path $output 'spur_rust.plugin') -Force
+    Copy-Item spatial_spur.plugin (Join-Path $output 'spatial_spur.plugin') -Force
 } finally {
     Pop-Location
 }

@@ -1,0 +1,2 @@
+v 3
+p spatial_spur Spatial correlation-robust inference and unit root diagnostics

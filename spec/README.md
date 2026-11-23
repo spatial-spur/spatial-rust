@@ -1,14 +1,12 @@
 # SCPC and SPUR methods specification
 
-Current version **0.3.9** records the spatial transformations, fitted IV directions and SPUR inference diagnostics. [Current record](0.3.9/README.md)
-
-The inherited theoretical scope covers exact conditional OLS SCPC for unclustered observations and half-life inference for a scalar spatial series. This specification defines the statistical targets and records the finite-sample conventions used to reproduce particular sources. It can be read and checked independently of Rust, the host packages, and their release fixtures.
-
-Published mathematical definitions and independent accuracy checks guide package defaults. Historical author conventions remain recorded for source comparison.
+[Version 0.4.0](0.4.0/README.md) is the current method and supported-use specification.
+The earlier editions record historical algorithms and verification references.
 
 | Document | Contents |
 | --- | --- |
-| [Current conventions](0.3.9/README.md) | ISO neighborhoods, centered LBM-GLS, conditional IV and SPUR dimension, tuning and simulation diagnostics. |
+| [Version 0.4.0](0.4.0/README.md) | Unified fitted-state, geometry, calibration, results, and execution contracts. |
+| [Version 0.3.9](0.3.9/README.md) | ISO neighborhoods, centered LBM-GLS, conditional IV, and SPUR dimensions and tuning. |
 | [Version 0.3.8 conventions](0.3.8/README.md) | Multiscale half-life inversion, response projection, attainable SPUR calibration, and fitted SCPC designs. |
 | [Version 0.3.7 conventions](0.3.7/README.md) | Continuous half-life inversion and SPUR rank inference. |
 | [Version 0.3.6 conventions](0.3.6/README.md) | SPUR residual response projection and native methods compatibility. |

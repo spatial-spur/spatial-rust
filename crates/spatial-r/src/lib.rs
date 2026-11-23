@@ -1,4 +1,6 @@
-//! Shared `extendr` R FFI adapter for `scpcR` and `spuR`.
+//! Native bindings for the spatialSpur R distribution.
+
+mod exports;
 
 use extendr_api::prelude::*;
 use spatial_core::{
@@ -10,9 +12,9 @@ use spatial_core::{
 
 fn core_err(err: CoreError) -> Error {
     match err.kind() {
-        ErrorKind::InvalidInput
-        | ErrorKind::TiedEigenspace
-        | ErrorKind::InvalidSampledCovariance => Error::Other(err.message().to_string()),
+        ErrorKind::InvalidInput | ErrorKind::TiedEigenspace => {
+            Error::Other(err.message().to_string())
+        }
         ErrorKind::UnsupportedCase => Error::Other(format!("unsupported case: {}", err.message())),
         ErrorKind::CalibrationFailed => {
             Error::Other(format!("calibration failed: {}", err.message()))
@@ -24,8 +26,7 @@ fn core_err(err: CoreError) -> Error {
     }
 }
 
-/// The extendr result envelope carries a classed R condition for approximate
-/// SCPC outcomes that the host needs to distinguish at dispatch.
+/// Preserve the tied-eigenspace condition when returning through extendr.
 pub struct ScpcError {
     message: String,
     class: Option<&'static str>,
@@ -44,7 +45,6 @@ impl From<CoreError> for ScpcError {
     fn from(error: CoreError) -> Self {
         let class = match error.kind() {
             ErrorKind::TiedEigenspace => Some("spatial_tied_eigenspace"),
-            ErrorKind::InvalidSampledCovariance => Some("spatial_invalid_sampled_covariance"),
             _ => None,
         };
         Self {
@@ -139,13 +139,20 @@ pub fn rust_run_model_scpc(
     bread: RMatrix<f64>,
     design: Nullable<RMatrix<f64>>,
     instruments: Nullable<RMatrix<f64>>,
-    direction_design: Nullable<RMatrix<f64>>,
     cluster_id: Nullable<Integers>,
     fe_id: Nullable<Integers>,
     nthreads: Nullable<i32>,
+    inference: &str,
+    method: &str,
     seed: Nullable<f64>,
+    landmarks: i32,
+    samples: i32,
+    cv_tolerance: f64,
+    residualizer: Nullable<Function>,
 ) -> std::result::Result<List, ScpcError> {
-    use spatial_core::{run_model_scpc, ScpcPreparation};
+    use spatial_core::{
+        run_fitted_scpc, ScpcGeometry, ScpcInference, ScpcOptions, ScpcPreparation,
+    };
 
     let n = coords.nrows();
     let d = coords.ncols();
@@ -179,19 +186,29 @@ pub fn rust_run_model_scpc(
         };
     let (x, design_cols) = read_design(design)?;
     let (z, instrument_cols) = read_design(instruments)?;
-    let (directions, direction_cols) = read_design(direction_design)?;
-    if directions.is_some() && direction_cols != p {
-        return Err(Error::Other(
-            "the fitted direction matrix must have one column per score".into(),
-        )
-        .into());
-    }
     let seed = match seed {
         Nullable::Null => None,
         Nullable::NotNull(s) if (0.0..4_294_967_296.0).contains(&s) && s.fract() == 0.0 => {
             Some(s as u32)
         }
         _ => return Err(Error::Other("seed must be an integer in [0, 2^32)".into()).into()),
+    };
+    let inference = match inference {
+        "conditional_ols" => ScpcInference::ConditionalOls,
+        "conditional_2sls" => ScpcInference::ConditionalTwoStageLeastSquares,
+        "unconditional" => ScpcInference::Unconditional,
+        _ => return Err(Error::Other("unknown SCPC inference procedure".into()).into()),
+    };
+    let geometry = match (method, seed) {
+        ("exact", None) => ScpcGeometry::Exact,
+        ("nystrom", Some(seed)) if landmarks >= 2 && samples >= 1 => ScpcGeometry::Nystrom {
+            seed,
+            landmarks: landmarks as usize,
+            samples: samples as usize,
+        },
+        _ => {
+            return Err(Error::Other("invalid SCPC method or approximation settings".into()).into())
+        }
     };
     let coord_data = col_major_to_row_major(coords.data(), n, d)?;
     let obs_scores = col_major_to_row_major(scores.data(), n_obs, p)?;
@@ -212,11 +229,33 @@ pub fn rust_run_model_scpc(
         design_cols,
         instruments: z.as_deref(),
         instrument_cols,
-        direction_design: directions.as_deref(),
+        direction_design: None,
         cluster_ids: cluster.as_deref(),
         fixed_effects: fe.as_deref(),
     };
-    let out = run_model_scpc(
+    let project = |values: &mut [f64], width| {
+        let apply = || -> extendr_api::Result<Vec<f64>> {
+            let matrix = row_major_to_rmatrix(values, n_obs, width)?;
+            let Nullable::NotNull(callback) = &residualizer else {
+                unreachable!()
+            };
+            let result = callback.call(pairlist!(x = matrix))?;
+            let projected: RMatrix<f64> = result.try_into()?;
+            if projected.nrows() != n_obs || projected.ncols() != width {
+                return Err(Error::Other(
+                    "host residualizer changed the dimensions of its input".into(),
+                ));
+            }
+            col_major_to_row_major(projected.data(), n_obs, width)
+        };
+        let projected = apply().map_err(|error| {
+            CoreError::invalid_input("fixed-effect projection failed")
+                .with_message(format!("Fixed-effect projection failed: {error}"))
+        })?;
+        values.copy_from_slice(&projected);
+        Ok(())
+    };
+    let out = run_fitted_scpc(
         model,
         &coord_data,
         d,
@@ -225,10 +264,19 @@ pub fn rust_run_model_scpc(
         } else {
             Metric::Euclidean
         },
-        avc,
-        cvs,
-        parse_r_nthreads(nthreads)?,
-        seed,
+        ScpcOptions {
+            avc,
+            cvs,
+            nthreads: parse_r_nthreads(nthreads)?,
+            geometry,
+            inference,
+            cv_tolerance,
+        },
+        true,
+        match &residualizer {
+            Nullable::Null => None,
+            Nullable::NotNull(_) => Some(&project),
+        },
     )?;
     Ok(build_r_scpc_list(out, n, k)?)
 }
@@ -251,6 +299,8 @@ fn build_r_scpc_list(out: ScpcOutput, n: usize, k_use: usize) -> extendr_api::Re
             "c0",
             "cmax",
             "cvfin",
+            "critical_95",
+            "distance_scale",
             "q",
             "tied",
         ],
@@ -261,6 +311,8 @@ fn build_r_scpc_list(out: ScpcOutput, n: usize, k_use: usize) -> extendr_api::Re
             Robj::from(out.c0),
             Robj::from(out.cmax),
             Robj::from(out.cvfin),
+            Robj::from(out.critical_95),
+            Robj::from(out.distance_scale),
             Robj::from(q_i32),
             Robj::from(out.tied),
         ],
@@ -761,6 +813,7 @@ pub fn build_info_r() -> List {
     list!(
         version = spatial_core::VERSION,
         spec_version = spatial_core::SPEC_VERSION,
+        earth_circumference_m = spatial_core::EARTH_CIRCUMFERENCE_M,
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
         linalg_provider = spatial_core::linalg_provider(),
@@ -795,7 +848,6 @@ mod tests {
             (CoreError::invalid_input("bad arg"), "bad arg"),
             (CoreError::unsupported("approx"), "unsupported case: approx"),
             (CoreError::tied("ambiguous"), "ambiguous"),
-            (CoreError::invalid_sampled_covariance("not psd"), "not psd"),
             (
                 CoreError::calibration("no root"),
                 "calibration failed: no root",
@@ -819,13 +871,6 @@ mod tests {
         let tied = ScpcError::from(CoreError::tied("tied basis"));
         assert_eq!(tied.class, Some("spatial_tied_eigenspace"));
         assert_eq!(tied.message, "tied basis");
-
-        let invalid_cov = ScpcError::from(CoreError::invalid_sampled_covariance("indefinite grid"));
-        assert_eq!(
-            invalid_cov.class,
-            Some("spatial_invalid_sampled_covariance")
-        );
-        assert_eq!(invalid_cov.message, "indefinite grid");
 
         let other_core = ScpcError::from(CoreError::degenerate("zero var"));
         assert_eq!(other_core.class, None);

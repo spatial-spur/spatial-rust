@@ -3,11 +3,9 @@
 use crate::basis::{scpc_basis, ScpcBasis};
 use crate::calibration::{correlation_floor, solve_c0_from_avc};
 use crate::covariance;
-use crate::distance::{distance_matrix, lower_triangle, Metric};
+use crate::distance::{distance_matrix, lower_triangle, Distances, Locations, Metric};
 use crate::linalg;
-use crate::nystrom::{
-    is_psd_prefix_grid, landmark_basis, sampled_covariance_grid, LandmarkRequest, SampledPairs,
-};
+use crate::nystrom::{landmark_basis, LandmarkRequest};
 use crate::student_t::ln_gamma;
 use crate::threads::{is_serial, run_with_threads};
 use crate::{checked_len, CoreError};
@@ -92,7 +90,6 @@ pub struct ApproxScpcRequest<'a> {
     pub seed: u32,
     pub landmarks: usize,
     pub samples: usize,
-    pub pair_count: usize,
 }
 
 /// Output of exact and approximate SCPC inference.
@@ -102,8 +99,11 @@ pub struct ScpcOutput {
     pub scpcstats: Vec<f64>,
     /// Optional row-major `k_use x 4`: two-sided critical values at `[32%, 10%, 5%, 1%]`.
     pub scpccvs: Option<Vec<f64>>,
+    /// Effective coefficient-specific critical values for the reported 95% intervals.
+    pub critical_95: Vec<f64>,
     /// Selected spatial basis `n x (q + 1)` in row-major order.
     pub wfin: Vec<f64>,
+    pub distance_scale: f64,
     pub c0: f64,
     pub cmax: f64,
     pub cvfin: f64,
@@ -140,28 +140,33 @@ fn covariance_grids(
     weights: &[&[f64]],
     widths: &[usize],
     scales: &[f64],
+    locations: &Locations,
 ) -> Result<Vec<Vec<f64>>, CoreError> {
     if dist.len() != checked_len(&[n, n])? {
         return Err(CoreError::invalid_input(
             "distance matrix dimensions do not match",
         ));
     }
-    covariance::project(n, weights, widths, scales, |i, j, ni, nj, tile| {
+    let mut grid = covariance::project(n, weights, widths, scales, |i, j, ni, nj, tile| {
         for (row, values) in tile.chunks_exact_mut(nj).take(ni).enumerate() {
             let start = (i + row) * n + j;
             values.copy_from_slice(&dist[start..start + nj]);
         }
-    })
+    })?;
+    for ((values, basis), &width) in grid.iter_mut().zip(weights).zip(widths) {
+        values.extend(covariance::independence_limit(locations, basis, width)?);
+    }
+    Ok(grid)
 }
 
 fn select_final_q(
     oms: &[f64],
     width: usize,
-    qmax: usize,
+    candidates: &[usize],
     tolerance: f64,
 ) -> Result<(usize, f64), CoreError> {
-    let results = map_indices(qmax, |idx| {
-        let q = idx + 1;
+    let results = map_indices(candidates.len(), |idx| {
+        let q = candidates[idx];
         let mut ws = ProbabilityWorkspace::new(q);
         let cv = ws.critical(oms, width, q, 0.05, tolerance)?;
         let qf = q as f64;
@@ -172,7 +177,9 @@ fn select_final_q(
     let best = results
         .into_iter()
         .min_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)))
-        .ok_or(CoreError::invalid_input("empty qmax search range"))?;
+        .ok_or(CoreError::degenerate(
+            "SCPC has no complete positive eigenspace",
+        ))?;
     Ok((best.0, best.1))
 }
 
@@ -205,6 +212,10 @@ fn normalize_covariance_basis(mut weights: Vec<f64>) -> Vec<f64> {
 }
 
 #[allow(clippy::too_many_arguments)]
+pub type Residualize<'a> = dyn Fn(&mut [f64], usize) -> Result<(), CoreError> + 'a;
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn build_conditional_basis(
     wfin: &[f64],
     n: usize,
@@ -219,113 +230,77 @@ fn build_conditional_basis(
     proj_v: Option<&[f64]>,
     proj_rank: usize,
 ) -> Result<Vec<f64>, CoreError> {
+    conditional_basis(
+        wfin, n, q, cluster_id, fe_id, xj, xjs, k_use, col_j, proj_u, proj_v, proj_rank, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn conditional_basis(
+    wfin: &[f64],
+    n: usize,
+    q: usize,
+    cluster_id: Option<&[usize]>,
+    fe_id: Option<&[usize]>,
+    xj: &[f64],
+    xjs: &[f64],
+    k_use: usize,
+    col_j: usize,
+    proj_u: Option<&[f64]>,
+    proj_v: Option<&[f64]>,
+    proj_rank: usize,
+    residualize: Option<&Residualize<'_>>,
+) -> Result<Vec<f64>, CoreError> {
     let width = q + 1;
     let mut wx = vec![0.0; checked_len(&[n, width])?];
     let mut pre_max = 0.0_f64;
 
-    if let Some(fe) = fe_id {
-        let m_obs = fe.len();
-        let n_fe = fe.iter().copied().max().map_or(0, |m| m + 1);
-        let mut counts = vec![0usize; n_fe];
-        for &f in fe {
-            counts[f] += 1;
-        }
-        if let Some(cl_id) = cluster_id {
-            let mut diag_g = vec![0.0_f64; n];
-            for (i, &g) in cl_id.iter().enumerate() {
-                diag_g[g] += xj[i * k_use + col_j] * xjs[i * k_use + col_j];
-            }
-            for g in 0..n {
-                wx[g * width] = wfin[g * width] * diag_g[g];
-            }
+    if fe_id.is_some() || residualize.is_some() {
+        let m_obs = xj.len() / k_use;
+        let site = |i| cluster_id.map_or(i, |ids| ids[i]);
+        let mut weighted = crate::zeroed(&[m_obs, q], "fixed-effect spatial directions")?;
+        let mut diagonal = vec![0.; n];
+        for i in 0..m_obs {
+            let g = site(i);
+            let x = xj[i * k_use + col_j];
+            diagonal[g] += x * xjs[i * k_use + col_j];
             for c in 0..q {
-                let column = (0..n).map(|g| diag_g[g] * wfin[g * width + 1 + c]);
-                pre_max = pre_max.max(scaled_norm(column));
-            }
-        } else {
-            for i in 0..n {
-                let xj_i = xj[i * k_use + col_j];
-                let xjs_i = xjs[i * k_use + col_j];
-                wx[i * width] = wfin[i * width] * xj_i * xjs_i;
-            }
-            for c in 0..q {
-                let column = (0..n).map(|i| {
-                    let idx = i * k_use + col_j;
-                    wfin[i * width + 1 + c] * xj[idx] * xjs[idx]
-                });
-                pre_max = pre_max.max(scaled_norm(column));
+                weighted[i * q + c] = wfin[g * width + 1 + c] * x;
             }
         }
-
-        if q > 0 {
-            let u_opt = if proj_rank > 0 {
-                Some(proj_u.ok_or(CoreError::invalid_input(
-                    "missing conditional projection U factor",
-                ))?)
-            } else {
-                None
-            };
-            let v_opt = if proj_rank > 0 {
-                Some(proj_v.ok_or(CoreError::invalid_input(
-                    "missing conditional projection V factor",
-                ))?)
-            } else {
-                None
-            };
-            let mut buf = vec![0.0_f64; m_obs];
-            let mut fe_sum = vec![0.0_f64; n_fe];
-            let mut proj_dot = vec![0.0_f64; proj_rank];
-
+        for g in 0..n {
+            wx[g * width] = diagonal[g] * wfin[g * width];
+        }
+        for c in 0..q {
+            pre_max = pre_max.max(scaled_norm(
+                (0..n).map(|g| diagonal[g] * wfin[g * width + 1 + c]),
+            ));
+        }
+        if let Some(project) = residualize {
+            project(&mut weighted, q)?;
+            if weighted.iter().any(|v| !v.is_finite()) {
+                return Err(CoreError::invalid_input(
+                    "fixed-effect projection returned non-finite directions",
+                ));
+            }
+        } else if let Some(ids) = fe_id {
+            crate::preparation::within(&mut weighted, q, ids, false)?;
+        }
+        if proj_rank > 0 {
+            let u = proj_u.expect("validated projection U");
+            let v = proj_v.expect("validated projection V");
+            let mut vtw = crate::zeroed(&[proj_rank, q], "fixed-effect score projection")?;
+            let mut adjustment = crate::zeroed(&[m_obs, q], "fixed-effect score adjustment")?;
+            linalg::multiply(v, &weighted, &mut vtw, proj_rank, m_obs, q, true);
+            linalg::multiply(u, &vtw, &mut adjustment, m_obs, proj_rank, q, false);
+            for (value, adj) in weighted.iter_mut().zip(adjustment) {
+                *value -= adj;
+            }
+        }
+        for (i, row) in weighted.chunks_exact(q).enumerate() {
+            let g = site(i);
             for c in 0..q {
-                if let Some(cl_id) = cluster_id {
-                    for i in 0..m_obs {
-                        buf[i] = wfin[cl_id[i] * width + 1 + c] * xj[i * k_use + col_j];
-                    }
-                } else {
-                    for i in 0..m_obs {
-                        buf[i] = wfin[i * width + 1 + c] * xj[i * k_use + col_j];
-                    }
-                }
-
-                fe_sum.fill(0.0);
-                for (i, &f) in fe.iter().enumerate() {
-                    fe_sum[f] += buf[i];
-                }
-                for f in 0..n_fe {
-                    fe_sum[f] /= counts[f] as f64;
-                }
-                for (i, &f) in fe.iter().enumerate() {
-                    buf[i] -= fe_sum[f];
-                }
-
-                if let (Some(u), Some(v)) = (u_opt, v_opt) {
-                    proj_dot.fill(0.0);
-                    for i in 0..m_obs {
-                        let v_row = &v[i * proj_rank..(i + 1) * proj_rank];
-                        let val = buf[i];
-                        for l in 0..proj_rank {
-                            proj_dot[l] += v_row[l] * val;
-                        }
-                    }
-                    for i in 0..m_obs {
-                        let u_row = &u[i * proj_rank..(i + 1) * proj_rank];
-                        let mut pval = 0.0_f64;
-                        for l in 0..proj_rank {
-                            pval += u_row[l] * proj_dot[l];
-                        }
-                        buf[i] -= pval;
-                    }
-                }
-
-                if let Some(cl_id) = cluster_id {
-                    for (i, &g) in cl_id.iter().enumerate() {
-                        wx[g * width + 1 + c] += buf[i] * xjs[i * k_use + col_j];
-                    }
-                } else {
-                    for i in 0..m_obs {
-                        wx[i * width + 1 + c] = buf[i] * xjs[i * k_use + col_j];
-                    }
-                }
+                wx[g * width + 1 + c] += xjs[i * k_use + col_j] * row[c];
             }
         }
     } else if let Some(cl_id) = cluster_id {
@@ -749,6 +724,7 @@ fn finalize_scpc_output(
     };
 
     let mut scpcstats = vec![0.0; checked_len(&[k_use, 6])?];
+    let mut critical_95 = vec![cvfin; k_use];
     let mut scpccvs = if cvs {
         Some(vec![0.0; checked_len(&[k_use, 4])?])
     } else {
@@ -777,6 +753,7 @@ fn finalize_scpc_output(
             let (p_c, cvx, cond_cvs) = cond_results[j];
             let p_final = p_u[j].max(p_c);
             let cv = cvfin.max(cvx);
+            critical_95[j] = cv;
             let row = &mut scpcstats[j * 6..(j + 1) * 6];
             row[0] = coef[j];
             row[1] = se_vec[j];
@@ -814,6 +791,8 @@ fn finalize_scpc_output(
     Ok(ScpcOutput {
         scpcstats,
         scpccvs,
+        critical_95,
+        distance_scale: 1.0,
         wfin,
         c0,
         cmax,
@@ -824,7 +803,15 @@ fn finalize_scpc_output(
 }
 
 /// Run the full exact SCPC inference pipeline in one call.
+#[cfg(test)]
 pub fn run_exact_scpc(req: &ExactScpcRequest<'_>) -> Result<ScpcOutput, CoreError> {
+    run_exact_scpc_with_projection(req, None)
+}
+
+pub fn run_exact_scpc_with_projection(
+    req: &ExactScpcRequest<'_>,
+    residualize: Option<&Residualize<'_>>,
+) -> Result<ScpcOutput, CoreError> {
     let cv_tolerance = validate_common_inputs(
         req.coords,
         req.n,
@@ -845,79 +832,108 @@ pub fn run_exact_scpc(req: &ExactScpcRequest<'_>) -> Result<ScpcOutput, CoreErro
     let n = req.n;
     let k_use = req.coef.len();
 
-    run_with_threads(req.nthreads, || {
-        let distmat = distance_matrix(req.coords, n, req.d, req.metric)?;
-        let (c0, cmax) = {
-            let dist_vec = lower_triangle(&distmat, n);
-            let floor = correlation_floor(&dist_vec)?;
-            if req.avc <= floor {
-                let sites = crate::distance::distinct_location_count(&distmat, n);
-                return Err(CoreError::calibration("unattainable SCPC decay").with_message(format!(
+    let (locations, distmat, scales, qmax, q, cvfin, tied, oms_full, wfin, c0, cmax) =
+        run_with_threads(req.nthreads, || {
+            let locations = Distances::new(req.coords, n, req.d, req.metric)?.locations();
+            let distmat = distance_matrix(req.coords, n, req.d, req.metric)?;
+            let (c0, cmax) = {
+                let dist_vec = lower_triangle(&distmat, n);
+                let floor = correlation_floor(&dist_vec)?;
+                if req.avc <= floor {
+                    let sites = crate::distance::distinct_location_count(&distmat, n);
+                    return Err(CoreError::calibration("unattainable SCPC decay").with_message(format!(
                     "Target correlation avc={} must exceed the co-located-pair fraction {floor:.6} ({sites} distinct locations).", req.avc
                 )));
-            }
-            let min_avc_eff = floor + (1.0 - floor) * MIN_AVC;
-            let c0 = solve_c0_from_avc(&dist_vec, req.avc)?;
-            let cmax = solve_c0_from_avc(&dist_vec, min_avc_eff)?;
-            (c0, cmax)
-        };
-        let scales = build_scale_grid(c0, cmax);
+                }
+                let min_avc_eff = floor + (1.0 - floor) * MIN_AVC;
+                let c0 = solve_c0_from_avc(&dist_vec, req.avc)?;
+                let cmax = solve_c0_from_avc(&dist_vec, min_avc_eff)?;
+                (c0, cmax)
+            };
+            let scales = build_scale_grid(c0, cmax);
 
-        let mut qmax = initial_qmax(req.avc);
-        let (basis, oms_full, q, cvfin): (ScpcBasis, Vec<f64>, usize, f64) = loop {
-            qmax = qmax.min(n - 1);
-            let basis = scpc_basis(&distmat, n, c0, qmax)?;
-            let mut grids = covariance_grids(&distmat, n, &[&basis.weights], &[qmax + 1], &scales)?;
-            let oms = grids.remove(0);
-            let (q_opt, cv_opt) = select_final_q(&oms, qmax + 1, qmax, cv_tolerance)?;
-            if q_opt < qmax || qmax == n - 1 {
-                break (basis, oms, q_opt, cv_opt);
-            }
-            qmax = ((qmax as f64) + (qmax as f64) * 0.5).round() as usize;
-        };
-
-        let full_width = qmax + 1;
-        let width = q + 1;
-        let wfin = trim_basis_columns(&basis.weights, n, full_width, width)?;
-        let (se_vec, tau_vec) = compute_uncond_stats(&wfin, req.wj, n, q, req.coef)?;
-
-        // Precompute conditional Oms before dropping the n x n distance matrix.
-        let omsx_list = if req.uncond {
-            drop(distmat);
-            None
-        } else {
-            let (xj, _) = normalized_columns(req.xj.expect("validated conditional xj"), k_use);
-            let xjs = req.xjs.expect("validated conditional xjs");
-            let wx_list = map_indices(k_use, |j| {
-                build_conditional_basis(
-                    &wfin,
+            let mut qmax = initial_qmax(req.avc);
+            let (basis, oms_full, q, cvfin): (ScpcBasis, Vec<f64>, usize, f64) = loop {
+                qmax = qmax.min(n - 1);
+                let basis = scpc_basis(&distmat, n, c0, qmax)?;
+                if basis.cutoff_tied {
+                    qmax = qmax + qmax.div_ceil(2);
+                    continue;
+                }
+                let mut grids = covariance_grids(
+                    &distmat,
                     n,
-                    q,
-                    req.cluster_id,
-                    req.fe_id,
-                    &xj,
-                    xjs,
-                    k_use,
-                    j,
-                    req.proj_u,
-                    req.proj_v,
-                    req.proj_rank,
-                )
-                .map(normalize_covariance_basis)
-            })?;
+                    &[&basis.weights],
+                    &[qmax + 1],
+                    &scales,
+                    &locations,
+                )?;
+                let oms = grids.remove(0);
+                let (q_opt, cv_opt) =
+                    select_final_q(&oms, qmax + 1, &basis.candidates, cv_tolerance)?;
+                if q_opt < qmax || !basis.more_positive {
+                    break (basis, oms, q_opt, cv_opt);
+                }
+                qmax = ((qmax as f64) + (qmax as f64) * 0.5).round() as usize;
+            };
+
+            let wfin = trim_basis_columns(&basis.weights, n, qmax + 1, q + 1)?;
+            Ok((
+                locations, distmat, scales, qmax, q, cvfin, basis.tied, oms_full, wfin, c0, cmax,
+            ))
+        })??;
+
+    let width = q + 1;
+    let wx_list = if req.uncond {
+        None
+    } else {
+        let (xj, _) = normalized_columns(req.xj.expect("validated conditional xj"), k_use);
+        let xjs = req.xjs.expect("validated conditional xjs");
+        let project = |j, host: Option<&Residualize<'_>>| {
+            conditional_basis(
+                &wfin,
+                n,
+                q,
+                req.cluster_id,
+                req.fe_id,
+                &xj,
+                xjs,
+                k_use,
+                j,
+                req.proj_u,
+                req.proj_v,
+                req.proj_rank,
+                host,
+            )
+            .map(normalize_covariance_basis)
+        };
+        Some(if residualize.is_some() {
+            (0..k_use)
+                .map(|j| project(j, residualize))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            run_with_threads(req.nthreads, || map_indices(k_use, |j| project(j, None)))??
+        })
+    };
+    run_with_threads(req.nthreads, || {
+        let (se_vec, tau_vec) = compute_uncond_stats(&wfin, req.wj, n, q, req.coef)?;
+        let omsx_list = if let Some(wx_list) = wx_list {
             let wx_refs: Vec<&[f64]> = wx_list.iter().map(Vec::as_slice).collect();
             let widths = vec![width; k_use];
-            let grids = covariance_grids(&distmat, n, &wx_refs, &widths, &scales)?;
-            drop(distmat);
-            Some(grids)
+            Some(covariance_grids(
+                &distmat, n, &wx_refs, &widths, &scales, &locations,
+            )?)
+        } else {
+            None
         };
+        drop(distmat);
 
         finalize_scpc_output(
             k_use,
             q,
             width,
             &oms_full,
-            full_width,
+            qmax + 1,
             cvfin,
             req.coef,
             &se_vec,
@@ -928,13 +944,21 @@ pub fn run_exact_scpc(req: &ExactScpcRequest<'_>) -> Result<ScpcOutput, CoreErro
             wfin,
             c0,
             cmax,
-            basis.tied,
+            tied,
         )
     })?
 }
 
 /// Run the full approximate (Nyström) SCPC inference pipeline in one call.
+#[cfg(test)]
 pub fn run_approx_scpc(req: &ApproxScpcRequest<'_>) -> Result<ScpcOutput, CoreError> {
+    run_approx_scpc_with_projection(req, None)
+}
+
+pub fn run_approx_scpc_with_projection(
+    req: &ApproxScpcRequest<'_>,
+    residualize: Option<&Residualize<'_>>,
+) -> Result<ScpcOutput, CoreError> {
     let cv_tolerance = validate_common_inputs(
         req.coords,
         req.n,
@@ -952,7 +976,7 @@ pub fn run_approx_scpc(req: &ApproxScpcRequest<'_>) -> Result<ScpcOutput, CoreEr
         req.proj_rank,
         req.cv_tolerance,
     )?;
-    if req.landmarks < 2 || req.samples == 0 || req.pair_count == 0 {
+    if req.landmarks < 2 || req.samples == 0 {
         return Err(CoreError::invalid_input(
             "invalid Nystrom landmark or sampling parameters",
         ));
@@ -962,95 +986,109 @@ pub fn run_approx_scpc(req: &ApproxScpcRequest<'_>) -> Result<ScpcOutput, CoreEr
     let m = req.landmarks.min(n);
     let q_limit = m - 1;
 
-    run_with_threads(req.nthreads, || {
-        let mut qmax = initial_qmax(req.avc);
-        let (lb, scales, oms_full, state_after_uncond, q, cvfin) = loop {
-            qmax = qmax.min(q_limit);
-            let lb = landmark_basis(
-                req.coords,
-                n,
-                req.d,
-                req.metric,
-                &LandmarkRequest {
-                    avc: req.avc,
-                    min_avc: MIN_AVC,
-                    components: qmax,
-                    landmarks: m,
-                    samples: req.samples,
-                    seed: req.seed,
-                },
-            )?;
-            let scales = build_scale_grid(lb.decay[0], lb.decay[1]);
-            let full_width = qmax + 1;
-            let (oms, state_after) = sampled_covariance_grid(
-                req.coords,
-                n,
-                req.d,
-                req.metric,
-                &lb.weights,
-                full_width,
-                &scales,
-                req.pair_count,
-                lb.state,
-            )?;
-            if !is_psd_prefix_grid(&oms, full_width, qmax) {
-                return Err(CoreError::invalid_sampled_covariance(
-                    "sampled SCPC covariance grid is not positive semidefinite",
-                ));
+    let distances = Distances::new(req.coords, n, req.d, req.metric)?;
+    let locations = distances.locations();
+    let project = |weights: &[&[f64]], widths: &[usize], scales: &[f64]| {
+        let mut grids = covariance::project(n, weights, widths, scales, |i, j, _, nj, tile| {
+            distances.fill_tile(i, j, nj, 1.0, tile);
+        })?;
+        for ((grid, basis), &width) in grids.iter_mut().zip(weights).zip(widths) {
+            grid.extend(covariance::independence_limit(&locations, basis, width)?);
+        }
+        Ok::<_, CoreError>(grids)
+    };
+    let (scales, wfin, full_width, oms_full, q, cvfin, c0, cmax, tied) = run_with_threads(
+        req.nthreads,
+        || {
+            let floor = locations.pair_fraction();
+            if req.avc <= floor {
+                return Err(CoreError::calibration("unattainable SCPC decay").with_message(format!(
+                "Target correlation avc={} must exceed the co-located-pair fraction {floor:.6} ({} distinct locations).",
+                req.avc, locations.representatives.len()
+            )));
             }
-            let (q_opt, cv_opt) = select_final_q(&oms, full_width, qmax, cv_tolerance)?;
-            if q_opt < qmax || qmax >= q_limit {
-                break (lb, scales, oms, state_after, q_opt, cv_opt);
-            }
-            qmax = ((qmax as f64) + (qmax as f64) * 0.5).round() as usize;
-        };
-
-        let [c0, cmax] = lb.decay;
-        let full_width = qmax + 1;
-        let width = q + 1;
-        let wfin = trim_basis_columns(&lb.weights, n, full_width, width)?;
-        let (se_vec, tau_vec) = compute_uncond_stats(&wfin, req.wj, n, q, req.coef)?;
-
-        let omsx_list = if req.uncond {
-            None
-        } else {
-            let (xj, _) = normalized_columns(req.xj.expect("validated conditional xj"), k_use);
-            let xjs = req.xjs.expect("validated conditional xjs");
-            // All reported coefficients use the same sample, starting immediately
-            // after the unconditional grid. Their order or selection cannot change it.
-            let pairs = SampledPairs::new(
-                req.coords,
-                n,
-                req.d,
-                req.metric,
-                req.pair_count,
-                state_after_uncond,
-            )?;
-            let grids = map_indices(k_use, |j| {
-                let wx = build_conditional_basis(
-                    &wfin,
+            let mut qmax = initial_qmax(req.avc);
+            let (lb, scales, oms_full, q, cvfin) = loop {
+                qmax = qmax.min(q_limit);
+                let lb = landmark_basis(
+                    req.coords,
                     n,
-                    q,
-                    req.cluster_id,
-                    req.fe_id,
-                    &xj,
-                    xjs,
-                    k_use,
-                    j,
-                    req.proj_u,
-                    req.proj_v,
-                    req.proj_rank,
+                    req.d,
+                    req.metric,
+                    &LandmarkRequest {
+                        avc: req.avc,
+                        min_avc: MIN_AVC,
+                        components: qmax,
+                        landmarks: m,
+                        samples: req.samples,
+                        seed: req.seed,
+                    },
                 )?;
-                let wx = normalize_covariance_basis(wx);
-                let omsx = pairs.covariance_grid(&wx, width, &scales)?;
-                if !is_psd_prefix_grid(&omsx, width, q) {
-                    return Err(CoreError::invalid_sampled_covariance(
-                        "sampled conditional SCPC covariance grid is not positive semidefinite",
-                    ));
+                if lb.cutoff_tied && qmax < q_limit {
+                    qmax += qmax.div_ceil(2);
+                    continue;
                 }
-                Ok(omsx)
-            })?;
-            Some(grids)
+                if lb.candidates.is_empty() && lb.cutoff_tied {
+                    return Err(CoreError::tied("Nyström component limit splits the leading eigenspace; increase landmarks or request exact SCPC"));
+                }
+                let scales = build_scale_grid(lb.decay[0], lb.decay[1]);
+                let full_width = qmax + 1;
+                let oms = project(&[&lb.weights], &[full_width], &scales)?.remove(0);
+                let (q_opt, cv_opt) =
+                    select_final_q(&oms, full_width, &lb.candidates, cv_tolerance)?;
+                if q_opt < qmax || qmax >= q_limit {
+                    break (lb, scales, oms, q_opt, cv_opt);
+                }
+                qmax = ((qmax as f64) + (qmax as f64) * 0.5).round() as usize;
+            };
+
+            let [c0, cmax] = lb.decay;
+            let full_width = qmax + 1;
+            let wfin = trim_basis_columns(&lb.weights, n, full_width, q + 1)?;
+            Ok((
+                scales, wfin, full_width, oms_full, q, cvfin, c0, cmax, lb.tied,
+            ))
+        },
+    )??;
+    let width = q + 1;
+    let wx_list = if req.uncond {
+        None
+    } else {
+        let (xj, _) = normalized_columns(req.xj.expect("validated conditional xj"), k_use);
+        let xjs = req.xjs.expect("validated conditional xjs");
+        let project = |j, host: Option<&Residualize<'_>>| {
+            conditional_basis(
+                &wfin,
+                n,
+                q,
+                req.cluster_id,
+                req.fe_id,
+                &xj,
+                xjs,
+                k_use,
+                j,
+                req.proj_u,
+                req.proj_v,
+                req.proj_rank,
+                host,
+            )
+            .map(normalize_covariance_basis)
+        };
+        Some(if residualize.is_some() {
+            (0..k_use)
+                .map(|j| project(j, residualize))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            run_with_threads(req.nthreads, || map_indices(k_use, |j| project(j, None)))??
+        })
+    };
+    run_with_threads(req.nthreads, || {
+        let (se_vec, tau_vec) = compute_uncond_stats(&wfin, req.wj, n, q, req.coef)?;
+        let omsx_list = if let Some(wx_list) = wx_list {
+            let wx_refs = wx_list.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            Some(project(&wx_refs, &vec![width; k_use], &scales)?)
+        } else {
+            None
         };
 
         finalize_scpc_output(
@@ -1069,7 +1107,7 @@ pub fn run_approx_scpc(req: &ApproxScpcRequest<'_>) -> Result<ScpcOutput, CoreEr
             wfin,
             c0,
             cmax,
-            false,
+            tied,
         )
     })?
 }

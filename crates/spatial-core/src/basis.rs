@@ -64,6 +64,12 @@ pub struct ScpcBasis {
     pub weights: Vec<f64>,
     /// True when leading eigenvalues are numerically tied or degenerate across the cutoff.
     pub tied: bool,
+    /// Complete positive eigenspace sizes within the computed prefix.
+    pub candidates: Vec<usize>,
+    /// The requested prefix ended inside a positive block.
+    pub cutoff_tied: bool,
+    /// There are additional positive directions beyond the prefix.
+    pub more_positive: bool,
 }
 
 /// The leading algebraic eigenvectors of the exponential covariance restricted
@@ -93,6 +99,7 @@ pub fn scpc_basis(
     let dimension = n - 1;
     let covariance = contrast_covariance(distances, n, scale);
     let eigen = leading_eigenpairs(Cow::Owned(covariance), dimension, q, 1.6e-11)?;
+    let blocks = positive_blocks(&eigen.values, eigen.next_value, 1.6e-11);
 
     let root_n = (n as f64).sqrt();
     let mut result = vec![root_n.recip(); checked_len(&[n, q + 1])?];
@@ -106,7 +113,10 @@ pub fn scpc_basis(
     }
     Ok(ScpcBasis {
         weights: result,
-        tied: eigen.tied,
+        tied: blocks.tied,
+        candidates: blocks.ends,
+        cutoff_tied: blocks.cutoff_tied,
+        more_positive: blocks.more_positive,
     })
 }
 
@@ -230,8 +240,39 @@ pub(crate) struct Eigenpairs {
     pub(crate) vectors: Vec<f64>,
 }
 
-fn eigen_gap_tolerance(leading: f64, gap_floor: f64) -> f64 {
+pub(crate) fn eigen_gap_tolerance(leading: f64, gap_floor: f64) -> f64 {
     (1.6e-11 * leading.abs()).max(gap_floor)
+}
+
+pub(crate) struct PositiveBlocks {
+    pub ends: Vec<usize>,
+    pub tied: bool,
+    pub cutoff_tied: bool,
+    pub more_positive: bool,
+}
+
+pub(crate) fn positive_blocks(values: &[f64], next: Option<f64>, gap_floor: f64) -> PositiveBlocks {
+    let leading = values[0];
+    let threshold = (1e-12 * leading).max(0.0);
+    let tolerance = eigen_gap_tolerance(leading, gap_floor);
+    let mut ends = Vec::new();
+    let mut tied = false;
+    let mut cutoff_tied = false;
+    for (i, &value) in values.iter().take_while(|&&v| v > threshold).enumerate() {
+        let following = values.get(i + 1).copied().or(next).unwrap_or(0.0);
+        if following <= threshold || value - following > tolerance {
+            ends.push(i + 1);
+        } else {
+            tied = true;
+            cutoff_tied = i + 1 == values.len();
+        }
+    }
+    PositiveBlocks {
+        ends,
+        tied,
+        cutoff_tied,
+        more_positive: next.is_some_and(|v| v > threshold),
+    }
 }
 
 fn has_tied_values(values: &[f64], gap_floor: f64) -> bool {

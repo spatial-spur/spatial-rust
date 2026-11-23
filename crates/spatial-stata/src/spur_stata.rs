@@ -13,7 +13,7 @@ use spatial_core::{
 use std::collections::HashMap;
 
 /// SPUR host convention for converting great-circle fractions to meters.
-pub(crate) const STATA_CIRCUMFERENCE_M: f64 = 2.0 * std::f64::consts::PI * 6_371_000.009;
+use spatial_core::EARTH_CIRCUMFERENCE_M;
 const HALF_LIFE_COMPONENT_ROWS: usize = 65;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,7 +369,7 @@ pub(crate) fn handle_spur_halflife(args: &[&str]) -> Result<(), String> {
         &diagnostic_info(out.tied, out.all_directions, None),
     )?;
     let max_dist_out = if latlong {
-        out.max_dist * STATA_CIRCUMFERENCE_M
+        out.max_dist * EARTH_CIRCUMFERENCE_M
     } else {
         out.max_dist
     };
@@ -430,7 +430,7 @@ pub(crate) fn handle_spur_transform(args: &[&str]) -> Result<(), String> {
                 ));
             }
             let eff_radius = if latlong {
-                radius / STATA_CIRCUMFERENCE_M
+                radius / EARTH_CIRCUMFERENCE_M
             } else {
                 radius
             };
@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn ping_and_spur_arg_validation_work() {
-        assert!(dispatch(&["ping_spur_v6"]).is_ok());
+        assert!(dispatch(&["ping_unified_v1"]).is_ok());
         for retired in ["ping_spur_v1", "ping_spur_v2", "ping_spur_v3"] {
             assert!(dispatch(&[retired]).is_err());
         }

@@ -21,14 +21,9 @@ use std::mem::align_of;
 #[allow(unexpected_cfgs)]
 mod exceptions {
     use pyo3::exceptions::PyValueError;
-    pyo3::create_exception!(
-        spatial_spur_rust,
-        InvalidSampledCovarianceError,
-        PyValueError
-    );
-    pyo3::create_exception!(spatial_spur_rust, TiedEigenspaceError, PyValueError);
+    pyo3::create_exception!(_native, TiedEigenspaceError, PyValueError);
 }
-use exceptions::{InvalidSampledCovarianceError, TiedEigenspaceError};
+use exceptions::TiedEigenspaceError;
 
 fn map_core_err(err: CoreError) -> PyErr {
     match err.kind() {
@@ -37,9 +32,6 @@ fn map_core_err(err: CoreError) -> PyErr {
         }
         ErrorKind::UnsupportedCase => PyNotImplementedError::new_err(err.to_string()),
         ErrorKind::TiedEigenspace => TiedEigenspaceError::new_err(err.to_string()),
-        ErrorKind::InvalidSampledCovariance => {
-            InvalidSampledCovarianceError::new_err(err.to_string())
-        }
         ErrorKind::InternalFailure => PyRuntimeError::new_err(err.to_string()),
     }
 }
@@ -260,6 +252,8 @@ fn build_scpc_result_dict<'py>(
         }
     }
     result.set_item("wfin", vec_to_pyarray2(py, output.wfin, n, output.q + 1)?)?;
+    result.set_item("critical_95", vec_to_pyarray1(py, output.critical_95))?;
+    result.set_item("distance_scale", output.distance_scale)?;
     result.set_item("c0", output.c0)?;
     result.set_item("cmax", output.cmax)?;
     result.set_item("cv", output.cvfin)?;
@@ -271,9 +265,10 @@ fn build_scpc_result_dict<'py>(
 /// Run SCPC on fitted-model inputs. All numerical preparation and row permutations
 /// take place inside the same native call as inference.
 #[pyfunction]
-#[pyo3(signature = (coords, coef, bread, scores, avc, *, design=None, instruments=None,
-    direction_design=None, cluster_id=None, fe_id=None, latlong=false, cvs=false,
-    nthreads=None, seed=None))]
+#[pyo3(signature = (coords, coef, bread, scores, avc, *, inference, method,
+    design=None, instruments=None, direction_design=None, cluster_id=None, fe_id=None,
+    residualizer=None, latlong=false, cvs=false, nthreads=None, seed=None,
+    landmarks=1000, samples=20, cv_tolerance=0.001))]
 #[allow(clippy::too_many_arguments)]
 fn run_model_scpc<'py>(
     py: Python<'py>,
@@ -282,17 +277,44 @@ fn run_model_scpc<'py>(
     bread: &Bound<'py, PyAny>,
     scores: &Bound<'py, PyAny>,
     avc: f64,
+    inference: &str,
+    method: &str,
     design: Option<Bound<'py, PyAny>>,
     instruments: Option<Bound<'py, PyAny>>,
     direction_design: Option<Bound<'py, PyAny>>,
     cluster_id: Option<Bound<'py, PyAny>>,
     fe_id: Option<Bound<'py, PyAny>>,
+    residualizer: Option<PyObject>,
     latlong: bool,
     cvs: bool,
     nthreads: Option<Bound<'py, PyAny>>,
     #[pyo3(from_py_with = "extract_integer")] seed: Option<u32>,
+    landmarks: usize,
+    samples: usize,
+    cv_tolerance: f64,
 ) -> PyResult<Bound<'py, PyDict>> {
-    use spatial_core::{run_model_scpc as run, ScpcPreparation};
+    use spatial_core::{
+        run_fitted_scpc, ScpcGeometry, ScpcInference, ScpcOptions, ScpcPreparation,
+    };
+    let inference = match inference {
+        "conditional_ols" => ScpcInference::ConditionalOls,
+        "conditional_2sls" => ScpcInference::ConditionalTwoStageLeastSquares,
+        "unconditional" => ScpcInference::Unconditional,
+        _ => return Err(PyValueError::new_err("unknown SCPC inference procedure")),
+    };
+    let geometry = match (method, seed) {
+        ("exact", None) => ScpcGeometry::Exact,
+        ("nystrom", Some(seed)) => ScpcGeometry::Nystrom {
+            seed,
+            landmarks,
+            samples,
+        },
+        _ => {
+            return Err(PyValueError::new_err(
+                "exact SCPC takes no seed; Nyström SCPC requires a seed",
+            ))
+        }
+    };
 
     let nthreads = parse_nthreads(nthreads)?;
     if !avc.is_finite() || avc <= 0.001 || avc >= 0.99 {
@@ -354,7 +376,31 @@ fn run_model_scpc<'py>(
         ));
     }
     let output = allow_threads_checked(py, || {
-        run(
+        let project = |values: &mut [f64], width| {
+            Python::with_gil(|py| {
+                let matrix = vec_to_pyarray2(py, values.to_vec(), n_obs, width)?;
+                let fit = residualizer
+                    .as_ref()
+                    .expect("present residualizer")
+                    .bind(py)
+                    .call1((matrix,))?;
+                let (require, kwargs) = make_float64_kwargs(py)?;
+                let (projected, rows, cols) =
+                    extract_2d_row_major_f64(&require, &kwargs, &fit, "within directions")?;
+                if (rows, cols) != (n_obs, width) {
+                    return Err(PyValueError::new_err(
+                        "host residualizer changed the dimensions of its input",
+                    ));
+                }
+                values.copy_from_slice(&projected);
+                Ok(())
+            })
+            .map_err(|err: PyErr| {
+                CoreError::invalid_input("host residualizer failed")
+                    .with_message(format!("Fixed-effect projection failed: {err}"))
+            })
+        };
+        run_fitted_scpc(
             ScpcPreparation {
                 n_sites,
                 n_obs,
@@ -373,10 +419,18 @@ fn run_model_scpc<'py>(
             &coords,
             d,
             metric,
-            avc,
-            cvs,
-            nthreads,
-            seed,
+            ScpcOptions {
+                inference,
+                geometry,
+                avc,
+                cvs,
+                nthreads,
+                cv_tolerance,
+            },
+            true,
+            residualizer
+                .as_ref()
+                .map(|_| &project as &spatial_core::Residualize<'_>),
         )
     })?
     .map_err(map_core_err)?;
@@ -913,6 +967,7 @@ fn build_info<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
     let info = PyDict::new_bound(py);
     info.set_item("version", spatial_core::VERSION)?;
     info.set_item("spec_version", spatial_core::SPEC_VERSION)?;
+    info.set_item("earth_circumference_m", spatial_core::EARTH_CIRCUMFERENCE_M)?;
     info.set_item("os", std::env::consts::OS)?;
     info.set_item("arch", std::env::consts::ARCH)?;
     info.set_item("linalg_provider", spatial_core::linalg_provider())?;
@@ -922,14 +977,10 @@ fn build_info<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
 }
 
 #[pymodule]
-fn spatial_spur_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("API_VERSION", spatial_core::SCPC_API_VERSION)?;
     m.add("SPUR_API_VERSION", spatial_core::SPUR_API_VERSION)?;
     m.add("LINALG_PROVIDER", spatial_core::linalg_provider())?;
-    m.add(
-        "InvalidSampledCovarianceError",
-        m.py().get_type_bound::<InvalidSampledCovarianceError>(),
-    )?;
     m.add(
         "TiedEigenspaceError",
         m.py().get_type_bound::<TiedEigenspaceError>(),

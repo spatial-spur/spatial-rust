@@ -1,8 +1,8 @@
 [package]
 name = "spatial-spur-rust"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
-description = "Shared PyO3 Rust backend for scpc-python and spur-python"
+description = "Native Python bindings for Spatial SPUR"
 license = "MIT"
 
 [lib]

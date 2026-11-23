@@ -1,13 +1,13 @@
 [package]
 name = "spatial-r"
-version = "0.2.0"
+version = "0.6.0"
 edition = "2021"
-description = "Shared extendr Rust adapter for scpcR and spuR"
+description = "Native R bindings for Spatial SPUR"
 license = "MIT"
 
 [lib]
 name = "spatial_r"
-crate-type = ["rlib"]
+crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 extendr-api = { version = "0.7", features = ["result_condition"] }

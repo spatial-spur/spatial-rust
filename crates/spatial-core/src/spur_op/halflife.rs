@@ -248,53 +248,36 @@ fn from_compact_half_life(t: f64) -> f64 {
 }
 
 pub(super) fn half_life_covariances(
-    geom: &SpurGeometry,
+    geom: &SpurGeometry<'_>,
     mr: &[f64],
     q: usize,
     points: &[f64],
-) -> Vec<Vec<f64>> {
-    let rates: Vec<_> = points
+) -> Result<Vec<Vec<f64>>, CoreError> {
+    use crate::covariance::Kernel;
+    let kernels = points
         .iter()
-        .map(|&t| std::f64::consts::LN_2 * (1.0 - t) / t)
-        .collect();
-    let regular: Vec<_> = rates
-        .iter()
-        .copied()
-        .filter(|rate| rate.is_finite() && *rate >= 0.01)
-        .collect();
-    let mut regular = geom.projected_omega_grid(&regular, mr, q).into_iter();
+        .filter(|&&t| t != 0.0)
+        .map(|&t| {
+            let half = from_compact_half_life(t);
+            let decay = std::f64::consts::LN_2 / half;
+            if decay == 0.0 {
+                Kernel::Brownian
+            } else if decay.is_finite() && decay >= 0.01 {
+                Kernel::Exponential(decay)
+            } else {
+                Kernel::HalfLife(half)
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut projected = geom.projected_kernels(&kernels, mr, q)?.into_iter();
     points
         .iter()
-        .zip(rates)
-        .map(|(&t, rate)| {
-            if rate.is_finite() && rate >= 0.01 {
-                return regular.next().expect("regular half-life covariance");
+        .map(|&t| {
+            if t == 0.0 {
+                geom.independence_limit(mr, q)
+            } else {
+                Ok(projected.next().expect("finite half-life covariance"))
             }
-            let kernel: Vec<_> = geom
-                .norm_distmat
-                .iter()
-                .map(|&d| {
-                    if t == 0.0 {
-                        if d == 0.0 {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    } else if rate.is_infinite() {
-                        (-std::f64::consts::LN_2 * (d / from_compact_half_life(t))).exp()
-                    } else if rate == 0.0 {
-                        -0.5 * d
-                    } else {
-                        0.5 * (-rate * d).exp_m1() / rate
-                    }
-                })
-                .collect();
-            let mut kr = vec![0.0; geom.n * q];
-            linalg::multiply(&kernel, mr, &mut kr, geom.n, geom.n, q, false);
-            let mut omega = vec![0.0; q * q];
-            linalg::multiply(mr, &kr, &mut omega, q, geom.n, q, true);
-            super::symmetrize(&mut omega, q);
-            omega
         })
         .collect()
 }
@@ -381,12 +364,13 @@ pub fn run_spur_halflife(req: &SpurHalfLifeRequest<'_>) -> Result<SpurHalfLifeOu
     }
 
     run_with_threads(req.nthreads, || {
-        let geom = SpurGeometry::from_coords(req.coords, req.n, req.d, req.metric)?;
+        let mut geom = SpurGeometry::from_coords(req.coords, req.n, req.d, req.metric)?;
+        geom.cache_pairs()?;
         let q = req.q;
         let n = req.n;
         let nrep = req.nrep;
 
-        let sigdm_bm = geom.sigma_lbm_dm();
+        let sigdm_bm = geom.sigma_lbm_dm()?;
         let (basis_r, info) = select_leading_basis(&sigdm_bm, &geom, q)?;
         let mut mr = basis_r.clone();
         center_columns(&mut mr, n, q);
@@ -397,8 +381,8 @@ pub fn run_spur_halflife(req: &SpurHalfLifeRequest<'_>) -> Result<SpurHalfLifeOu
         let (half_lives, weights) = half_life_mixture(min_distance);
         let log_weights: Vec<_> = weights.iter().map(|w| w.ln()).collect();
         let mixture_points: Vec<_> = half_lives.iter().map(|&h| h / (1.0 + h)).collect();
-        let om_ha = half_life_covariances(&geom, &mr, q, &mixture_points);
-        let om_ho = half_life_covariances(&geom, &mr, q, &grid);
+        let om_ha = half_life_covariances(&geom, &mr, q, &mixture_points)?;
+        let om_ho = half_life_covariances(&geom, &mr, q, &grid)?;
         let mut informative = false;
         for candidate in om_ho[1..].iter().chain(&om_ha) {
             if covariance_shapes_differ(candidate, &om_ho[0], q)? {
@@ -680,7 +664,7 @@ pub fn run_spur_halflife(req: &SpurHalfLifeRequest<'_>) -> Result<SpurHalfLifeOu
             .map(|&count| accepts_halflife_null(count, nrep, req.level))
             .collect();
         let components = invert_half_life(&grid, &accepted, |points| {
-            let omegas = half_life_covariances(&geom, &mr, q, points);
+            let omegas = half_life_covariances(&geom, &mr, q, points)?;
             Ok(evaluate(&omegas)?
                 .into_iter()
                 .map(|count| accepts_halflife_null(count, nrep, req.level))

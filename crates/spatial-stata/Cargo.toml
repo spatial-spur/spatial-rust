@@ -1,6 +1,6 @@
 [package]
 name = "spatial-stata"
-version = "0.2.0"
+version = "0.6.0"
 edition = "2021"
 description = "Shared Stata SPI v3 Rust plugin for scpc-stata and spur-stata"
 license = "MIT"

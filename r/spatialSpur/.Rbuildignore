@@ -1,0 +1,3 @@
+^src/rust-target$
+^src/.*\\.(o|so|dll)$
+^src/rust/vendor$

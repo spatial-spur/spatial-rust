@@ -11,7 +11,8 @@ pub fn avg_correlation(c: f64, distances: &[f64]) -> f64 {
         return f64::NAN;
     }
     // Chunk identically across serial and parallel paths so sum order is thread-count invariant.
-    let chunk_sums: Vec<f64> = if !crate::threads::is_serial() && distances.len() >= 4 * CHUNK_SIZE {
+    let chunk_sums: Vec<f64> = if !crate::threads::is_serial() && distances.len() >= 4 * CHUNK_SIZE
+    {
         distances
             .par_chunks(CHUNK_SIZE)
             .map_init(Vec::new, |scratch, chunk| {
@@ -55,7 +56,7 @@ pub fn correlation_floor(distances: &[f64]) -> Result<f64, CoreError> {
     Ok(zeros as f64 / distances.len() as f64)
 }
 
-fn eval_residual_and_slope_chunk(
+pub(crate) fn eval_residual_and_slope_chunk(
     distances: &[f64],
     c: f64,
     near_one: bool,
@@ -143,18 +144,27 @@ pub fn solve_c0_from_avc(distances: &[f64], target_avc: f64) -> Result<f64, Core
     }
     let n = distances.len();
     let floor = zeros as f64 / n as f64;
-    if max_d == 0.0
-        || !target_avc.is_finite()
-        || target_avc <= floor
-        || target_avc >= 1.0
-    {
+    solve_decay(
+        target_avc,
+        floor,
+        max_d,
+        sum_pos / (n - zeros) as f64,
+        |rate, near_one| eval_residual_and_slope(distances, rate, target_avc, near_one),
+    )
+}
+
+pub(crate) fn solve_decay(
+    target_avc: f64,
+    floor: f64,
+    max_d: f64,
+    mean_pos: f64,
+    evaluate: impl Fn(f64, bool) -> (f64, f64),
+) -> Result<f64, CoreError> {
+    if max_d == 0.0 || !target_avc.is_finite() || target_avc <= floor || target_avc >= 1.0 {
         return Err(CoreError::calibration(
             "target correlation must exceed the co-located-pair fraction and be below one",
         ));
     }
-
-    let pos_count = (n - zeros) as f64;
-    let mean_pos = sum_pos / pos_count;
     let target_pos = (target_avc - floor) / (1.0 - floor);
     let near_one = target_avc > 0.9999;
 
@@ -174,7 +184,7 @@ pub fn solve_c0_from_avc(distances: &[f64], target_avc: f64) -> Result<f64, Core
 
     let mut lo = raw_init;
     let mut hi = raw_init;
-    let (mut f_lo, mut d_lo) = eval_residual_and_slope(distances, lo, target_avc, near_one);
+    let (mut f_lo, mut d_lo) = evaluate(lo, near_one);
     if f_lo == 0.0 {
         return Ok(lo);
     }
@@ -189,7 +199,7 @@ pub fn solve_c0_from_avc(distances: &[f64], target_avc: f64) -> Result<f64, Core
                     "decay calibration lower bracket underflowed; distances may be degenerate",
                 ));
             }
-            let (f, d) = eval_residual_and_slope(distances, lo, target_avc, near_one);
+            let (f, d) = evaluate(lo, near_one);
             f_lo = f;
             d_lo = d;
             if f_lo == 0.0 {
@@ -213,12 +223,12 @@ pub fn solve_c0_from_avc(distances: &[f64], target_avc: f64) -> Result<f64, Core
             f_lo = f_hi;
             if hi >= f64::MAX * 0.5 {
                 hi = f64::MAX;
-                let (f, _) = eval_residual_and_slope(distances, hi, target_avc, near_one);
+                let (f, _) = evaluate(hi, near_one);
                 f_hi = f;
                 break;
             }
             hi *= 2.0;
-            let (f, d) = eval_residual_and_slope(distances, hi, target_avc, near_one);
+            let (f, d) = evaluate(hi, near_one);
             f_hi = f;
             if f_hi == 0.0 {
                 return Ok(hi);
@@ -250,7 +260,7 @@ pub fn solve_c0_from_avc(distances: &[f64], target_avc: f64) -> Result<f64, Core
     };
 
     for _ in 0..128 {
-        let (f, slope) = eval_residual_and_slope(distances, c, target_avc, near_one);
+        let (f, slope) = evaluate(c, near_one);
         if f.abs() <= residual_tol {
             return Ok(c);
         }
@@ -296,7 +306,7 @@ pub fn solve_c0_from_avc(distances: &[f64], target_avc: f64) -> Result<f64, Core
         }
     }
 
-    let (final_f, _) = eval_residual_and_slope(distances, c, target_avc, near_one);
+    let (final_f, _) = evaluate(c, near_one);
     let accept_tol = 1e-8 * (target_avc - floor).min(1.0 - target_avc).max(1e-15);
     if final_f.abs() <= accept_tol || (hi - lo) <= 1e-12 * c.max(f64::MIN_POSITIVE) {
         Ok(c)

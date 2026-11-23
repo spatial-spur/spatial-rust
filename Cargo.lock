@@ -782,7 +782,7 @@ checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
 name = "spatial-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "faer",
  "rayon",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "spatial-r"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "extendr-api",
  "spatial-core",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "spatial-spur-rust"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "numpy",
  "pyo3",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "spatial-stata"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "spatial-core",
 ]

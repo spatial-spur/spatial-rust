@@ -1,0 +1,15 @@
+v 3
+d Spatial SPUR for Stata
+d SCPC inference, SPUR diagnostics, transformations, and half-life confidence sets.
+f _spatial_spur.ado
+f scpc.ado
+f spur.ado
+f spurtest.ado
+f spurtransform.ado
+f spurhalflife.ado
+f spatial_spur.plugin
+f scpc.sthlp
+f spur.sthlp
+f spurtest.sthlp
+f spurtransform.sthlp
+f spurhalflife.sthlp

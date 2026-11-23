@@ -1,7 +1,8 @@
 //! Whole-operation SPUR diagnostics, half-life confidence intervals, and spatial transforms.
 
-use crate::calibration::{correlation_floor, solve_c0_from_avc};
-use crate::distance::{distance_matrix, lower_triangle, Metric};
+use crate::calibration::{eval_residual_and_slope_chunk, solve_c0_from_avc, solve_decay};
+use crate::covariance::{self, Kernel};
+use crate::distance::{Distances, Locations, Metric};
 use crate::threads::{is_serial, run_with_threads};
 use crate::{basis, checked_len, linalg, CoreError};
 use rayon::prelude::*;
@@ -10,79 +11,126 @@ mod halflife;
 mod transform;
 
 pub use halflife::{run_spur_halflife, SpurHalfLifeOutput, SpurHalfLifeRequest};
-use transform::apply_lbmgls;
+use transform::apply_lbmgls_eigen;
 pub use transform::{run_spur_transform, SpurTransformKind, SpurTransformRequest};
 
-const SUM_CHUNK_SIZE: usize = 32_768;
 const TILE_COLS: usize = 1024;
-const OMEGA_GRID_BLK: usize = 256;
-const MAX_PAIR_CONTRIB_DOUBLES: usize = 16_000_000;
 const SIZE_DENOMINATORS: [usize; 3] = [100, 20, 10];
 const RHO_I0_ALT: f64 = 0.001;
 const RHO_GRID_MIN: f64 = 0.0001;
 const RHO_GRID_MAX: f64 = 0.03;
 const RHO_GRID_LEN: usize = 30;
-const MAX_CBAR_BRACKET_STEPS: usize = 500;
 const MAX_HA_BRACKET_STEPS: usize = 200;
 
-struct SpurGeometry {
+const PAIR_CACHE_LIMIT: usize = 4096;
+
+struct SpurGeometry<'a> {
+    distances: Distances<'a>,
+    locations: Locations,
     n: usize,
     max_dist: f64,
-    norm_distmat: Vec<f64>,
-    lower_tri: Vec<f64>,
+    min_dist: f64,
     correlation_floor: f64,
+    pair_cache: Option<Vec<f64>>,
     cbar_cache: Vec<(f64, f64)>,
-    mean_exp_cache: Vec<(u64, f64)>,
 }
 
-impl SpurGeometry {
-    fn from_coords(coords: &[f64], n: usize, d: usize, metric: Metric) -> Result<Self, CoreError> {
-        if n < 2 || d == 0 || coords.len() != checked_len(&[n, d])? {
+impl<'a> SpurGeometry<'a> {
+    fn from_coords(
+        coords: &'a [f64],
+        n: usize,
+        d: usize,
+        metric: Metric,
+    ) -> Result<Self, CoreError> {
+        if n < 2 {
             return Err(CoreError::invalid_input(
-                "SPUR requires at least 2 observations and 1 coordinate column",
+                "SPUR requires at least two observations",
             ));
         }
-        let mut norm_distmat = distance_matrix(coords, n, d, metric)?;
-        let max_dist = norm_distmat.iter().copied().fold(0.0_f64, f64::max);
-        if !max_dist.is_finite() || max_dist <= 0.0 {
+        let distances = Distances::new(coords, n, d, metric)?;
+        let summarize = |i| {
+            (0..i).fold((0.0_f64, f64::INFINITY), |(max, min), j| {
+                let d = distances.pair(i, j);
+                (max.max(d), if d > 0.0 { min.min(d) } else { min })
+            })
+        };
+        let bounds = if !is_serial() && n >= 64 {
+            (1..n).into_par_iter().map(summarize).collect::<Vec<_>>()
+        } else {
+            (1..n).map(summarize).collect()
+        };
+        let (max_dist, min_dist) = bounds.into_iter().fold((0.0_f64, f64::INFINITY), |a, b| {
+            (a.0.max(b.0), a.1.min(b.1))
+        });
+        if max_dist == 0.0 {
             return Err(CoreError::invalid_input(
                 "all coordinates are identical (1 distinct location, co-located-pair fraction 1); normalization requires distinct locations",
             ));
         }
-        for v in &mut norm_distmat {
-            *v /= max_dist;
+        if !max_dist.is_finite() {
+            return Err(CoreError::invalid_input(
+                "pairwise distance exceeds the floating-point range",
+            ));
         }
-        let lower_tri = lower_triangle(&norm_distmat, n);
-        let correlation_floor = correlation_floor(&lower_tri)?;
+        let locations = distances.locations();
+        let correlation_floor = locations.pair_fraction();
         Ok(Self {
+            distances,
+            locations,
             n,
             max_dist,
-            norm_distmat,
-            lower_tri,
+            min_dist,
             correlation_floor,
+            pair_cache: None,
             cbar_cache: Vec::new(),
-            mean_exp_cache: Vec::new(),
         })
     }
 
     fn site_summary(&self) -> String {
-        let sites = if self.correlation_floor == 0.0 {
-            self.n
-        } else {
-            crate::distance::distinct_location_count(&self.norm_distmat, self.n)
-        };
         format!(
-            "{sites} distinct locations, co-located-pair fraction {:.6}.",
+            "{} distinct locations, co-located-pair fraction {:.6}.",
+            self.locations.representatives.len(),
             self.correlation_floor
         )
     }
 
     fn min_positive_distance(&self) -> f64 {
-        self.lower_tri
-            .iter()
-            .copied()
-            .filter(|&d| d > 0.0)
-            .fold(f64::INFINITY, f64::min)
+        self.min_dist / self.max_dist
+    }
+
+    fn distance(&self, i: usize, j: usize) -> f64 {
+        if let Some(cache) = &self.pair_cache {
+            let (hi, lo) = (i.max(j), i.min(j));
+            if hi == lo {
+                0.0
+            } else {
+                cache[hi * (hi - 1) / 2 + lo]
+            }
+        } else {
+            self.distances.pair(i, j) / self.max_dist
+        }
+    }
+
+    fn pair_distances(&self) -> Result<Vec<f64>, CoreError> {
+        let mut distances = crate::zeroed(
+            &[checked_len(&[self.n, self.n - 1])? / 2],
+            "condensed pair distances",
+        )?;
+        let mut offset = 0;
+        for i in 1..self.n {
+            for (j, value) in distances[offset..offset + i].iter_mut().enumerate() {
+                *value = self.distance(i, j);
+            }
+            offset += i;
+        }
+        Ok(distances)
+    }
+
+    fn cache_pairs(&mut self) -> Result<(), CoreError> {
+        if self.pair_cache.is_none() && self.n <= PAIR_CACHE_LIMIT {
+            self.pair_cache = Some(self.pair_distances()?);
+        }
+        Ok(())
     }
 
     fn validate_rhobar(&self, rhobar: f64) -> Result<(), CoreError> {
@@ -94,294 +142,170 @@ impl SpurGeometry {
         Ok(())
     }
 
-    /// Cached SPUR decay calibration, preserving replication-scale rounding for a valid bracket.
-    fn get_cbar(&mut self, rhobar: f64) -> Result<f64, CoreError> {
-        self.validate_rhobar(rhobar)?;
-        if let Some(&(_, cached)) = self
-            .cbar_cache
-            .iter()
-            .find(|&&(r, _)| r.to_bits() == rhobar.to_bits())
-        {
-            return Ok(cached);
-        }
-
-        let cbar = solve_cbar_cached(
-            &self.lower_tri,
-            rhobar,
-            !is_serial(),
-            &mut self.mean_exp_cache,
-        )?;
-        self.cbar_cache.push((rhobar, cbar));
-        Ok(cbar)
+    fn get_cbar(&mut self, rho: f64) -> Result<f64, CoreError> {
+        self.get_cbar_batch(&[rho]).map(|solved| solved[0])
     }
 
-    /// Solve `get_cbar` for a batch of `rhobar` values, reusing cache and running in parallel.
+    fn streamed_decay(&self, target: f64) -> Result<f64, CoreError> {
+        let count = self.n as f64 * (self.n - 1) as f64 * 0.5;
+        let mean = (1..self.n)
+            .map(|i| (0..i).map(|j| self.distance(i, j)).sum::<f64>())
+            .sum::<f64>()
+            / (count * (1.0 - self.correlation_floor));
+        solve_decay(
+            target,
+            self.correlation_floor,
+            1.0,
+            mean,
+            |scale, near_one| {
+                let evaluate_row = |i| {
+                    let row = (0..i).map(|j| self.distance(i, j)).collect::<Vec<_>>();
+                    eval_residual_and_slope_chunk(&row, scale, near_one, &mut Vec::new())
+                };
+                let sums: Vec<_> = if is_serial() {
+                    (1..self.n).map(evaluate_row).collect()
+                } else {
+                    (1..self.n).into_par_iter().map(evaluate_row).collect()
+                };
+                let (mass, derivative) = sums
+                    .into_iter()
+                    .fold((0.0, 0.0), |acc, (a, b)| (acc.0 + a, acc.1 + b));
+                let residual = mass / count + if near_one { 1.0 - target } else { -target };
+                (residual, -derivative / count)
+            },
+        )
+    }
+
     fn get_cbar_batch(&mut self, rhos: &[f64]) -> Result<Vec<f64>, CoreError> {
-        for &r in rhos {
-            self.validate_rhobar(r)?;
+        for &rho in rhos {
+            self.validate_rhobar(rho)?;
         }
-        let mut missing: Vec<f64> = Vec::new();
-        for &r in rhos {
-            let bits = r.to_bits();
-            let in_cache = self.cbar_cache.iter().any(|&(cr, _)| cr.to_bits() == bits);
-            let in_missing = missing.iter().any(|&mr| mr.to_bits() == bits);
-            if !in_cache && !in_missing {
-                missing.push(r);
-            }
-        }
-
-        if !missing.is_empty() {
-            let solved: Vec<(f64, f64)> = if !is_serial() && missing.len() >= 4 {
-                let seed_cache = self.mean_exp_cache.clone();
-                missing
-                    .par_iter()
-                    .map(|&r| {
-                        let mut local_cache = seed_cache.clone();
-                        solve_cbar_cached(&self.lower_tri, r, false, &mut local_cache)
-                            .map(|c| (r, c))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
+        self.cache_pairs()?;
+        let missing: Vec<_> = rhos
+            .iter()
+            .copied()
+            .filter(|&rho| !self.cbar_cache.iter().any(|&(cached, _)| cached == rho))
+            .collect();
+        let solve = |rho| {
+            let result = if let Some(cache) = &self.pair_cache {
+                solve_c0_from_avc(cache, rho)
             } else {
-                let par_chunks = !is_serial();
-                let mut solved_vec = Vec::with_capacity(missing.len());
-                for &r in &missing {
-                    let c = solve_cbar_cached(
-                        &self.lower_tri,
-                        r,
-                        par_chunks,
-                        &mut self.mean_exp_cache,
-                    )?;
-                    solved_vec.push((r, c));
-                }
-                solved_vec
+                self.streamed_decay(rho)
             };
-            self.cbar_cache.extend(solved);
-        }
-
-        let mut out = Vec::with_capacity(rhos.len());
-        for &r in rhos {
-            let bits = r.to_bits();
-            let &(_, val) = self
-                .cbar_cache
-                .iter()
-                .find(|&&(cr, _)| cr.to_bits() == bits)
-                .expect("cbar missing after batch solve");
-            out.push(val);
-        }
-        Ok(out)
-    }
-
-    fn sigma_lbm_dm(&self) -> Vec<f64> {
-        let n = self.n;
-        let mut mat = vec![0.0_f64; n * n];
-        for i in 0..n {
-            let d_i0 = self.norm_distmat[i * n];
-            let src = &self.norm_distmat[i * n..(i + 1) * n];
-            let dst = &mut mat[i * n..(i + 1) * n];
-            for j in 0..n {
-                dst[j] = 0.5 * (d_i0 + self.norm_distmat[j] - src[j]);
-            }
-        }
-        double_demean(&mut mat, n);
-        mat
-    }
-
-    fn kernel_for_projection(&self, c: f64) -> Vec<f64> {
-        if c == f64::INFINITY {
-            return self
-                .norm_distmat
-                .iter()
-                .map(|&d| if d == 0.0 { 1.0 } else { 0.0 })
-                .collect();
-        }
-        let n = self.n;
-        let mut l_exp = vec![0.0_f64; self.lower_tri.len()];
-        if c < 0.01 {
-            for (value, distance) in l_exp.iter_mut().zip(&self.lower_tri) {
-                *value = (-c * distance).exp_m1();
-            }
+            result.map(|rate| (rho, rate))
+        };
+        let solved = if is_serial() || self.pair_cache.is_none() || missing.len() < 4 {
+            missing
+                .into_iter()
+                .map(solve)
+                .collect::<Result<Vec<_>, _>>()?
         } else {
-            linalg::exp_scaled(&self.lower_tri, -c, &mut l_exp);
-        }
-        let mut kern = vec![0.0_f64; n * n];
-        let mut idx = 0usize;
-        for i in 0..n {
-            kern[i * n + i] = if c < 0.01 { 0.0 } else { 1.0 };
-            for j in 0..i {
-                let v = l_exp[idx];
-                idx += 1;
-                kern[i * n + j] = v;
-                kern[j * n + i] = v;
-            }
-        }
-        kern
+            missing
+                .into_par_iter()
+                .map(solve)
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        self.cbar_cache.extend(solved);
+        Ok(rhos
+            .iter()
+            .map(|&rho| {
+                self.cbar_cache
+                    .iter()
+                    .find(|&&(cached, _)| cached == rho)
+                    .expect("calibrated decay is cached")
+                    .1
+            })
+            .collect())
     }
 
-    fn projected_omega_from_mr(&self, c: f64, mr: &[f64], q: usize) -> Vec<f64> {
-        let n = self.n;
-        let sig = self.kernel_for_projection(c);
-        let mut sig_mr = vec![0.0_f64; n * q];
-        linalg::multiply(&sig, mr, &mut sig_mr, n, n, q, false);
-        let mut om = vec![0.0_f64; q * q];
-        linalg::multiply(mr, &sig_mr, &mut om, q, n, q, true);
-        symmetrize(&mut om, q);
-        om
-    }
-
-    fn projected_omega_grid(&self, c_vals: &[f64], mr: &[f64], q: usize) -> Vec<Vec<f64>> {
-        let nc = c_vals.len();
-        if nc == 0 {
-            return Vec::new();
-        }
-        let n = self.n;
-        let qq = q * q;
-        let blk = OMEGA_GRID_BLK;
-
-        let mut pairs = Vec::new();
-        for i0 in (0..n).step_by(blk) {
-            for j0 in (i0..n).step_by(blk) {
-                pairs.push((i0, j0));
-            }
-        }
-
-        let eval_pair_into = |i0: usize,
-                              j0: usize,
-                              c_slice: &[f64],
-                              d_blk: &mut Vec<f64>,
-                              s_blk: &mut Vec<f64>,
-                              sr_blk: &mut Vec<f64>,
-                              delta: &mut Vec<f64>,
-                              dst_flat: &mut [f64]| {
-            let bi = blk.min(n - i0);
-            let bj = blk.min(n - j0);
-            let len = bi * bj;
-            s_blk.resize(len, 0.0);
-            sr_blk.resize(bi * q, 0.0);
-            delta.resize(qq, 0.0);
-            let r_i = &mr[i0 * q..(i0 + bi) * q];
-            let r_j = &mr[j0 * q..(j0 + bj) * q];
-
-            if i0 == j0 {
-                let tri_len = bi * (bi + 1) / 2;
-                d_blk.resize(tri_len * 2, 0.0);
-                {
-                    let mut k = 0usize;
-                    for r in 0..bi {
-                        let row = &self.norm_distmat[(i0 + r) * n + i0..(i0 + r) * n + i0 + bi];
-                        for col in r..bi {
-                            d_blk[k] = row[col];
-                            k += 1;
-                        }
-                    }
-                }
-                for (m, &c) in c_slice.iter().enumerate() {
-                    let (d_tri, s_tri) = d_blk.split_at_mut(tri_len);
-                    linalg::exp_scaled(d_tri, -c, s_tri);
-                    let mut k = 0usize;
-                    for r in 0..bi {
-                        s_blk[r * bi + r] = s_tri[k];
-                        k += 1;
-                        for col in (r + 1)..bi {
-                            let v = s_tri[k];
-                            k += 1;
-                            s_blk[r * bi + col] = v;
-                            s_blk[col * bi + r] = v;
-                        }
-                    }
-                    linalg::multiply(&s_blk[..len], r_j, &mut sr_blk[..bi * q], bi, bj, q, false);
-                    linalg::multiply(r_i, &sr_blk[..bi * q], &mut delta[..qq], q, bi, q, true);
-                    let om_m = &mut dst_flat[m * qq..(m + 1) * qq];
-                    for k_idx in 0..qq {
-                        om_m[k_idx] += delta[k_idx];
-                    }
-                }
-            } else {
-                d_blk.resize(len, 0.0);
-                for r in 0..bi {
-                    d_blk[r * bj..(r + 1) * bj].copy_from_slice(
-                        &self.norm_distmat[(i0 + r) * n + j0..(i0 + r) * n + j0 + bj],
-                    );
-                }
-                for (m, &c) in c_slice.iter().enumerate() {
-                    linalg::exp_scaled(&d_blk[..len], -c, &mut s_blk[..len]);
-                    linalg::multiply(&s_blk[..len], r_j, &mut sr_blk[..bi * q], bi, bj, q, false);
-                    linalg::multiply(r_i, &sr_blk[..bi * q], &mut delta[..qq], q, bi, q, true);
-                    let om_m = &mut dst_flat[m * qq..(m + 1) * qq];
-                    for a in 0..q {
-                        for b in 0..q {
-                            om_m[a * q + b] += delta[a * q + b] + delta[b * q + a];
-                        }
-                    }
-                }
+    fn dense_brownian(&self) -> Result<Vec<f64>, CoreError> {
+        let mut matrix = crate::zeroed(&[self.n, self.n], "Brownian kernel")?;
+        let fill = |(i, row): (usize, &mut [f64])| {
+            for (j, value) in row.iter_mut().enumerate() {
+                *value = -0.5 * self.distance(i, j);
             }
         };
-
-        let mut flat_out = vec![0.0_f64; nc * qq];
-        if !is_serial() && pairs.len() >= 4 && pairs.len() * nc * qq <= MAX_PAIR_CONTRIB_DOUBLES {
-            let stride = nc * qq;
-            let mut pair_contribs = vec![0.0_f64; pairs.len() * stride];
-            pair_contribs
-                .par_chunks_mut(stride)
-                .zip(pairs.par_iter())
-                .for_each_init(
-                    || (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-                    |(d_blk, s_blk, sr_blk, delta), (dst, &(i0, j0))| {
-                        eval_pair_into(i0, j0, c_vals, d_blk, s_blk, sr_blk, delta, dst);
-                    },
-                );
-            for p_idx in 0..pairs.len() {
-                let src = &pair_contribs[p_idx * stride..(p_idx + 1) * stride];
-                for k in 0..stride {
-                    flat_out[k] += src[k];
-                }
-            }
-        } else if !is_serial() && nc >= 4 {
-            let nthreads = rayon::current_num_threads().max(1);
-            let chunk_len = nc.div_ceil(nthreads).max(1);
-            flat_out
-                .par_chunks_mut(chunk_len * qq)
-                .zip(c_vals.par_chunks(chunk_len))
-                .for_each_init(
-                    || (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-                    |(d_blk, s_blk, sr_blk, delta), (dst, c_chunk)| {
-                        for &(i0, j0) in &pairs {
-                            eval_pair_into(i0, j0, c_chunk, d_blk, s_blk, sr_blk, delta, dst);
-                        }
-                    },
-                );
+        if is_serial() || self.n < 64 {
+            matrix.chunks_exact_mut(self.n).enumerate().for_each(fill);
         } else {
-            let mut d_blk = Vec::new();
-            let mut s_blk = Vec::new();
-            let mut sr_blk = Vec::new();
-            let mut delta = Vec::new();
-            for &(i0, j0) in &pairs {
-                eval_pair_into(
-                    i0,
-                    j0,
-                    c_vals,
-                    &mut d_blk,
-                    &mut s_blk,
-                    &mut sr_blk,
-                    &mut delta,
-                    &mut flat_out,
-                );
-            }
+            matrix
+                .par_chunks_exact_mut(self.n)
+                .enumerate()
+                .for_each(fill);
         }
-
-        flat_out
-            .chunks_exact(qq)
-            .map(|slice| {
-                let mut om = slice.to_vec();
-                symmetrize(&mut om, q);
-                om
-            })
-            .collect()
+        Ok(matrix)
     }
 
-    fn residual_sigma_bm(&self, qx: &[f64], k_x: usize) -> Vec<f64> {
+    fn sigma_lbm_dm(&self) -> Result<Vec<f64>, CoreError> {
+        let mut matrix = self.dense_brownian()?;
+        double_demean(&mut matrix, self.n);
+        Ok(matrix)
+    }
+
+    fn projected_kernels(
+        &self,
+        kernels: &[Kernel],
+        mr: &[f64],
+        q: usize,
+    ) -> Result<Vec<Vec<f64>>, CoreError> {
+        if kernels.is_empty() {
+            return Ok(Vec::new());
+        }
+        let grid =
+            covariance::project_kernels(self.n, &[mr], &[q], kernels, |i, j, _, nj, distances| {
+                if self.pair_cache.is_none() {
+                    self.distances.fill_tile(i, j, nj, self.max_dist, distances);
+                } else {
+                    for (r, row) in distances.chunks_exact_mut(nj).enumerate() {
+                        for (c, value) in row.iter_mut().enumerate() {
+                            *value = self.distance(i + r, j + c);
+                        }
+                    }
+                }
+            })?
+            .remove(0);
+        Ok(grid.chunks_exact(q * q).map(<[f64]>::to_vec).collect())
+    }
+
+    fn independence_limit(&self, mr: &[f64], q: usize) -> Result<Vec<f64>, CoreError> {
+        covariance::independence_limit(&self.locations, mr, q)
+    }
+
+    fn projected_omega_from_mr(
+        &self,
+        scale: f64,
+        mr: &[f64],
+        q: usize,
+    ) -> Result<Vec<f64>, CoreError> {
+        if scale == f64::INFINITY {
+            return self.independence_limit(mr, q);
+        }
+        Ok(self.projected_omega_grid(&[scale], mr, q)?.remove(0))
+    }
+
+    fn projected_omega_grid(
+        &self,
+        scales: &[f64],
+        mr: &[f64],
+        q: usize,
+    ) -> Result<Vec<Vec<f64>>, CoreError> {
+        let kernels = scales
+            .iter()
+            .map(|&scale| {
+                if scale < 0.01 {
+                    Kernel::CenteredExponential(scale)
+                } else {
+                    Kernel::Exponential(scale)
+                }
+            })
+            .collect::<Vec<_>>();
+        self.projected_kernels(&kernels, mr, q)
+    }
+
+    fn residual_sigma_bm(&self, qx: &[f64], k_x: usize) -> Result<Vec<f64>, CoreError> {
         let n = self.n;
         // The residual projector removes both origin terms of the LBM covariance.
-        let mut sig: Vec<_> = self.norm_distmat.iter().map(|&d| -0.5 * d).collect();
+        let mut sig = self.dense_brownian()?;
         // Since M = I - Q_x Q_x' and sig is symmetric:
         // M * sig * M = sig - Q_x * (Q_x' * sig) - (sig * Q_x) * Q_x' + Q_x * (Q_x' * sig * Q_x) * Q_x'.
         let mut qt_sig = vec![0.0_f64; k_x * n];
@@ -413,7 +337,7 @@ impl SpurGeometry {
                 sig[j * n + i] = val;
             }
         }
-        sig
+        Ok(sig)
     }
 }
 
@@ -484,98 +408,6 @@ pub struct SpurPipelineOutput {
     pub i0resid: SpurI0Output,
     pub i1resid: SpurI1Output,
     pub transformed_vars: Vec<f64>,
-}
-
-fn deterministic_mean_exp_mode(vd: &[f64], c: f64, allow_parallel: bool) -> f64 {
-    if vd.is_empty() {
-        return f64::NAN;
-    }
-    let chunk_sums: Vec<f64> = if allow_parallel && vd.len() >= 4 * SUM_CHUNK_SIZE {
-        vd.par_chunks(SUM_CHUNK_SIZE)
-            .map_init(Vec::new, |scratch, chunk| {
-                scratch.resize(chunk.len(), 0.0);
-                linalg::exp_scaled(chunk, -c, scratch);
-                scratch.iter().sum::<f64>()
-            })
-            .collect()
-    } else {
-        let mut scratch = Vec::with_capacity(vd.len().min(SUM_CHUNK_SIZE));
-        vd.chunks(SUM_CHUNK_SIZE)
-            .map(|chunk| {
-                scratch.resize(chunk.len(), 0.0);
-                linalg::exp_scaled(chunk, -c, &mut scratch);
-                scratch.iter().sum::<f64>()
-            })
-            .collect()
-    };
-    chunk_sums.into_iter().sum::<f64>() / vd.len() as f64
-}
-
-#[cfg(test)]
-fn deterministic_mean_exp(vd: &[f64], c: f64) -> f64 {
-    deterministic_mean_exp_mode(vd, c, !is_serial())
-}
-
-fn solve_cbar_cached(
-    vd: &[f64],
-    rhobar: f64,
-    allow_parallel: bool,
-    cache: &mut Vec<(u64, f64)>,
-) -> Result<f64, CoreError> {
-    let mut eval_c = |c: f64| -> f64 {
-        let bits = c.to_bits();
-        if let Some(&(_, v)) = cache.iter().find(|&&(cb, _)| cb == bits) {
-            return v;
-        }
-        let v = deterministic_mean_exp_mode(vd, c, allow_parallel);
-        cache.push((bits, v));
-        v
-    };
-
-    let mut c0 = 10.0_f64;
-    let mut c1 = 10.0_f64;
-
-    let mut it = 0usize;
-    loop {
-        let v = eval_c(c0);
-        if v > rhobar {
-            break;
-        }
-        c1 = c0;
-        c0 *= 0.5;
-        it += 1;
-        if it > MAX_CBAR_BRACKET_STEPS || c0 == 0.0 {
-            return Err(CoreError::calibration("rhobar too large for get_cbar"));
-        }
-    }
-
-    loop {
-        let v = eval_c(c1);
-        if v < rhobar {
-            break;
-        }
-        if c1 >= 10_240.0 {
-            return if v == rhobar {
-                Ok(c1)
-            } else {
-                solve_c0_from_avc(vd, rhobar)
-            };
-        }
-        c0 = c1;
-        c1 *= 2.0;
-    }
-
-    while (c1 - c0) > 0.001 {
-        let cm = (c0 * c1).sqrt();
-        let v = eval_c(cm);
-        if v < rhobar {
-            c1 = cm;
-        } else {
-            c0 = cm;
-        }
-    }
-
-    Ok((c0 * c1).sqrt())
 }
 
 fn double_demean(mat: &mut [f64], n: usize) {
@@ -930,20 +762,31 @@ fn select_leading_basis(
     // projection. Allow for construction roundoff even when its spectrum shrinks.
     let gap_floor = 8.0 * f64::EPSILON * n as f64;
     let eigen = basis::symmetric_eigenpairs_with_gap_floor(sigdm, n, q, gap_floor)?;
-    let lead = eigen.values.first().copied().unwrap_or(0.0);
-    let tail = eigen.values.get(q - 1).copied().unwrap_or(0.0);
-    if !lead.is_finite() || lead <= 0.0 || !tail.is_finite() || tail <= 1e-12 * lead {
-        let rank = eigen
-            .values
-            .iter()
-            .take_while(|&&value| value > 1e-12 * lead)
-            .count();
+    select_leading_subspace(&eigen.values, &eigen.vectors, eigen.next_value, geom)
+}
+
+fn select_leading_subspace(
+    values: &[f64],
+    vectors: &[f64],
+    next: Option<f64>,
+    geom: &SpurGeometry<'_>,
+) -> Result<(Vec<f64>, BasisInfo), CoreError> {
+    let n = geom.n;
+    let q = values.len();
+    let lead = values[0];
+    let rank = values
+        .iter()
+        .take_while(|&&value| value > 1e-12 * lead.max(0.0))
+        .count();
+    if rank < q {
         return Err(CoreError::invalid_input("insufficient positive rank").with_message(format!(
             "SPUR covariance basis has insufficient positive rank for requested q={q}. Positive rank is {rank}. {}",
             geom.site_summary()
         )));
     }
-    if eigen.cutoff_tied {
+    let gap_floor = 8.0 * f64::EPSILON * n as f64;
+    let blocks = basis::positive_blocks(values, next, gap_floor);
+    if blocks.cutoff_tied {
         return Err(
             CoreError::tied("requested q splits a tied eigenspace").with_message(format!(
                 "Requested q splits a tied eigenspace (q={q}). Choose q at an eigenvalue gap. {}",
@@ -951,29 +794,95 @@ fn select_leading_basis(
             )),
         );
     }
-    let mut r_mat = vec![0.0_f64; n * q];
-    for j in 0..q {
-        let src = &eigen.vectors[j * n..(j + 1) * n];
-        // Small solver roundoff can swap equal-magnitude entries. Use the
-        // earliest entry within a relative tolerance of the maximum.
-        let max_abs = src.iter().map(|v| v.abs()).fold(0.0, f64::max);
-        let tolerance = 1e-12 * max_abs;
-        let max_idx = src
-            .iter()
-            .position(|v| max_abs - v.abs() <= tolerance)
-            .expect("an eigenvector has a largest-magnitude entry");
-        let sign = if src[max_idx] < 0.0 { -1.0 } else { 1.0 };
-        for i in 0..n {
-            r_mat[i * q + j] = src[i] * sign;
+    let mut r = crate::zeroed(&[n, q], "SPUR directions")?;
+    let order = blocks.tied.then(|| geom.distances.coordinate_order());
+    let mut start = 0;
+    for end in blocks.ends {
+        let width = end - start;
+        let block = &vectors[start * n..end * n];
+        if width == 1 {
+            let max = block.iter().map(|v| v.abs()).fold(0.0, f64::max);
+            let anchor = block
+                .iter()
+                .find(|v| max - v.abs() <= 1e-12 * max)
+                .expect("an eigenvector has a largest-magnitude entry");
+            for (row, &v) in r.chunks_exact_mut(q).zip(block) {
+                row[start] = v * anchor.signum();
+            }
+        } else {
+            orient_block(
+                block,
+                n,
+                width,
+                order.as_deref().expect("tied block order"),
+                &mut r,
+                q,
+                start,
+            )?;
         }
+        start = end;
     }
     Ok((
-        r_mat,
+        r,
         BasisInfo {
-            tied: eigen.tied,
-            all_directions: eigen.next_value.is_none_or(|v| v <= 1e-12 * lead),
+            tied: blocks.tied,
+            all_directions: !blocks.more_positive,
         },
     ))
+}
+
+/// Deterministic projector anchors replace the arbitrary solver coordinates
+/// inside a tied block, including for finite supplied Gaussian draws.
+fn orient_block(
+    block: &[f64],
+    n: usize,
+    width: usize,
+    order: &[usize],
+    output: &mut [f64],
+    stride: usize,
+    start: usize,
+) -> Result<(), CoreError> {
+    let mut work = vec![0.0; n * width];
+    for i in 0..n {
+        for j in 0..width {
+            work[i * width + j] = block[j * n + i];
+        }
+    }
+    let mut norms = vec![0.0; n];
+    let mut axis = vec![0.0; width];
+    let mut column = vec![0.0; n];
+    for c in 0..width {
+        for (norm, row) in norms.iter_mut().zip(work.chunks_exact(width)) {
+            *norm = row.iter().map(|x| x * x).sum::<f64>();
+        }
+        let max = norms.iter().copied().fold(0.0, f64::max);
+        let anchor = *order
+            .iter()
+            .find(|&&i| max - norms[i] <= 1e-12 * max)
+            .expect("a block has a largest-norm row");
+        if norms[anchor] == 0.0 {
+            return Err(CoreError::internal(
+                "failed to orient a tied spatial subspace",
+            ));
+        }
+        for (a, v) in axis
+            .iter_mut()
+            .zip(&work[anchor * width..(anchor + 1) * width])
+        {
+            *a = v / norms[anchor].sqrt();
+        }
+        linalg::multiply(block, &axis, &mut column, n, width, 1, true);
+        for (row, &value) in output.chunks_exact_mut(stride).zip(&column) {
+            row[start + c] = value;
+        }
+        for row in work.chunks_exact_mut(width) {
+            let dot = row.iter().zip(&axis).map(|(a, b)| a * b).sum::<f64>();
+            for (value, &a) in row.iter_mut().zip(&axis) {
+                *value -= dot * a;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn project_scaled_y_cols(
@@ -1240,7 +1149,7 @@ fn calibrate_ha_i1(
     let mut it = 0usize;
     while pow > 0.5 {
         c = ctry;
-        let om_c = geom.projected_omega_from_mr(c, mr, q);
+        let om_c = geom.projected_omega_from_mr(c, mr, q)?;
         pow = base.eval(&om_c)?;
         ctry = c * 0.5;
         it += 1;
@@ -1262,7 +1171,7 @@ fn calibrate_ha_i1(
     it = 0;
     while pow < 0.5 {
         c = ctry;
-        let om_c = geom.projected_omega_from_mr(c, mr, q);
+        let om_c = geom.projected_omega_from_mr(c, mr, q)?;
         pow = base.eval(&om_c)?;
         ctry = 2.0 * c;
         if pow > best.1 {
@@ -1278,7 +1187,7 @@ fn calibrate_ha_i1(
     let mut ii = 1usize;
     while (pow - 0.5).abs() > 0.01 {
         c = 0.5 * (c1 + c2);
-        let om_c = geom.projected_omega_from_mr(c, mr, q);
+        let om_c = geom.projected_omega_from_mr(c, mr, q)?;
         pow = base.eval(&om_c)?;
         if pow > 0.5 {
             c2 = c;
@@ -1414,7 +1323,7 @@ fn run_spur_i0_from_basis(
     } else {
         f64::INFINITY
     };
-    let om_rho = geom.projected_omega_from_mr(c_rho, mr, q);
+    let om_rho = geom.projected_omega_from_mr(c_rho, mr, q)?;
     if !covariance_shapes_differ(&om_rho, om_bm, q)? {
         return Err(CoreError::degenerate(
             "SPUR experiment is uninformative: null and alternative covariance shapes are proportional",
@@ -1436,8 +1345,8 @@ fn run_spur_i0_from_basis(
     let rates = geom.get_cbar_batch(&positive_grid)?;
     let mut rho_grid = vec![geom.correlation_floor];
     rho_grid.extend(positive_grid);
-    let mut om_grid = vec![geom.projected_omega_from_mr(f64::INFINITY, mr, q)];
-    om_grid.extend(geom.projected_omega_grid(&rates, mr, q));
+    let mut om_grid = vec![geom.projected_omega_from_mr(f64::INFINITY, mr, q)?];
+    om_grid.extend(geom.projected_omega_grid(&rates, mr, q)?);
 
     let eval_grid_point = |omega: &Vec<f64>| -> Result<(Vec<f64>, Vec<f64>), CoreError> {
         let ch_om_lower = cholesky_lower(omega, q)?;
@@ -1516,9 +1425,9 @@ fn run_spur_i1_from_basis(
     let targets = [0.01, 0.5, 0.95].map(|rho| floor + (1.0 - floor) * rho);
     let rates = geom.get_cbar_batch(&targets)?;
     let (c_lo, c_mid, c_hi) = (rates[0], rates[1], rates[2]);
-    let om_lo = geom.projected_omega_from_mr(c_lo, mr, q);
-    let om_mid = geom.projected_omega_from_mr(c_mid, mr, q);
-    let om_hi = geom.projected_omega_from_mr(c_hi, mr, q);
+    let om_lo = geom.projected_omega_from_mr(c_lo, mr, q)?;
+    let om_mid = geom.projected_omega_from_mr(c_mid, mr, q)?;
+    let om_hi = geom.projected_omega_from_mr(c_hi, mr, q)?;
     if !covariance_shapes_differ(om_ho, &om_lo, q)?
         && !covariance_shapes_differ(om_ho, &om_mid, q)?
         && !covariance_shapes_differ(om_ho, &om_hi, q)?
@@ -1529,7 +1438,7 @@ fn run_spur_i1_from_basis(
     }
     let (ha_param, best_tuning_power) =
         calibrate_ha_i1(geom, om_ho, mr, tuning, q, nrep, c_lo, c_hi)?;
-    let om_ha = geom.projected_omega_from_mr(ha_param, mr, q);
+    let om_ha = geom.projected_omega_from_mr(ha_param, mr, q)?;
 
     let ho_f = factor_omega(om_ho, q)?;
     let ha_f = factor_omega(&om_ha, q)?;
@@ -1562,19 +1471,25 @@ fn run_spur_i1_from_basis(
 
 fn prepare_lbm_basis(
     sigdm_bm: &[f64],
-    geom: &SpurGeometry,
+    geom: &SpurGeometry<'_>,
     q: usize,
 ) -> Result<(Vec<f64>, BasisInfo, Vec<f64>, Vec<f64>), CoreError> {
-    let n = geom.n;
-    let (basis_r, tied) = select_leading_basis(sigdm_bm, geom, q)?;
+    let (basis_r, info) = select_leading_basis(sigdm_bm, geom, q)?;
+    prepare_lbm_projections(basis_r, info, geom, q)
+}
+
+fn prepare_lbm_projections(
+    basis_r: Vec<f64>,
+    info: BasisInfo,
+    geom: &SpurGeometry<'_>,
+    q: usize,
+) -> Result<(Vec<f64>, BasisInfo, Vec<f64>, Vec<f64>), CoreError> {
     let mut mr = basis_r.clone();
-    center_columns(&mut mr, n, q);
-    let mut sig_r = vec![0.0_f64; n * q];
-    linalg::multiply(sigdm_bm, &basis_r, &mut sig_r, n, n, q, false);
-    let mut om_bm = vec![0.0_f64; q * q];
-    linalg::multiply(&basis_r, &sig_r, &mut om_bm, q, n, q, true);
-    symmetrize(&mut om_bm, q);
-    Ok((basis_r, tied, mr, om_bm))
+    center_columns(&mut mr, geom.n, q);
+    let om_bm = geom
+        .projected_kernels(&[Kernel::Brownian], &mr, q)?
+        .remove(0);
+    Ok((basis_r, info, mr, om_bm))
 }
 
 struct ResidBasis {
@@ -1660,7 +1575,7 @@ fn prepare_resid_basis(
 ) -> Result<ResidBasis, CoreError> {
     let n = geom.n;
     let k_x = design.qx.len() / n;
-    let sigdm_bm = geom.residual_sigma_bm(&design.qx, k_x);
+    let sigdm_bm = geom.residual_sigma_bm(&design.qx, k_x)?;
     let (basis_r, tied) = select_leading_basis(&sigdm_bm, geom, q)?;
     let mr = residual_project_matrix(&basis_r, &design.qx, n, k_x, q);
     let mut sig_r = vec![0.0_f64; n * q];
@@ -1681,7 +1596,7 @@ pub fn run_spur_i0(req: &SpurTestRequest<'_>) -> Result<SpurI0Output, CoreError>
     validate_emat(req.emat, req.n, req.q, req.nrep, 2)?;
     run_with_threads(req.nthreads, || {
         let mut geom = SpurGeometry::from_coords(req.coords, req.n, req.d, req.metric)?;
-        let (basis_r, tied, mr, om_bm) = prepare_lbm_basis(&geom.sigma_lbm_dm(), &geom, req.q)?;
+        let (basis_r, tied, mr, om_bm) = prepare_lbm_basis(&geom.sigma_lbm_dm()?, &geom, req.q)?;
         let p_mat = prepare_y_projections(req.y, req.n, req.n_y, &basis_r, req.q)?;
         run_spur_i0_from_basis(
             &mut geom, tied, &mr, &om_bm, &p_mat, req.n_y, req.emat, req.q, req.nrep,
@@ -1693,7 +1608,7 @@ pub fn run_spur_i1(req: &SpurTestRequest<'_>) -> Result<SpurI1Output, CoreError>
     validate_emat(req.emat, req.n, req.q, req.nrep, 2)?;
     run_with_threads(req.nthreads, || {
         let mut geom = SpurGeometry::from_coords(req.coords, req.n, req.d, req.metric)?;
-        let (basis_r, tied, mr, om_bm) = prepare_lbm_basis(&geom.sigma_lbm_dm(), &geom, req.q)?;
+        let (basis_r, tied, mr, om_bm) = prepare_lbm_basis(&geom.sigma_lbm_dm()?, &geom, req.q)?;
         let p_mat = prepare_y_projections(req.y, req.n, req.n_y, &basis_r, req.q)?;
         run_spur_i1_from_basis(
             &mut geom, tied, &mr, &om_bm, &p_mat, req.n_y, req.emat, req.q, req.nrep,
@@ -1782,8 +1697,24 @@ pub fn run_spur_pipeline(req: &SpurPipelineRequest<'_>) -> Result<SpurPipelineOu
     run_with_threads(req.nthreads, || {
         let design = prepare_resid_design(req.x_in, req.n, req.k_x, req.q)?;
         let mut geom = SpurGeometry::from_coords(req.coords, req.n, req.d, req.metric)?;
-        let sigdm_lbm = geom.sigma_lbm_dm();
-        let (basis_lbm, tied_lbm, mr_lbm, om_lbm) = prepare_lbm_basis(&sigdm_lbm, &geom, req.q)?;
+        let mut sigdm_lbm = geom.sigma_lbm_dm()?;
+        let decomposition = basis::dense_eigenpairs(&mut sigdm_lbm, req.n, req.n)?;
+        drop(sigdm_lbm);
+        let (basis_r, info) = select_leading_subspace(
+            &decomposition.values[..req.q],
+            &decomposition.vectors[..req.q * req.n],
+            decomposition.values.get(req.q).copied(),
+            &geom,
+        )?;
+        let transformed_vars = apply_lbmgls_eigen(
+            &decomposition,
+            req.n,
+            req.transform_vars,
+            req.n_transform_vars,
+        )?;
+        drop(decomposition);
+        let (basis_lbm, tied_lbm, mr_lbm, om_lbm) =
+            prepare_lbm_projections(basis_r, info, &geom, req.q)?;
         let p_lbm = prepare_y_projections(req.y, req.n, 1, &basis_lbm, req.q)?;
         let i0 = run_spur_i0_from_basis(
             &mut geom, tied_lbm, &mr_lbm, &om_lbm, &p_lbm, 1, req.emat, req.q, req.nrep,
@@ -1791,8 +1722,6 @@ pub fn run_spur_pipeline(req: &SpurPipelineRequest<'_>) -> Result<SpurPipelineOu
         let i1 = run_spur_i1_from_basis(
             &mut geom, tied_lbm, &mr_lbm, &om_lbm, &p_lbm, 1, req.emat, req.q, req.nrep,
         )?;
-        let transformed_vars =
-            apply_lbmgls(sigdm_lbm, req.n, req.transform_vars, req.n_transform_vars)?;
 
         let resid = prepare_resid_basis(&geom, design, req.q)?;
         let p_res =

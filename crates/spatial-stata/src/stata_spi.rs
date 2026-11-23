@@ -16,6 +16,7 @@ fn storable(value: f64) -> bool {
 extern "C" {
     fn st_error(message: *const c_char) -> c_int;
     fn st_display(message: *const c_char) -> c_int;
+    fn st_macro_save(name: *const c_char, value: *const c_char) -> c_int;
     fn st_in1() -> c_int;
     fn st_in2() -> c_int;
     fn st_nvars() -> c_int;
@@ -35,6 +36,9 @@ extern "C" {
 mod test_stubs {
     use super::*;
 
+    pub(super) unsafe fn st_macro_save(_: *const c_char, _: *const c_char) -> c_int {
+        STATA_OK
+    }
     pub(super) unsafe fn st_error(_message: *const c_char) -> c_int {
         0
     }
@@ -548,5 +552,18 @@ mod tests {
         assert!(read_f64_bin_file(path_str, 1, "emat").is_err());
         let _ = std::fs::remove_file(&path);
         assert!(read_f64_bin_file(path_str, 1, "emat").is_err());
+    }
+}
+
+pub fn save_macro(name: &str, value: &str) -> Result<(), String> {
+    let name = CString::new(name).map_err(|_| "invalid Stata macro name")?;
+    let value = CString::new(value).map_err(|_| "invalid Stata macro value")?;
+    let code = unsafe { st_macro_save(name.as_ptr(), value.as_ptr()) };
+    if code == STATA_OK {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not write Stata build metadata (code {code})"
+        ))
     }
 }

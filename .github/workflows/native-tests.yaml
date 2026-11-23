@@ -1,4 +1,4 @@
-name: Native tests
+name: Native and installed packages
 
 on:
   push:
@@ -15,37 +15,38 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            features: ''
+            features: ""
           - os: macos-latest
-            features: --features spatial-core/portable
+            features: "--features spatial-core/portable"
           - os: ubuntu-latest
-            features: ''
+            features: ""
           - os: windows-latest
-            features: ''
+            features: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Test the numerical core and Stata bridge
-        run: cargo test --release --locked -p spatial-core -p spatial-stata ${{ matrix.features }}
-      # The Windows R bridge is exercised through the package tests with Rtools.
-      - uses: r-lib/actions/setup-r@v2
-        if: runner.os != 'Windows'
-      - name: Test the standalone R bridge
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          export LD_LIBRARY_PATH="$(R RHOME)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          cargo test --release --locked -p spatial-r --lib ${{ matrix.features }}
+      - run: cargo test --release --locked -p spatial-core -p spatial-stata ${{ matrix.features }}
 
-  wheel:
+  python-wheel:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
-        python: ['3.11', '3.14']
+        include:
+          - os: macos-latest
+            target: aarch64
+            manylinux: auto
+          - os: macos-15-intel
+            target: x86_64
+            manylinux: auto
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: "2_28"
+          - os: windows-latest
+            target: x86_64
+            manylinux: auto
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -54,38 +55,78 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: astral-sh/setup-uv@v8.0.0
+      - uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python }}
-      - name: Build and smoke-test the installed wheel
-        env:
-          MATURIN_PEP517_ARGS: --locked
+          python-version: '3.11'
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --out dist
+      - name: Check the Linux wheel policy
+        if: runner.os == 'Linux'
         run: |
-          uv venv
-          uv build --wheel --out-dir dist crates/spatial-py
-          uv pip install dist/*.whl numpy
-          uv run --no-project python -c "
-          import numpy as np
-          import spatial_spur_rust as native
-          info = native.build_info()
-          assert info['api_version'] == 7 and info['spur_api_version'] == 6
-          assert not hasattr(native, 'run_exact_scpc') and not hasattr(native, 'run_approx_scpc')
-          coords = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], dtype=np.float64)
-          res = native.run_model_scpc(
-              coords=coords, latlong=False, avc=0.05, cvs=False,
-              coef=np.array([1.0], dtype=np.float64),
-              scores=np.array([[1.0], [-1.0], [0.5], [-0.5]], dtype=np.float64),
-              bread=np.array([[1.0]], dtype=np.float64),
-          )
-          assert res['scpcstats'].shape == (1, 6)
-          tr = native.run_spur_transform(
-              'nn', 4, y=np.array([1.0, 2.0, 4.0, 8.0], dtype=np.float64), coords=coords
-          )
-          assert tr['transformed'].shape == (4,)
-          "
+          python -m pip install auditwheel
+          auditwheel show dist/*.whl
+          ls dist/*manylinux_2_28*x86_64.whl
+      - name: Run tests from an installed wheel with current dependencies
+        run: |
+          wheel=$(find "$GITHUB_WORKSPACE/dist" -name '*.whl' -print -quit)
+          python -m pip install "$wheel[test,pyfixest]"
+          cd "$RUNNER_TEMP"
+          python -m pytest -q "$GITHUB_WORKSPACE/tests/python"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Run the same ABI3 wheel with Statsmodels alone
+        run: |
+          wheel=$(find "$GITHUB_WORKSPACE/dist" -name '*.whl' -print -quit)
+          python -m pip install "$wheel[test]"
+          cd "$RUNNER_TEMP"
+          python -c "import importlib.util; assert importlib.util.find_spec('pyfixest') is None"
+          python -m pytest -q "$GITHUB_WORKSPACE/tests/python"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: dist/*.whl
 
-  stata-plugins:
+  source-packages:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: r-lib/actions/setup-r@v2
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: r/spatialSpur
+      - name: Rebuild the Python source archive with its locked workspace
+        run: |
+          python -m pip install maturin
+          maturin sdist --out "$RUNNER_TEMP/source"
+          tar -xf "$RUNNER_TEMP/source/spatial_spur-0.6.0.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/spatial_spur-0.6.0"
+          maturin build --release --locked --out "$RUNNER_TEMP/source"
+          python -m pip install "$RUNNER_TEMP/source/"*.whl -r "$GITHUB_WORKSPACE/tests/python/requirements.lock"
+          cd "$RUNNER_TEMP"
+          python -m pytest -q "$GITHUB_WORKSPACE/tests/python"
+      - name: Compile and check the R archive without a Cargo cache
+        run: |
+          scripts/build_r_source.sh "$RUNNER_TEMP/source"
+          mkdir "$RUNNER_TEMP/cargo-empty"
+          cd "$RUNNER_TEMP"
+          CARGO_HOME="$RUNNER_TEMP/cargo-empty" CARGO_NET_OFFLINE=true \
+            R CMD check --no-manual source/spatialSpur_0.6.0.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-archives
+          path: ${{ runner.temp }}/source/*.tar.gz
+
+  stata-link:
     strategy:
       fail-fast: false
       matrix:
@@ -96,21 +137,19 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fetch --locked
-      - name: Link both Stata SPI plugins on Unix
+      - name: Build the Stata plugin and command bundle
         if: runner.os != 'Windows'
         run: |
-          make -C crates/spatial-stata PLUGIN_OUT="$RUNNER_TEMP/scpc_rust.plugin" SPUR_PLUGIN_OUT="$RUNNER_TEMP/spur_rust.plugin"
-          for plug in "$RUNNER_TEMP/scpc_rust.plugin" "$RUNNER_TEMP/spur_rust.plugin"; do
-            if [ "${{ runner.os }}" = "macOS" ]; then
-              exports=$(nm -gU --defined-only "$plug" | awk '{print $NF}' | sort | tr '\n' ' ')
-              test "$exports" = "_pginit _stata_call "
-            else
-              exports=$(nm -D --defined-only "$plug" | awk '{print $NF}' | sort | tr '\n' ' ')
-              test "$exports" = "pginit stata_call "
-            fi
-          done
-      - name: Link both Stata SPI plugins on Windows
+          scripts/build_stata_bundle.sh "$RUNNER_TEMP/stata"
+          plug="$RUNNER_TEMP/stata/spatial_spur.plugin"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            exports=$(nm -gU --defined-only "$plug" | awk '{print $NF}' | sort | tr '\n' ' ')
+            test "$exports" = "_pginit _stata_call "
+          else
+            exports=$(nm -D --defined-only "$plug" | awk '{print $NF}' | sort | tr '\n' ' ')
+            test "$exports" = "pginit stata_call "
+          fi
+      - name: Link the Windows Stata plugin
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./crates/spatial-stata/build_windows.ps1 -OutputDir (Join-Path $env:RUNNER_TEMP 'stata-plugins')
+        run: ./crates/spatial-stata/build_windows.ps1 -OutputDir (Join-Path $env:RUNNER_TEMP 'stata')

@@ -83,3 +83,8 @@ ST_retcode st_scal_save(const char *scal, ST_double z)
 {
     return SF_scal_save((char *)scal, z);
 }
+
+int st_macro_save(const char *name, const char *value)
+{
+    return SF_macro_save((char *)name, (char *)value);
+}

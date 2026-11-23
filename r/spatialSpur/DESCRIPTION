@@ -1,0 +1,21 @@
+Package: spatialSpur
+Type: Package
+Title: Spatial Correlation-Robust Inference and Unit Root Diagnostics
+Version: 0.6.0
+Authors@R: c(
+    person("Paul David", "Boll", email = "david.boll@warwick.ac.uk", role = c("aut", "cre")),
+    person("Daniel", "Goettlich", role = "aut"),
+    person("Sascha O.", "Becker", role = "aut"),
+    person("Hans-Joachim", "Voth", role = "aut"),
+    person("Ulrich K.", "Mueller", role = "ctb"),
+    person("Mark W.", "Watson", role = "ctb"))
+Description: Spatial correlation-robust regression inference, spatial unit
+    root diagnostics, half-life confidence sets and spatial transformations
+    using the methods of Mueller and Watson.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends: R (>= 4.2)
+Imports: stats, utils
+Suggests: fixest (>= 0.14.0)
+SystemRequirements: Cargo, rustc (>= 1.85), GNU make
+NeedsCompilation: yes

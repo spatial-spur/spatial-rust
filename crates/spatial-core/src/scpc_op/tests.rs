@@ -1245,7 +1245,7 @@ fn nystrom_conditional_results_follow_the_coefficient_across_subsets_and_order()
     let (y, x, coords) = load_bench_csv("bench_200.csv");
     let n = y.len();
     let (coef, scores, xj, signs, projection, rank) = prepare_bench_ols(&y, &x);
-    let (coords, perm) =
+    let (coords, perm, _) =
         crate::nystrom::normalize_coords(&coords, n, 2, Metric::Euclidean).unwrap();
     let projection = permute_rows(&projection, &perm, rank);
     let original_width = coef.len();
@@ -1278,7 +1278,6 @@ fn nystrom_conditional_results_follow_the_coefficient_across_subsets_and_order()
             seed: 1,
             landmarks: 100,
             samples: 3,
-            pair_count: 200_000,
         })
         .unwrap()
     };
@@ -1317,7 +1316,8 @@ fn approx_scpc_matches_release_and_is_thread_count_invariant() {
     let (coef, wj, xj, xjs, q_mat, proj_rank) = prepare_bench_ols(&y, &x);
 
     for metric in [Metric::Euclidean, Metric::GreatCircleFractionLonLat] {
-        let (coords_norm, perm) = crate::nystrom::normalize_coords(&coords, n, 2, metric).unwrap();
+        let (coords_norm, perm, _) =
+            crate::nystrom::normalize_coords(&coords, n, 2, metric).unwrap();
         let wj_p = permute_rows(&wj, &perm, p);
         let xj_p = permute_rows(&xj, &perm, p);
         let xjs_p = permute_rows(&xjs, &perm, p);
@@ -1345,7 +1345,6 @@ fn approx_scpc_matches_release_and_is_thread_count_invariant() {
             seed: 1,
             landmarks: 1000,
             samples: 20,
-            pair_count: 1_000_000,
         })
         .unwrap();
 
@@ -1371,7 +1370,6 @@ fn approx_scpc_matches_release_and_is_thread_count_invariant() {
             seed: 1,
             landmarks: 1000,
             samples: 20,
-            pair_count: 1_000_000,
         })
         .unwrap();
 
@@ -1423,7 +1421,7 @@ fn approx_scpc_matches_release_and_is_thread_count_invariant() {
     }
 
     // Unconditional Nystrom run on Euclidean coords is also thread-count invariant.
-    let (coords_norm, perm) =
+    let (coords_norm, perm, _) =
         crate::nystrom::normalize_coords(&coords, n, 2, Metric::Euclidean).unwrap();
     let wj_p = permute_rows(&wj, &perm, p);
     let out_u1 = run_approx_scpc(&ApproxScpcRequest {
@@ -1448,7 +1446,6 @@ fn approx_scpc_matches_release_and_is_thread_count_invariant() {
         seed: 1,
         landmarks: 1000,
         samples: 20,
-        pair_count: 1_000_000,
     })
     .unwrap();
     let out_u4 = run_approx_scpc(&ApproxScpcRequest {
@@ -1473,7 +1470,6 @@ fn approx_scpc_matches_release_and_is_thread_count_invariant() {
         seed: 1,
         landmarks: 1000,
         samples: 20,
-        pair_count: 1_000_000,
     })
     .unwrap();
     assert_eq!(out_u1.q, out_u4.q);
@@ -1627,9 +1623,20 @@ fn iv_conditional_weights_use_transposed_residual_maker_and_match_ols_when_z_equ
     )
     .unwrap();
     let dist = distance_matrix(&coords, n, 1, Metric::Euclidean).unwrap();
-    let omega = covariance_grids(&dist, n, &[&conditional], &[out_iv.q + 1], &[out_iv.c0])
+    let locations = Distances::new(&coords, n, 1, Metric::Euclidean)
         .unwrap()
-        .remove(0);
+        .locations();
+    let omega = covariance_grids(
+        &dist,
+        n,
+        &[&conditional],
+        &[out_iv.q + 1],
+        &[out_iv.c0],
+        &locations,
+    )
+    .unwrap()
+    .remove(0);
+    let omega = &omega[..(out_iv.q + 1).pow(2)];
     let mut probability = ProbabilityWorkspace::new(out_iv.q);
     let root_q = (out_iv.q as f64).sqrt();
     let old_p = probability

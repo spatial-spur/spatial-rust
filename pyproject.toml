@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.9.3,<2"]
+build-backend = "maturin"
+
+[project]
+name = "spatial-spur"
+version = "0.6.0"
+description = "Spatial correlation-robust inference and spatial unit root diagnostics"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26", "pandas>=2.2", "patsy>=1.0", "scipy>=1.13", "statsmodels>=0.14.4"]
+license = "MIT"
+license-files = ["LICENSE", "crates/spatial-py/THIRD_PARTY_NOTICES.txt"]
+
+[project.optional-dependencies]
+pyfixest = ["pyfixest>=0.50.1,<0.51", "formulaic>=1.2.1,<1.2.2"]
+test = ["pytest>=8", "ruff>=0.13"]
+
+[tool.maturin]
+manifest-path = "crates/spatial-py/Cargo.toml"
+module-name = "spatial_spur._native"
+python-source = "python"
+python-packages = ["spatial_spur", "scpc", "spur"]
+locked = true
+sdist-generator = "git"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+pythonpath = ["."]

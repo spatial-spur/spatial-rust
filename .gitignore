@@ -6,3 +6,10 @@
 __pycache__/
 .DS_Store
 *.log
+/stata/*.plugin
+/r/spatialSpur/src/rust-target/
+/r/spatialSpur/src/*.o
+/r/spatialSpur/src/*.so
+/r/spatialSpur/src/*.dll
+/.pytest_cache/
+/.ruff_cache/
