@@ -1408,3 +1408,322 @@ fn adaptive_halflife_search_catches_narrow_99_gap_and_island() {
     );
     assert!(island[0][0] > 0.5 && island[0][1] < 2.0);
 }
+
+#[test]
+fn spur_explicit_draws_are_scale_invariant_across_extreme_magnitudes() {
+    let n = 24usize;
+    let coords: Vec<f64> = (0..n)
+        .flat_map(|i| {
+            let f = i as f64;
+            [(f * 0.37).sin() + 0.1 * f, (f * 0.73).cos()]
+        })
+        .collect();
+    let x_in: Vec<f64> = (0..n)
+        .flat_map(|i| [1.0, (i as f64 * 0.29).sin()])
+        .collect();
+    let y: Vec<f64> = (0..n)
+        .map(|i| 0.5 + 1.2 * x_in[2 * i + 1] + 0.3 * (i as f64 * 0.41).cos())
+        .collect();
+    let q = 4usize;
+    let nrep = 100usize;
+    let base_emat = make_deterministic_emat(2 * q, nrep);
+
+    let ref_i0 = run_spur_i0(&SpurTestRequest {
+        coords: &coords,
+        n,
+        d: 2,
+        metric: Metric::Euclidean,
+        y: &y,
+        n_y: 1,
+        x_in: None,
+        k_x: 0,
+        emat: &base_emat,
+        q,
+        nrep,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    let ref_i1 = run_spur_i1(&SpurTestRequest {
+        coords: &coords,
+        n,
+        d: 2,
+        metric: Metric::Euclidean,
+        y: &y,
+        n_y: 1,
+        x_in: None,
+        k_x: 0,
+        emat: &base_emat,
+        q,
+        nrep,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    let ref_i0r = run_spur_i0_resid(&SpurTestRequest {
+        coords: &coords,
+        n,
+        d: 2,
+        metric: Metric::Euclidean,
+        y: &y,
+        n_y: 1,
+        x_in: Some(&x_in),
+        k_x: 2,
+        emat: &base_emat,
+        q,
+        nrep,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    let ref_i1r = run_spur_i1_resid(&SpurTestRequest {
+        coords: &coords,
+        n,
+        d: 2,
+        metric: Metric::Euclidean,
+        y: &y,
+        n_y: 1,
+        x_in: Some(&x_in),
+        k_x: 2,
+        emat: &base_emat,
+        q,
+        nrep,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    let ref_pipe = run_spur_pipeline(&SpurPipelineRequest {
+        coords: &coords,
+        n,
+        d: 2,
+        metric: Metric::Euclidean,
+        y: &y,
+        x_in: &x_in,
+        k_x: 2,
+        emat: &base_emat,
+        q,
+        nrep,
+        transform_vars: &y,
+        n_transform_vars: 1,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    let ref_hl = run_spur_halflife(&SpurHalfLifeRequest {
+        coords: &coords,
+        n,
+        d: 2,
+        metric: Metric::Euclidean,
+        y: &y,
+        emat: &base_emat[..q * nrep],
+        q,
+        nrep,
+        level: 0.95,
+        nthreads: Some(1),
+    })
+    .unwrap();
+
+    for scale in [1e170_f64, 1e-170_f64, 1e-300_f64] {
+        let scaled: Vec<f64> = base_emat.iter().map(|&v| v * scale).collect();
+        let i0 = run_spur_i0(&SpurTestRequest {
+            coords: &coords,
+            n,
+            d: 2,
+            metric: Metric::Euclidean,
+            y: &y,
+            n_y: 1,
+            x_in: None,
+            k_x: 0,
+            emat: &scaled,
+            q,
+            nrep,
+            nthreads: Some(1),
+        })
+        .unwrap();
+        let i1 = run_spur_i1(&SpurTestRequest {
+            coords: &coords,
+            n,
+            d: 2,
+            metric: Metric::Euclidean,
+            y: &y,
+            n_y: 1,
+            x_in: None,
+            k_x: 0,
+            emat: &scaled,
+            q,
+            nrep,
+            nthreads: Some(1),
+        })
+        .unwrap();
+        let i0r = run_spur_i0_resid(&SpurTestRequest {
+            coords: &coords,
+            n,
+            d: 2,
+            metric: Metric::Euclidean,
+            y: &y,
+            n_y: 1,
+            x_in: Some(&x_in),
+            k_x: 2,
+            emat: &scaled,
+            q,
+            nrep,
+            nthreads: Some(1),
+        })
+        .unwrap();
+        let i1r = run_spur_i1_resid(&SpurTestRequest {
+            coords: &coords,
+            n,
+            d: 2,
+            metric: Metric::Euclidean,
+            y: &y,
+            n_y: 1,
+            x_in: Some(&x_in),
+            k_x: 2,
+            emat: &scaled,
+            q,
+            nrep,
+            nthreads: Some(1),
+        })
+        .unwrap();
+        let pipe = run_spur_pipeline(&SpurPipelineRequest {
+            coords: &coords,
+            n,
+            d: 2,
+            metric: Metric::Euclidean,
+            y: &y,
+            x_in: &x_in,
+            k_x: 2,
+            emat: &scaled,
+            q,
+            nrep,
+            transform_vars: &y,
+            n_transform_vars: 1,
+            nthreads: Some(1),
+        })
+        .unwrap();
+        let hl = run_spur_halflife(&SpurHalfLifeRequest {
+            coords: &coords,
+            n,
+            d: 2,
+            metric: Metric::Euclidean,
+            y: &y,
+            emat: &scaled[..q * nrep],
+            q,
+            nrep,
+            level: 0.95,
+            nthreads: Some(1),
+        })
+        .unwrap();
+
+        for (a, b) in [(&ref_i0, &i0), (&ref_i0r, &i0r), (&ref_pipe.i0, &pipe.i0)] {
+            assert_eq!(a.pvalue, b.pvalue, "i0 pvalue changed at scale {scale}");
+            assert!((a.ha_param - b.ha_param).abs() <= 1e-12 * a.ha_param.abs().max(1.0));
+            assert!(b.cvalue.iter().all(|v| v.is_finite()));
+            for (cv_a, cv_b) in a.cvalue.iter().zip(&b.cvalue) {
+                assert!((cv_a - cv_b).abs() <= 1e-12 * cv_a.abs().max(1.0));
+            }
+        }
+        for (a, b) in [(&ref_i1, &i1), (&ref_i1r, &i1r), (&ref_pipe.i1, &pipe.i1)] {
+            assert_eq!(a.pvalue, b.pvalue, "i1 pvalue changed at scale {scale}");
+            assert!((a.ha_param - b.ha_param).abs() <= 1e-12 * a.ha_param.abs().max(1.0));
+            assert!(b.cvalue.iter().all(|v| v.is_finite()));
+            for (cv_a, cv_b) in a.cvalue.iter().zip(&b.cvalue) {
+                assert!((cv_a - cv_b).abs() <= 1e-12 * cv_a.abs().max(1.0));
+            }
+        }
+        assert_eq!(ref_hl.components.len(), hl.components.len());
+        for (c_a, c_b) in ref_hl.components.iter().zip(&hl.components) {
+            assert!((c_a[0] - c_b[0]).abs() <= 1e-12);
+            if c_a[1].is_infinite() {
+                assert!(c_b[1].is_infinite());
+            } else {
+                assert!((c_a[1] - c_b[1]).abs() <= 1e-12 * c_a[1].abs().max(1.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn i0_resid_covers_small_correlation_tail_below_1e4_and_adaptive_halflife_refines_tails() {
+    // 1. Multi-scale cluster with spacing ~1e-5 so active decay transition sits at rho < 1e-4.
+    let m = 4usize;
+    let n = 40usize;
+    let mut coords = vec![0.0, 2.0e-6, 7.0e-6, 1.0e-5];
+    for j in 1..=(n - m) {
+        coords.push(j as f64);
+    }
+    let k_x = n - 2; // 2 residual directions: span constants + orthogonal to last (n-m) sites
+    let mut x_in = vec![0.0_f64; n * k_x];
+    // Columns 0..2 span [1,1,1,1] and [0,1,2,3] on the 4-site cluster; columns 2..38 are I_36 on m..n.
+    for i in 0..m {
+        x_in[i * k_x] = 1.0;
+        x_in[i * k_x + 1] = i as f64;
+    }
+    for j in m..n {
+        x_in[j * k_x + (j - m) + 2] = 1.0;
+    }
+    let y: Vec<f64> = (0..n).map(|i| (i as f64 * 0.63).sin()).collect();
+    let emat = make_deterministic_emat(4, 100);
+    let out = run_spur_i0_resid(&SpurTestRequest {
+        coords: &coords,
+        n,
+        d: 1,
+        metric: Metric::Euclidean,
+        y: &y,
+        n_y: 1,
+        x_in: Some(&x_in),
+        k_x,
+        emat: &emat,
+        q: 2,
+        nrep: 100,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    assert_eq!(out.rho_grid[0], 0.0);
+    assert!(out.rho_grid.windows(2).all(|w| w[0] <= w[1]));
+    assert!(
+        out.rho_grid.iter().any(|&r| r > 0.0 && r < 1e-4),
+        "rho_grid must probe (0, 1e-4), got {:?}",
+        &out.rho_grid[..out.rho_grid.len().min(10)]
+    );
+    assert_eq!(out.rho_grid.last(), Some(&0.03));
+
+    // 2. Half-life adaptive refinement must work in both small-h (t ~ 2e-5) and large-h (1-t ~ 2e-5) tails.
+    let nrep_hl = 399usize;
+    let level_hl = 0.95; // accepts iff (399 - count)/400 < 0.95 <=> count >= 20 (p = (count+1)/400 > 0.05)
+    let small_grid = [0.0, 2.15e-5, 2.38e-5, 1.0];
+    let island_fn = |t: f64| -> usize {
+        if (t - 2.265e-5).abs() <= 3.0e-7 {
+            20 // p = 21/400 = 0.0525 -> accepted
+        } else {
+            18 // p = 19/400 = 0.0475 -> rejected, yet >= 0.2 * 0.05 = 0.01 so adaptive refines!
+        }
+    };
+    let init_small: Vec<usize> = small_grid.iter().map(|&t| island_fn(t)).collect();
+    let small_comps =
+        halflife::invert_half_life_adaptive(&small_grid, &init_small, nrep_hl, level_hl, |pts| {
+            Ok(pts.iter().map(|&t| island_fn(t)).collect())
+        })
+        .unwrap();
+    assert_eq!(
+        small_comps.len(),
+        1,
+        "small-h accepted island around t=2.265e-5 must be recovered: {small_comps:?}"
+    );
+
+    let level_99 = 0.99; // alpha = 0.01; accepts iff count >= 4 (p > 0.01)
+    let large_grid = [0.0, 1.0 - 2.38e-5, 1.0 - 2.15e-5, 1.0];
+    let gap_fn = |t: f64| -> usize {
+        if (t - (1.0 - 2.265e-5)).abs() <= 3.0e-7 {
+            1 // p = 2/400 = 0.005 -> rejected
+        } else {
+            5 // p = 6/400 = 0.015 -> accepted, <= (0.01*6).max(0.06) = 0.06 so adaptive refines!
+        }
+    };
+    let init_large: Vec<usize> = large_grid.iter().map(|&t| gap_fn(t)).collect();
+    let large_comps =
+        halflife::invert_half_life_adaptive(&large_grid, &init_large, nrep_hl, level_99, |pts| {
+            Ok(pts.iter().map(|&t| gap_fn(t)).collect())
+        })
+        .unwrap();
+    assert_eq!(
+        large_comps.len(),
+        2,
+        "large-h 99% rejection gap must split into 2 components: {large_comps:?}"
+    );
+}

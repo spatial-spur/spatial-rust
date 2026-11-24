@@ -17,7 +17,7 @@ use crate::{
 };
 
 pub fn run_scpc(args: &[&str]) -> Result<(), String> {
-    let [d, regressors, report, has_cons, endog, excluded, cluster, geographic, avc, uncond, cvs, nthreads, method, seed, landmarks, samples, tolerance, estimates, table, cutoffs, effective, meta, weights_file] =
+    let [d, regressors, report, has_cons, endog, excluded, cluster, geographic, avc, uncond, cvs, nthreads, method, seed, landmarks, samples, tolerance, estimates, table, cutoffs, effective, meta, weights_file, y_scale_hint] =
         *args
     else {
         return Err("invalid fitted SCPC plugin argument count".into());
@@ -46,6 +46,12 @@ pub fn run_scpc(args: &[&str]) -> Result<(), String> {
     let cv_tolerance = tolerance
         .parse()
         .map_err(|_| "invalid critical-value tolerance")?;
+    let y_scale_hint: f64 = y_scale_hint
+        .parse()
+        .map_err(|_| "invalid outcome scale")?;
+    if !y_scale_hint.is_finite() || y_scale_hint < 0.0 {
+        return Err("invalid outcome scale".into());
+    }
     let inference = if uncond {
         ScpcInference::Unconditional
     } else if endog > 0 {
@@ -99,7 +105,16 @@ pub fn run_scpc(args: &[&str]) -> Result<(), String> {
     )
     .map_err(format_core_error)?;
     let estimates = read_matrix(estimates, 1, p)?;
-    verify_normal_equations(&scores, &residuals, &design.x, &estimates, n_obs, p)?;
+    verify_normal_equations(
+        &scores,
+        &residuals,
+        &design.x,
+        &estimates,
+        endog > 0,
+        y_scale_hint,
+        n_obs,
+        p,
+    )?;
     let output = run_fitted_scpc(
         ScpcPreparation {
             n_sites,
@@ -172,6 +187,8 @@ pub(crate) fn verify_normal_equations(
     residuals: &[f64],
     design_x: &[f64],
     estimates: &[f64],
+    is_iv: bool,
+    y_scale_hint: f64,
     n_obs: usize,
     p: usize,
 ) -> Result<(), String> {
@@ -184,13 +201,35 @@ pub(crate) fn verify_normal_equations(
         })
         .fold(0.0_f64, f64::max);
     let u_max = residuals.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    if u_max <= 1e-11 * y_hat_max.max(1.0) {
-        return Ok(());
-    }
+    let y_scale = y_scale_hint.max(y_hat_max + u_max);
+    let n_root = (n_obs as f64).sqrt();
     for j in 0..p {
+        let d_l1 = if !is_iv {
+            (0..n_obs).map(|i| design_x[i * p + j].abs()).sum::<f64>()
+        } else {
+            let x_max = (0..n_obs)
+                .map(|i| design_x[i * p + j].abs())
+                .fold(0.0_f64, f64::max);
+            if x_max == 0.0 {
+                0.0
+            } else {
+                let x_l2 = x_max
+                    * (0..n_obs)
+                        .map(|i| (design_x[i * p + j] / x_max).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                x_l2 * n_root
+            }
+        };
+        if !d_l1.is_finite() || d_l1 == 0.0 {
+            continue;
+        }
         let sum = (0..n_obs).map(|i| scores[i * p + j]).sum::<f64>();
         let l1 = (0..n_obs).map(|i| scores[i * p + j].abs()).sum::<f64>();
-        if l1 > 0.0 && sum.abs() > 1e-6 * l1 {
+        let mean_score = (sum / d_l1).abs();
+        let mean_abs_score = l1 / d_l1;
+        let tol = 1e-6 * mean_abs_score + 64.0 * f64::EPSILON * y_scale;
+        if mean_score > tol {
             return Err("current observations no longer satisfy the fitted normal equations".into());
         }
     }

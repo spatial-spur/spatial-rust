@@ -84,9 +84,11 @@ invariant to observation row permutation.
 
 I(0) calibrates the angular Gaussian likelihood ratio over a hybrid log+linear
 80-point correlation grid over `(floor, 0.03]` (48 log points near `floor` plus
-32 linear points through `0.03`). Both I(0) and I(1) always report the achieved
-best tuning power (`best_tuning_power`), and all simulation draw columns must
-have finite strictly positive L2 norms (all-zero draws are rejected).
+32 linear points through `0.03`), augmented with geometric decay-rate tail
+probes from the `0.0001` rate up to `36 / d_min`. Both I(0) and I(1) always
+report the achieved best tuning power (`best_tuning_power`), and all simulation
+draw columns must have finite strictly positive norms and are normalized by
+column maximum magnitude prior to quadrature.
 
 Half-life uses 10-point Gauss–Legendre composite dyadic panel quadrature on
 `[0, 1]` and inverts tests over a 256-step grid in `h/(1+h)` augmented with

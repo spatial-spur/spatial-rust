@@ -90,6 +90,38 @@ capture quietly scpc
 assert _rc != 0
 restore
 
+preserve
+gen double y_tiny = 1e-12 * y
+quietly regress y_tiny x
+tempvar u_tiny
+quietly predict double `u_tiny', residuals
+quietly replace y_tiny = _b[_cons] + _b[x] * x + `u_tiny'[cond(mod(_n,2)==1, _n+1, _n-1)]
+capture quietly scpc, uncond nthreads(1)
+assert _rc != 0
+restore
+
+foreach offset in 1e11 1e13 {
+    preserve
+    gen double y_big = `offset' + y
+    quietly regress y_big x
+    scpc, uncond nthreads(1)
+    restore
+}
+
+foreach offset in 1e11 1e13 {
+    preserve
+    gen double y_areg_big = `offset' + y
+    quietly areg y_areg_big x, absorb(g)
+    scpc, uncond nthreads(1)
+    restore
+}
+
+preserve
+gen double y_areg_fe_big = 1e5 + g * 1e5 + y
+quietly areg y_areg_fe_big x, absorb(g)
+scpc, uncond nthreads(1)
+restore
+
 quietly areg y x, absorb(g)
 capture quietly scpc
 assert _rc == 198

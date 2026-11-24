@@ -1,6 +1,8 @@
 //! Whole-operation SPUR diagnostics, half-life confidence intervals, and spatial transforms.
 
-use crate::calibration::{eval_residual_and_slope_chunk, solve_c0_from_avc, solve_decay};
+use crate::calibration::{
+    avg_correlation, eval_residual_and_slope_chunk, solve_c0_from_avc, solve_decay,
+};
 use crate::covariance::{self, Kernel};
 use crate::distance::{Distances, Locations, Metric};
 use crate::threads::{is_serial, run_with_threads};
@@ -21,6 +23,8 @@ const RHO_GRID_MIN: f64 = 0.0001;
 const RHO_GRID_MAX: f64 = 0.03;
 const RHO_GRID_LOG_LEN: usize = 48;
 const RHO_GRID_LIN_LEN: usize = 32;
+const I0_TAIL_RATE_FAC: f64 = 1.20;
+const I0_TAIL_MAX_STEPS: usize = 256;
 const MAX_HA_BRACKET_STEPS: usize = 200;
 
 const PAIR_CACHE_LIMIT: usize = 4096;
@@ -180,6 +184,23 @@ impl<'a> SpurGeometry<'a> {
                 (residual, -derivative / count)
             },
         )
+    }
+
+    fn avg_correlation_at(&self, rate: f64) -> f64 {
+        if let Some(cache) = &self.pair_cache {
+            return avg_correlation(rate, cache);
+        }
+        let count = self.n as f64 * (self.n - 1) as f64 * 0.5;
+        let evaluate_row = |i| {
+            let row = (0..i).map(|j| self.distance(i, j)).collect::<Vec<_>>();
+            eval_residual_and_slope_chunk(&row, rate, false, &mut Vec::new()).0
+        };
+        let mass: f64 = if is_serial() {
+            (1..self.n).map(evaluate_row).sum()
+        } else {
+            (1..self.n).into_par_iter().map(evaluate_row).sum()
+        };
+        mass / count
     }
 
     fn get_cbar_batch(&mut self, rhos: &[f64]) -> Result<Vec<f64>, CoreError> {
@@ -1040,13 +1061,13 @@ fn prepare_residual_y_projections(
     project_scaled_y_cols(&y_res, &y_res_norm, n, n_y, basis_r, q)
 }
 
-fn validate_emat(
+pub(super) fn normalize_emat(
     emat: &[f64],
     n: usize,
     q: usize,
     nrep: usize,
     blocks: usize,
-) -> Result<(), CoreError> {
+) -> Result<Vec<f64>, CoreError> {
     if q < 2 || q >= n {
         return Err(CoreError::invalid_input("invalid SPUR dimension").with_message(format!(
             "SPUR inference requires 2 <= q < n (requested q={q}, n={n}); q = 1 has no covariance-shape information"
@@ -1060,8 +1081,11 @@ fn validate_emat(
     if emat.iter().any(|v| !v.is_finite()) {
         return Err(CoreError::invalid_input("emat entries must be finite"));
     }
+    let mut normalized = vec![0.0_f64; emat.len()];
+    let block_len = q * nrep;
     for b in 0..blocks {
-        let block = &emat[b * q * nrep..(b + 1) * q * nrep];
+        let block = &emat[b * block_len..(b + 1) * block_len];
+        let out_block = &mut normalized[b * block_len..(b + 1) * block_len];
         for c in 0..nrep {
             let max_abs = (0..q)
                 .map(|r| block[r * nrep + c].abs())
@@ -1071,9 +1095,12 @@ fn validate_emat(
                     "simulation draws must have finite positive column norms",
                 ));
             }
+            for r in 0..q {
+                out_block[r * nrep + c] = block[r * nrep + c] / max_abs;
+            }
         }
     }
-    Ok(())
+    Ok(normalized)
 }
 
 fn calibrate_ha_i0(
@@ -1337,6 +1364,72 @@ fn build_rho_grid(floor: f64) -> Vec<f64> {
     grid
 }
 
+fn extend_i0_tail_rates(c_start: f64, min_pos_dist: f64) -> Vec<f64> {
+    let c_end = (36.0 / min_pos_dist.max(f64::MIN_POSITIVE)).min(f64::MAX * 0.5);
+    if !c_start.is_finite() || c_start <= 0.0 || !(c_end > c_start * I0_TAIL_RATE_FAC) {
+        return Vec::new();
+    }
+    let log_start = c_start.ln();
+    let log_end = c_end.ln();
+    let log_span = log_end - log_start;
+    let raw_steps = (log_span / I0_TAIL_RATE_FAC.ln()).ceil();
+    let mut rates = if raw_steps <= I0_TAIL_MAX_STEPS as f64 {
+        let n_steps = raw_steps as usize;
+        let mut pts = Vec::with_capacity(n_steps);
+        for k in 1..n_steps {
+            let c = (log_start + log_span * (k as f64 / n_steps as f64)).exp();
+            if c > c_start && c < c_end {
+                pts.push(c);
+            }
+        }
+        pts.push(c_end);
+        pts
+    } else {
+        let mut raw = Vec::with_capacity(I0_TAIL_MAX_STEPS);
+        let wide_len = I0_TAIL_MAX_STEPS - 48;
+        for k in 1..=wide_len {
+            let c = if k == wide_len {
+                c_end
+            } else {
+                (log_start + log_span * (k as f64 / wide_len as f64)).exp()
+            };
+            if c > c_start && c <= c_end {
+                raw.push(c);
+            }
+        }
+        let lo_dense = (0.05 / min_pos_dist.max(f64::MIN_POSITIVE))
+            .max(c_start * 1.000001)
+            .min(c_end);
+        let log_dense_lo = lo_dense.ln();
+        let dense_span = log_end - log_dense_lo;
+        if dense_span > 0.0 {
+            for k in 0..48 {
+                let c = if k == 47 {
+                    c_end
+                } else {
+                    (log_dense_lo + dense_span * (k as f64 / 47.0)).exp()
+                };
+                if c > c_start && c <= c_end {
+                    raw.push(c);
+                }
+            }
+        }
+        raw.sort_by(f64::total_cmp);
+        let mut dedup: Vec<f64> = Vec::with_capacity(raw.len());
+        for c in raw {
+            if dedup.last().is_none_or(|&prev| (c - prev).abs() > 1e-9 * c) {
+                dedup.push(c);
+            }
+        }
+        if let Some(last) = dedup.last_mut() {
+            *last = c_end;
+        }
+        dedup
+    };
+    rates.reverse();
+    rates
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_spur_i0_from_basis(
     geom: &mut SpurGeometry,
@@ -1383,11 +1476,43 @@ fn run_spur_i0_from_basis(
     let lr = eval_observed_lr(&ho_f.inverse_lower, &ha_f.inverse_lower, p_mat, q, n_y)?;
 
     let positive_grid = build_rho_grid(floor);
-    let rates = geom.get_cbar_batch(&positive_grid)?;
-    let mut rho_grid = vec![geom.correlation_floor];
-    rho_grid.extend(positive_grid);
-    let mut om_grid = vec![geom.projected_omega_from_mr(f64::INFINITY, mr, q)?];
-    om_grid.extend(geom.projected_omega_grid(&rates, mr, q)?);
+    let base_rates = geom.get_cbar_batch(&positive_grid)?;
+    let (rho_grid, om_grid) = if let Some(&c_high) = base_rates.first() {
+        let tail_rates = extend_i0_tail_rates(c_high, geom.min_positive_distance());
+        let raw_tail_rhos: Vec<f64> =
+            if !is_serial() && tail_rates.len() >= 4 && geom.pair_cache.is_some() {
+                tail_rates
+                    .par_iter()
+                    .map(|&rate| geom.avg_correlation_at(rate))
+                    .collect()
+            } else {
+                tail_rates
+                    .iter()
+                    .map(|&rate| geom.avg_correlation_at(rate))
+                    .collect()
+            };
+        let mut rhos = Vec::with_capacity(1 + raw_tail_rhos.len() + positive_grid.len());
+        rhos.push(floor);
+        let mut prev_rho = floor;
+        for rho in raw_tail_rhos {
+            let clamped = rho.clamp(prev_rho, positive_grid[0]);
+            prev_rho = clamped;
+            rhos.push(clamped);
+        }
+        rhos.extend(positive_grid);
+        let mut all_rates = Vec::with_capacity(tail_rates.len() + base_rates.len());
+        all_rates.extend(tail_rates);
+        all_rates.extend(base_rates);
+        let mut omegas = Vec::with_capacity(1 + all_rates.len());
+        omegas.push(geom.projected_omega_from_mr(f64::INFINITY, mr, q)?);
+        omegas.extend(geom.projected_omega_grid(&all_rates, mr, q)?);
+        (rhos, omegas)
+    } else {
+        (
+            vec![floor],
+            vec![geom.projected_omega_from_mr(f64::INFINITY, mr, q)?],
+        )
+    };
 
     let eval_grid_point = |omega: &Vec<f64>| -> Result<(Vec<f64>, Vec<f64>), CoreError> {
         let ch_om_lower = cholesky_lower(omega, q)?;
@@ -1634,31 +1759,31 @@ fn prepare_resid_basis(
 }
 
 pub fn run_spur_i0(req: &SpurTestRequest<'_>) -> Result<SpurI0Output, CoreError> {
-    validate_emat(req.emat, req.n, req.q, req.nrep, 2)?;
+    let emat = normalize_emat(req.emat, req.n, req.q, req.nrep, 2)?;
     run_with_threads(req.nthreads, || {
         let mut geom = SpurGeometry::from_coords(req.coords, req.n, req.d, req.metric)?;
         let (basis_r, tied, mr, om_bm) = prepare_lbm_basis(&geom.sigma_lbm_dm()?, &geom, req.q)?;
         let p_mat = prepare_y_projections(req.y, req.n, req.n_y, &basis_r, req.q)?;
         run_spur_i0_from_basis(
-            &mut geom, tied, &mr, &om_bm, &p_mat, req.n_y, req.emat, req.q, req.nrep,
+            &mut geom, tied, &mr, &om_bm, &p_mat, req.n_y, &emat, req.q, req.nrep,
         )
     })?
 }
 
 pub fn run_spur_i1(req: &SpurTestRequest<'_>) -> Result<SpurI1Output, CoreError> {
-    validate_emat(req.emat, req.n, req.q, req.nrep, 2)?;
+    let emat = normalize_emat(req.emat, req.n, req.q, req.nrep, 2)?;
     run_with_threads(req.nthreads, || {
         let mut geom = SpurGeometry::from_coords(req.coords, req.n, req.d, req.metric)?;
         let (basis_r, tied, mr, om_bm) = prepare_lbm_basis(&geom.sigma_lbm_dm()?, &geom, req.q)?;
         let p_mat = prepare_y_projections(req.y, req.n, req.n_y, &basis_r, req.q)?;
         run_spur_i1_from_basis(
-            &mut geom, tied, &mr, &om_bm, &p_mat, req.n_y, req.emat, req.q, req.nrep,
+            &mut geom, tied, &mr, &om_bm, &p_mat, req.n_y, &emat, req.q, req.nrep,
         )
     })?
 }
 
 pub fn run_spur_i0_resid(req: &SpurTestRequest<'_>) -> Result<SpurI0Output, CoreError> {
-    validate_emat(req.emat, req.n, req.q, req.nrep, 2)?;
+    let emat = normalize_emat(req.emat, req.n, req.q, req.nrep, 2)?;
     let x_in = req
         .x_in
         .ok_or_else(|| CoreError::invalid_input("residual test requires X_in design matrix"))?;
@@ -1681,7 +1806,7 @@ pub fn run_spur_i0_resid(req: &SpurTestRequest<'_>) -> Result<SpurI0Output, Core
             &resid.om_bm,
             &p_mat,
             req.n_y,
-            req.emat,
+            &emat,
             req.q,
             req.nrep,
         )
@@ -1689,7 +1814,7 @@ pub fn run_spur_i0_resid(req: &SpurTestRequest<'_>) -> Result<SpurI0Output, Core
 }
 
 pub fn run_spur_i1_resid(req: &SpurTestRequest<'_>) -> Result<SpurI1Output, CoreError> {
-    validate_emat(req.emat, req.n, req.q, req.nrep, 2)?;
+    let emat = normalize_emat(req.emat, req.n, req.q, req.nrep, 2)?;
     let x_in = req
         .x_in
         .ok_or_else(|| CoreError::invalid_input("residual test requires X_in design matrix"))?;
@@ -1712,7 +1837,7 @@ pub fn run_spur_i1_resid(req: &SpurTestRequest<'_>) -> Result<SpurI1Output, Core
             &resid.om_bm,
             &p_mat,
             req.n_y,
-            req.emat,
+            &emat,
             req.q,
             req.nrep,
         )
@@ -1720,7 +1845,7 @@ pub fn run_spur_i1_resid(req: &SpurTestRequest<'_>) -> Result<SpurI1Output, Core
 }
 
 pub fn run_spur_pipeline(req: &SpurPipelineRequest<'_>) -> Result<SpurPipelineOutput, CoreError> {
-    validate_emat(req.emat, req.n, req.q, req.nrep, 2)?;
+    let emat = normalize_emat(req.emat, req.n, req.q, req.nrep, 2)?;
     if req.y.len() != req.n || req.y.iter().any(|v| !v.is_finite()) {
         return Err(CoreError::invalid_input(
             "invalid y vector for SPUR pipeline",
@@ -1758,10 +1883,10 @@ pub fn run_spur_pipeline(req: &SpurPipelineRequest<'_>) -> Result<SpurPipelineOu
             prepare_lbm_projections(basis_r, info, &geom, req.q)?;
         let p_lbm = prepare_y_projections(req.y, req.n, 1, &basis_lbm, req.q)?;
         let i0 = run_spur_i0_from_basis(
-            &mut geom, tied_lbm, &mr_lbm, &om_lbm, &p_lbm, 1, req.emat, req.q, req.nrep,
+            &mut geom, tied_lbm, &mr_lbm, &om_lbm, &p_lbm, 1, &emat, req.q, req.nrep,
         )?;
         let i1 = run_spur_i1_from_basis(
-            &mut geom, tied_lbm, &mr_lbm, &om_lbm, &p_lbm, 1, req.emat, req.q, req.nrep,
+            &mut geom, tied_lbm, &mr_lbm, &om_lbm, &p_lbm, 1, &emat, req.q, req.nrep,
         )?;
 
         let resid = prepare_resid_basis(&geom, design, req.q)?;
@@ -1774,7 +1899,7 @@ pub fn run_spur_pipeline(req: &SpurPipelineRequest<'_>) -> Result<SpurPipelineOu
             &resid.om_bm,
             &p_res,
             1,
-            req.emat,
+            &emat,
             req.q,
             req.nrep,
         )?;
@@ -1785,7 +1910,7 @@ pub fn run_spur_pipeline(req: &SpurPipelineRequest<'_>) -> Result<SpurPipelineOu
             &resid.om_bm,
             &p_res,
             1,
-            req.emat,
+            &emat,
             req.q,
             req.nrep,
         )?;

@@ -248,17 +248,13 @@
     if (!row_id %in% names(data)) {
       stop("Supplied data does not contain row_id '", row_id, "'", call. = FALSE)
     }
-    if (!is.null(source) && row_id %in% names(source)) {
-      rows <- source[[row_id]]
-      labels <- data[[row_id]]
-    } else if (fit$host == "lm" && !anyNA(match(fit$rows, rownames(data))) &&
-               !anyNA(data[[row_id]]) && !anyDuplicated(data[[row_id]])) {
-      rows <- fit$rows
-      labels <- rownames(data)
-    } else {
+    if (is.null(source) || !row_id %in% names(source)) {
       stop("Fitted model data does not contain row_id '", row_id,
-           "'; retain it in the fitted data or match by row names", call. = FALSE)
+           "'; retain it in the fitted data (e.g. fixest::feols(data.save = TRUE)) or omit row_id to match by row names",
+           call. = FALSE)
     }
+    rows <- source[[row_id]]
+    labels <- data[[row_id]]
   } else {
     rows <- fit$rows
     labels <- rownames(data)
@@ -276,7 +272,7 @@
   }, logical(1)))) {
     stop("Supplied data values disagree with the fitted observations", call. = FALSE)
   }
-  list(data = out, rows = if (!is.null(row_id)) out[[row_id]] else rows)
+  list(data = out, rows = rows)
 }
 
 .make_sites <- function(coords, rows, group) {

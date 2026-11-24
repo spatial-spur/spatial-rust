@@ -290,6 +290,26 @@ def test_pyfixest_constant_shared_column_rejected_on_external_frame():
         scpc(m, external, coords_euclidean=["a", "b"], nthreads=1)
 
 
+def test_pyfixest_duplicate_excluded_rows_do_not_break_unique_fitted_lookup():
+    pf = pytest.importorskip("pyfixest")
+    d = fixture(40)
+    # Two excluded rows with identical values across all columns (both dropped via missing y).
+    d.iloc[0] = d.iloc[1].values
+    d.loc[d.index[:2], "y"] = np.nan
+    m = pf.feols("y ~ x", d)
+    opts = dict(coords_euclidean=["a", "b"], nthreads=1)
+    expected = scpc(m, d, **opts)
+    actual = scpc(m, d.iloc[::-1], **opts)
+    np.testing.assert_allclose(expected.scpcstats, actual.scpcstats)
+
+    # Duplicate fitted rows must still raise a clear ValueError.
+    d_dup_fit = fixture(40)
+    d_dup_fit.iloc[1] = d_dup_fit.iloc[0].values
+    m_dup = pf.feols("y ~ x", d_dup_fit)
+    with pytest.raises(ValueError, match="row_id"):
+        scpc(m_dup, d_dup_fit.iloc[::-1], **opts)
+
+
 def test_nystrom_single_sample_does_not_stop_at_initial_limit():
     rng = np.random.default_rng(123)
     d = pd.DataFrame(

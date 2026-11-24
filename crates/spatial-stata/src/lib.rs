@@ -934,8 +934,9 @@ mod tests {
             "effective",
             "meta",
             "_",
+            "10.0",
         ];
-        assert!(fitted::run_scpc(&args[..22])
+        assert!(fitted::run_scpc(&args[..23])
             .unwrap_err()
             .contains("argument count"));
         let mut bad_seed = args;
@@ -1033,15 +1034,78 @@ mod tests {
         let design = StataDesign::from_columns(n, p, true, 0, 0, &x_raw, &[]).unwrap();
         let (scores, _) =
             spatial_core::preparation::regression_scores(&design.x, &u_orth, p, None).unwrap();
-        assert!(fitted::verify_normal_equations(&scores, &u_orth, &design.x, &b, n, p).is_ok());
+        assert!(fitted::verify_normal_equations(&scores, &u_orth, &design.x, &b, false, 0.0, n, p).is_ok());
 
         // Swapping two elements preserves RSS = sum(u_orth^2) identically while breaking X'u = 0.
         let mut u_stale = u_orth.clone();
         u_stale.swap(0, 1);
         let (stale_scores, _) =
             spatial_core::preparation::regression_scores(&design.x, &u_stale, p, None).unwrap();
-        let err = fitted::verify_normal_equations(&stale_scores, &u_stale, &design.x, &b, n, p)
-            .unwrap_err();
+        let err =
+            fitted::verify_normal_equations(&stale_scores, &u_stale, &design.x, &b, false, 0.0, n, p)
+                .unwrap_err();
         assert!(err.contains("normal equations"), "unexpected err: {err}");
+
+        // Tiny outcome units (1e-12) must still reject swapped-residual stale fits.
+        let tiny_b = [1.5e-12, 1.0e-12];
+        let tiny_u: Vec<f64> = u_stale.iter().map(|&v| v * 1e-12).collect();
+        let (tiny_scores, _) =
+            spatial_core::preparation::regression_scores(&design.x, &tiny_u, p, None).unwrap();
+        let tiny_err = fitted::verify_normal_equations(
+            &tiny_scores,
+            &tiny_u,
+            &design.x,
+            &tiny_b,
+            false,
+            1e-11,
+            n,
+            p,
+        )
+        .unwrap_err();
+        assert!(tiny_err.contains("normal equations"), "unexpected err: {tiny_err}");
+
+        // Large outcome offsets (e.g. 1e11) introduce O(eps * 1e11) cancellation in u = y - yhat;
+        // valid untouched regress and areg fits must pass even when yhat cancels in areg.
+        let offset = 1e11_f64;
+        let noisy_u: Vec<f64> = u_orth
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| v + if i % 2 == 0 { 1.0 } else { -1.0 } * 8.0 * f64::EPSILON * offset)
+            .collect();
+        let offset_b = [1.5, offset];
+        let (offset_scores, _) =
+            spatial_core::preparation::regression_scores(&design.x, &noisy_u, p, None).unwrap();
+        assert!(fitted::verify_normal_equations(
+            &offset_scores,
+            &noisy_u,
+            &design.x,
+            &offset_b,
+            false,
+            offset,
+            n,
+            p
+        )
+        .is_ok());
+        // areg passes within-demeaned design_x without the absorbed level offset, so y_scale_hint protects it.
+        assert!(fitted::verify_normal_equations(
+            &offset_scores,
+            &noisy_u,
+            &design.x,
+            &b,
+            false,
+            offset,
+            n,
+            p
+        )
+        .is_ok());
+
+        // Exact zero residuals must pass.
+        let zero_u = vec![0.0; n];
+        let (zero_scores, _) =
+            spatial_core::preparation::regression_scores(&design.x, &zero_u, p, None).unwrap();
+        assert!(
+            fitted::verify_normal_equations(&zero_scores, &zero_u, &design.x, &b, false, 1.0, n, p)
+                .is_ok()
+        );
     }
 }

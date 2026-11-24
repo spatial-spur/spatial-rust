@@ -211,6 +211,11 @@ program scpc, eclass sortpreserve
     local seed_arg = trim(string(`seed',"%15.0f"))
     local avc_arg = trim(string(`avc',"%21.16g"))
     local tolerance_arg = trim(string(`tolerance',"%21.16g"))
+    quietly fvrevar `e(depvar)' if `esample'
+    local depvar_mat `r(varlist)'
+    quietly summarize `depvar_mat' if `esample', meanonly
+    local y_scale = cond(missing(r(min)) | missing(r(max)), 0, max(abs(r(min)), abs(r(max))))
+    local y_scale_arg = trim(string(`y_scale', "%21.16g"))
     tempname table cuts crit meta w site_rows
     matrix `table' = J(`report',6,.)
     matrix `crit' = J(`report',1,.)
@@ -224,7 +229,7 @@ program scpc, eclass sortpreserve
     local weights_path _
     if "`weights'" != "" local weights_path `"`weights_data'"'
     _spatial_spur invoke, vars("`coords' `residual' `groups' `regressors' `excluded'") sample(`esample') ///
-        command(`"fitted_scpc `d' `p' `report' `has_cons' `endog_count' `nz' `cl' `ll' `avc_arg' `un' `cv' "`nthreads'" `method' `seed_arg' `landmarks' `samples' `tolerance_arg' `subset' `table' `cuts_arg' `crit' `meta' "`weights_path'""')
+        command(`"fitted_scpc `d' `p' `report' `has_cons' `endog_count' `nz' `cl' `ll' `avc_arg' `un' `cv' "`nthreads'" `method' `seed_arg' `landmarks' `samples' `tolerance_arg' `subset' `table' `cuts_arg' `crit' `meta' "`weights_path'" `y_scale_arg'"')
 
     local labels
     forvalues j = 1/`report' {

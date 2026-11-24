@@ -234,13 +234,26 @@ print.spatial_spur_halflife <- function(x, ...) {
     columns <- character()
     cols <- list()
     if (attr(tt, "response") == 1L) {
+      resp <- stats::model.response(mf)
+      if (!is.numeric(resp) || !is.null(dim(resp))) {
+        lhs_name <- paste(deparse(f[[2L]]), collapse = "")
+        stop("Response '", lhs_name, "' must be numeric", call. = FALSE)
+      }
       lhs_name <- paste(deparse(f[[2L]]), collapse = "")
       columns <- c(columns, lhs_name)
-      cols[[lhs_name]] <- mf[[1L]]
+      cols[[lhs_name]] <- as.double(resp)
     }
-    for (lbl in attr(tt, "term.labels")) {
-      columns <- c(columns, lbl)
-      cols[[lbl]] <- mf[[lbl]]
+    rhs_terms <- stats::delete.response(tt)
+    if (length(attr(rhs_terms, "term.labels")) > 0L) {
+      mm <- stats::model.matrix(rhs_terms, data = mf)
+      assign_vec <- attr(mm, "assign")
+      keep <- if (is.null(assign_vec)) colnames(mm) != "(Intercept)" else assign_vec != 0L
+      mm <- mm[, keep, drop = FALSE]
+      for (j in seq_len(ncol(mm))) {
+        lbl <- colnames(mm)[j]
+        columns <- c(columns, lbl)
+        cols[[lbl]] <- as.double(mm[, j])
+      }
     }
     if (length(columns) == 0L) {
       stop("Supply at least one response variable to transform", call. = FALSE)
@@ -248,14 +261,7 @@ print.spatial_spur_halflife <- function(x, ...) {
     if (anyDuplicated(columns)) {
       stop("Supply distinct response columns", call. = FALSE)
     }
-    values <- lapply(columns, function(name) {
-      v <- cols[[name]]
-      if (!is.numeric(v) || !is.null(dim(v))) {
-        stop("Response '", name, "' must be numeric", call. = FALSE)
-      }
-      as.double(v)
-    })
-    y <- do.call(cbind, values)
+    y <- do.call(cbind, cols)
     colnames(y) <- columns
     return(list(columns = columns, y = y))
   }
@@ -385,7 +391,7 @@ spur <- function(formula, data, lon = NULL, lat = NULL, coords_euclidean = NULL,
   adjusted <- scpc(transformed_fit, coords = coords, geographic = geographic, avc = avc,
     uncond = uncond, cvs = cvs, backend = backend, nthreads = nthreads,
     method = method, large_n_seed = large_n_seed)
-  y_label <- deparse(stats::formula(fit$model)[[2L]])
+  y_label <- paste(deparse(stats::formula(fit$model)[[2L]]), collapse = "")
   colnames(out$transformed_vars) <- paste0("h_", c(y_label, colnames(fit$x)[-intercept]))
   rownames(out$transformed_vars) <- rownames(fit$sample)
   structure(

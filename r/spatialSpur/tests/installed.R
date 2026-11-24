@@ -106,8 +106,41 @@ stopifnot(length(coef(dot_scpc)) == 3L,
 assert_error(scpc(lm(cbind(y, x) ~ u, d), d, lon = "lon", lat = "lat"), "single-response")
 
 id_fit <- lm(y ~ x, d)
-id_scpc <- scpc(id_fit, d[reorder, ], row_id = "id", lon = "lon", lat = "lat", nthreads = 1L)
-stopifnot(identical(id_scpc$observations, d$id[!is.na(d$y)]))
+assert_error(
+  scpc(id_fit, d[reorder, ], row_id = "id", lon = "lon", lat = "lat", nthreads = 1L),
+  "does not contain row_id"
+)
+coord_only <- d[reorder, c("id", "lon", "lat")]
+rownames(coord_only) <- NULL
+assert_error(
+  scpc(id_fit, coord_only, row_id = "id", lon = "lon", lat = "lat", nthreads = 1L),
+  "does not contain row_id"
+)
+if (requireNamespace("fixest", quietly = TRUE)) {
+  fe_id_fit <- fixest::feols(y ~ x, d, demeaned = TRUE, data.save = TRUE, notes = FALSE)
+  fe_id_full <- scpc(fe_id_fit, d, lon = "lon", lat = "lat", nthreads = 1L)
+  fe_id_shuf <- scpc(fe_id_fit, coord_only, row_id = "id", lon = "lon", lat = "lat", nthreads = 1L)
+  stopifnot(
+    identical(fe_id_shuf$observations, d$id[!is.na(d$y)]),
+    isTRUE(all.equal(unname(fe_id_full$scpcstats), unname(fe_id_shuf$scpcstats), tolerance = 1e-12))
+  )
+}
+
+one_fit <- lm(y ~ 0 + x, d)
+one_scpc <- scpc(one_fit, d, lon = "lon", lat = "lat", nthreads = 1L, cvs = TRUE)
+stopifnot(
+  identical(names(coef(one_scpc)), "x"),
+  identical(dim(confint(one_scpc)), c(1L, 2L)),
+  identical(rownames(confint(one_scpc)), "x"),
+  identical(confint(one_scpc, "x"), confint(one_scpc)),
+  identical(confint(one_scpc, 1L), confint(one_scpc)),
+  identical(dim(confint(one_scpc, "x", level = 0.90)), c(1L, 2L)),
+  identical(dim(confint(p$transformed)), c(1L, 2L)),
+  identical(rownames(confint(p$transformed, "x")), "x"),
+  identical(names(coef(p$transformed)), "x")
+)
+assert_error(confint(one_scpc, "missing"), "Unknown coefficient")
+assert_error(confint(one_scpc, level = 0.9000001), "not available")
 
 if (requireNamespace("fixest", quietly = TRUE)) {
   sub_fit <- fixest::feols(y ~ x, d, subset = d$g > 0, demeaned = TRUE, data.save = TRUE, notes = FALSE)
@@ -148,6 +181,20 @@ stopifnot(all(expr_cols %in% colnames(tr_expr)),
                            unname(as.matrix(tr_manual[c("h_logy", "h_x2")])), tolerance = 1e-12)))
 assert_error(spurtransform(y ~ x + offset(w), d, lon = "lon", lat = "lat"), "offset")
 
+tr_inter <- spurtransform(y ~ x * z, d, lon = "lon", lat = "lat", nthreads = 1L)
+d_inter <- transform(d, xz = x * z)
+tr_inter_manual <- spurtransform(y ~ x + z + xz, d_inter, lon = "lon", lat = "lat", nthreads = 1L)
+inter_cols <- c("h_y", "h_x", "h_z", "h_x:z")
+stopifnot(
+  all(inter_cols %in% colnames(tr_inter)),
+  all(is.na(tr_inter[is.na(d$y), inter_cols])),
+  isTRUE(all.equal(
+    unname(as.matrix(tr_inter[inter_cols])),
+    unname(as.matrix(tr_inter_manual[c("h_y", "h_x", "h_z", "h_xz")])),
+    tolerance = 1e-12
+  ))
+)
+
 d1d <- data.frame(s = seq(0, 1, length.out = 24L), y = sin(seq(0.2, 2.7, length.out = 24L)))
 d1d_rev <- d1d[rev(seq_len(nrow(d1d))), ]
 set.seed(81)
@@ -162,9 +209,17 @@ for (fn in list(spurtest_i0, spurtest_i1)) {
                "positive column norms")
   a_perm <- fn("y", d1d, coords_euclidean = "s", q = 4L, draws = d4, tuning_draws = t4, nthreads = 1L)
   b_perm <- fn("y", d1d_rev, coords_euclidean = "s", q = 4L, draws = d4, tuning_draws = t4, nthreads = 1L)
+  c_big <- fn("y", d1d, coords_euclidean = "s", q = 4L, draws = d4 * 1e170, tuning_draws = t4 * 1e170, nthreads = 1L)
+  c_tiny <- fn("y", d1d, coords_euclidean = "s", q = 4L, draws = d4 * 1e-170, tuning_draws = t4 * 1e-170, nthreads = 1L)
   stopifnot(abs(a_perm$lr - b_perm$lr) < 1e-11,
             abs(a_perm$pvalue - b_perm$pvalue) < 1e-12,
-            abs(a_perm$ha_parm - b_perm$ha_parm) < 1e-11)
+            abs(a_perm$ha_parm - b_perm$ha_parm) < 1e-11,
+            identical(a_perm$pvalue, c_big$pvalue),
+            identical(a_perm$pvalue, c_tiny$pvalue),
+            !anyNA(c_big$cvalue),
+            !anyNA(c_tiny$cvalue),
+            isTRUE(all.equal(a_perm$cvalue[2:3], c_big$cvalue[2:3], tolerance = 1e-12)),
+            isTRUE(all.equal(a_perm$cvalue[2:3], c_tiny$cvalue[2:3], tolerance = 1e-12)))
 }
 stopifnot(!is.null(colnames(p$transformed_vars)), !is.null(rownames(p$transformed_vars)))
 w_out <- list()

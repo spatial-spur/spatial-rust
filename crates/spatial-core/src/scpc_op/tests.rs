@@ -1939,7 +1939,27 @@ fn near_colocation_keeps_cmax_above_c0_and_six_site_offgrid_size_holds() {
     .unwrap();
     let dm = crate::distance::distance_matrix(&sites, 6, 2, Metric::Euclidean).unwrap();
     let locs = Distances::new(&sites, 6, 2, Metric::Euclidean).unwrap().locations();
-    let dense_steps = build_scale_grid(out6.c0, out6.cmax);
+    let cal_steps = build_scale_grid(out6.c0, out6.cmax);
+    let c_upper = (out6.cmax * 100.0).max(36.0 / 0.01);
+    let mut dense_steps = Vec::new();
+    let mut c = out6.c0;
+    while c < c_upper {
+        dense_steps.push(c);
+        c *= 1.005;
+    }
+    dense_steps.push(out6.cmax);
+    dense_steps.push(c_upper);
+    for w in cal_steps.windows(2) {
+        dense_steps.push((w[0] * w[1]).sqrt());
+    }
+    dense_steps.sort_by(f64::total_cmp);
+    dense_steps.dedup_by(|a, b| (*a - *b).abs() <= 1e-12 * b.abs());
+    assert!(
+        dense_steps.len() > cal_steps.len() * 5,
+        "off-grid test must evaluate a finer grid than calibration ({} vs {})",
+        dense_steps.len(),
+        cal_steps.len()
+    );
     let mut ws = ProbabilityWorkspace::new(out6.q);
     let omega_grid = covariance_grids(&dm, 6, &[&out6.wfin], &[out6.q + 1], &dense_steps, &locs)
         .unwrap()
@@ -1947,5 +1967,5 @@ fn near_colocation_keeps_cmax_above_c0_and_six_site_offgrid_size_holds() {
     let (max_p, _) = ws
         .maximum(&omega_grid, out6.q + 1, out6.cvfin / (out6.q as f64).sqrt(), None)
         .unwrap();
-    assert!(max_p <= 0.051, "6-site grid size exceeded bound: {max_p}");
+    assert!(max_p <= 0.051, "6-site off-grid size exceeded bound: {max_p}");
 }

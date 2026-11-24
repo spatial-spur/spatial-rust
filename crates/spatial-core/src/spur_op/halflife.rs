@@ -1,8 +1,8 @@
 //! SPUR half-life likelihoods, simulation, and confidence-set inversion.
 
 use super::{
-    center_columns, covariance_shapes_differ, factor_omega, prepare_y_projections,
-    select_leading_basis, validate_emat, CovarianceFactor, SpurGeometry, TILE_COLS,
+    center_columns, covariance_shapes_differ, factor_omega, normalize_emat, prepare_y_projections,
+    select_leading_basis, CovarianceFactor, SpurGeometry, TILE_COLS,
 };
 use crate::distance::Metric;
 use crate::threads::{is_serial, run_with_threads};
@@ -260,7 +260,10 @@ pub(super) fn half_life_search_grid(min_distance: f64) -> Vec<f64> {
     raw.sort_by(f64::total_cmp);
     let mut grid: Vec<f64> = Vec::with_capacity(raw.len());
     for point in raw {
-        if grid.last().is_none_or(|&prev| point - prev > 1e-13) {
+        if grid
+            .last()
+            .is_none_or(|&prev| point - prev > 1e-12 * point.min(1.0 - prev))
+        {
             grid.push(point);
         }
     }
@@ -382,7 +385,13 @@ pub(super) fn invert_half_life_adaptive(
             .collect();
         let mut midpoints = Vec::new();
         for i in 0..pts.len().saturating_sub(1) {
-            if pts[i + 1] - pts[i] <= 1e-4 || acc[i] != acc[i + 1] {
+            let edge_scale = pts[i].min(1.0 - pts[i + 1]);
+            let min_width = if edge_scale > 0.0 {
+                1e-4 * edge_scale
+            } else {
+                1e-12 * pts[i + 1].min(1.0 - pts[i]).max(f64::MIN_POSITIVE)
+            };
+            if pts[i + 1] - pts[i] <= min_width || acc[i] != acc[i + 1] {
                 continue;
             }
             let refine = if acc[i] {
@@ -415,7 +424,10 @@ pub(super) fn invert_half_life_adaptive(
         pts = Vec::with_capacity(combined.len());
         cts = Vec::with_capacity(combined.len());
         for (p, c) in combined {
-            if pts.last().is_none_or(|&prev| p - prev > 1e-13) {
+            if pts
+                .last()
+                .is_none_or(|&prev| p - prev > 1e-12 * p.min(1.0 - prev))
+            {
                 pts.push(p);
                 cts.push(c);
             }
@@ -439,7 +451,7 @@ pub fn run_spur_halflife(req: &SpurHalfLifeRequest<'_>) -> Result<SpurHalfLifeOu
             "q exceeds the validated half-life quadrature limit of 100",
         ));
     }
-    validate_emat(req.emat, req.n, req.q, req.nrep, 1)?;
+    let emat = normalize_emat(req.emat, req.n, req.q, req.nrep, 1)?;
     if !req.level.is_finite() || req.level <= 0.0 || req.level >= 1.0 {
         return Err(CoreError::invalid_input(
             "confidence level must lie strictly in (0, 1)",
@@ -518,7 +530,7 @@ pub fn run_spur_halflife(req: &SpurHalfLifeRequest<'_>) -> Result<SpurHalfLifeOu
 
         let mut emat_sq = vec![0.0_f64; nrep];
         for r in 0..q {
-            let row = &req.emat[r * nrep..(r + 1) * nrep];
+            let row = &emat[r * nrep..(r + 1) * nrep];
             for c in 0..nrep {
                 emat_sq[c] += row[c] * row[c];
             }
@@ -607,7 +619,7 @@ pub fn run_spur_halflife(req: &SpurHalfLifeRequest<'_>) -> Result<SpurHalfLifeOu
                 let e_tile = &mut e_tile[..q * cols];
                 for (dst, row) in tile_e[..q * cols]
                     .chunks_exact_mut(cols)
-                    .zip(req.emat.chunks_exact(nrep))
+                    .zip(emat.chunks_exact(nrep))
                 {
                     dst.copy_from_slice(&row[start..start + cols]);
                 }

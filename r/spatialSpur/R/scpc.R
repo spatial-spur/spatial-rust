@@ -179,17 +179,20 @@ print.scpc <- function(x, ...) {
 }
 
 coef.scpc <- function(object, ...) {
-  object$scpcstats[, "coef"]
+  stats::setNames(as.double(object$scpcstats[, "coef"]), rownames(object$scpcstats))
 }
 
 confint.scpc <- function(object, parm, level = 0.95, ...) {
   level <- .scalar_double(level, "level", gt = 0, lt = 1)
-  cf <- object$scpcstats[, "coef"]
-  pnames <- names(cf)
+  cf <- coef.scpc(object)
+  pnames <- rownames(object$scpcstats)
   if (missing(parm)) {
     parm <- pnames
   } else if (is.numeric(parm)) {
-    parm <- pnames[parm]
+    if (anyNA(parm) || any(parm != trunc(parm)) || any(parm < 1L) || any(parm > length(pnames))) {
+      stop("Unknown coefficient in parm", call. = FALSE)
+    }
+    parm <- pnames[as.integer(parm)]
   }
   idx <- match(parm, pnames)
   if (anyNA(idx)) {
@@ -198,15 +201,15 @@ confint.scpc <- function(object, parm, level = 0.95, ...) {
   if (abs(level - 0.95) < 1e-12) {
     ci <- object$scpcstats[idx, c("ci_lower", "ci_upper"), drop = FALSE]
   } else {
-    cv_map <- c("0.68" = 1L, "0.9" = 2L, "0.95" = 3L, "0.99" = 4L)
-    key <- as.character(round(level, 6))
-    if (is.null(object$scpccvs) || !key %in% names(cv_map)) {
+    avail <- c(0.68, 0.90, 0.95, 0.99)
+    col_idx <- which(abs(avail - level) < 1e-12)
+    if (is.null(object$scpccvs) || length(col_idx) != 1L) {
       stop("Confidence level ", level, " is not available (pass cvs = TRUE for 68%/90%/99%)",
            call. = FALSE)
     }
-    cv <- object$scpccvs[idx, cv_map[[key]]]
-    se <- object$scpcstats[idx, "se"]
-    est <- cf[idx]
+    cv <- as.double(object$scpccvs[idx, col_idx])
+    se <- as.double(object$scpcstats[idx, "se"])
+    est <- as.double(cf[idx])
     ci <- cbind(est - cv * se, est + cv * se)
   }
   probs <- c((1 - level) / 2, (1 + level) / 2)

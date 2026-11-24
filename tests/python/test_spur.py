@@ -221,3 +221,41 @@ def test_spur_rejects_zero_draws_reports_25_draw_power_and_is_row_permutation_in
         assert np.isclose(a.lr, b.lr, rtol=0, atol=1e-11)
         assert np.isclose(a.pvalue, b.pvalue, rtol=0, atol=1e-12)
         assert np.isclose(a.ha_param, b.ha_param, rtol=0, atol=1e-11)
+
+
+def test_spur_explicit_draws_are_scale_invariant():
+    from spatial_spur import spurtest_i0resid, spurtest_i1
+
+    rng = np.random.default_rng(109)
+    d = pd.DataFrame(
+        {
+            "a": rng.normal(size=24),
+            "b": rng.normal(size=24),
+            "x": rng.normal(size=24),
+        }
+    )
+    d["y"] = 0.5 + 1.2 * d["x"] + rng.normal(scale=0.5, size=24)
+    draws = rng.standard_normal((4, 100))
+    tuning = rng.standard_normal((4, 100))
+    opts = dict(coords_euclidean=["a", "b"], q=4, nthreads=1)
+
+    for fn, target in (
+        (spurtest_i0, "y"),
+        (spurtest_i1, "y"),
+        (spurtest_i0resid, "y ~ x"),
+        (spurtest_i1resid, "y ~ x"),
+    ):
+        base = fn(target, d, draws=draws, tuning_draws=tuning, **opts)
+        for factor in (1e170, 1e-170):
+            scaled = fn(
+                target, d, draws=draws * factor, tuning_draws=tuning * factor, **opts
+            )
+            assert scaled.pvalue == base.pvalue
+            assert np.all(np.isfinite(scaled.cvalue))
+            np.testing.assert_allclose(scaled.cvalue, base.cvalue, rtol=1e-12, atol=1e-12)
+            assert np.isclose(scaled.ha_param, base.ha_param, rtol=1e-12, atol=1e-12)
+
+    hl_base = spurhalflife("y", d, draws=draws, **opts)
+    for factor in (1e170, 1e-170):
+        hl_scaled = spurhalflife("y", d, draws=draws * factor, **opts)
+        np.testing.assert_allclose(hl_scaled.components, hl_base.components, rtol=1e-12, atol=1e-12)

@@ -323,7 +323,10 @@ def align_frame(
                 "Shared PyFixest rows do not uniquely match fitted observations; "
                 "supply row_id=..."
             )
-        positions = supplied_keys.get_indexer(stored_keys)
+        matched_mask = supplied_keys.isin(stored_keys)
+        matched_positions = np.flatnonzero(matched_mask)
+        unique_supplied = supplied_keys[matched_mask]
+        positions = matched_positions[unique_supplied.get_indexer(stored_keys)]
         labels = data.index.take(positions)
         if not labels.is_unique:
             raise ValueError("Supply unique data index labels or row_id for the fitted rows")
