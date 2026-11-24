@@ -94,4 +94,45 @@ stopifnot(identical(tr$h_y, c(-1, rep(0, 15), 1)))
 regular$y <- 1e12
 tr <- spurtransform(~y, regular, lon = "lon", lat = "lat", transformation = "iso", radius = 1e6)
 stopifnot(all(tr$h_y == 0), nrow(load_chetty_data()) == 741L)
+
+stopifnot(identical(spatialSpur:::spatial_build_info()$package_version, as.character(packageVersion("spatialSpur"))))
+
+dot_fit <- lm(y ~ ., d[, c("y", "x", "u")])
+dot_scpc <- scpc(dot_fit, d, lon = "lon", lat = "lat", nthreads = 1L, cvs = TRUE)
+stopifnot(length(coef(dot_scpc)) == 3L,
+          all(dim(confint(dot_scpc, level = 0.90)) == c(3L, 2L)),
+          any(grepl("avc", capture.output(summary(dot_scpc)))))
+assert_error(scpc(lm(cbind(y, x) ~ u, d), d, lon = "lon", lat = "lat"), "single-response")
+
+id_fit <- lm(y ~ x, d)
+id_scpc <- scpc(id_fit, d[reorder, ], row_id = "id", lon = "lon", lat = "lat", nthreads = 1L)
+stopifnot(identical(id_scpc$observations, d$id[!is.na(d$y)]))
+
+if (requireNamespace("fixest", quietly = TRUE)) {
+  sub_fit <- fixest::feols(y ~ x, d, subset = d$g > 0, demeaned = TRUE, data.save = TRUE, notes = FALSE)
+  sub_scpc <- scpc(sub_fit, d, lon = "lon", lat = "lat", nthreads = 1L)
+  stopifnot(identical(sub_scpc$observations, rownames(d)[fixest::obs(sub_fit)]))
+  glm_fit <- fixest::feglm(I(y > 0) ~ x, d, family = "binomial", notes = FALSE)
+  assert_error(scpc(glm_fit, d, lon = "lon", lat = "lat"), "feols")
+  slope_fit <- fixest::feols(y ~ 1 | g[x], d, demeaned = TRUE, data.save = TRUE, notes = FALSE)
+  assert_error(scpc(slope_fit, d, lon = "lon", lat = "lat", uncond = TRUE), "varying-slope")
+}
+
+set.seed(123)
+before_null <- .Random.seed
+invisible(do.call(spurtest_i0, c(list("x", d), within(opts, { seed <- NULL }))))
+stopifnot(!identical(before_null, .Random.seed))
+
+assert_error(spurtransform(log(y) ~ I(x^2), d, lon = "lon", lat = "lat"), "plain variable")
+stopifnot(!is.null(colnames(p$transformed_vars)), !is.null(rownames(p$transformed_vars)))
+w_out <- list()
+withCallingHandlers(
+  spurtest_i0("x", d, lon = "lon", lat = "lat", q = 4L, nrep = 50L, nthreads = 1L),
+  warning = function(w) {
+    w_out[[length(w_out) + 1L]] <<- conditionMessage(w)
+    invokeRestart("muffleWarning")
+  }
+)
+stopifnot(any(grepl("unattainable", w_out)))
+
 cat("R installed integration checks passed\n")

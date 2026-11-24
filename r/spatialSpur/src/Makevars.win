@@ -1,19 +1,29 @@
 CARGO ?= cargo
 CARGO_BUILD_JOBS ?= 2
-RUST_TARGET ?= x86_64-pc-windows-gnu
+ifndef RUST_TARGET
+  R_NATIVE_ARCH := $(shell "$(R_HOME)/bin/Rscript.exe" --vanilla -e "cat(R.version[['arch']])")
+  RUST_TARGET := $(if $(filter aarch64 arm64,$(R_NATIVE_ARCH)),aarch64-pc-windows-gnullvm,x86_64-pc-windows-gnu)
+endif
 RUST_ROOT = $(if $(wildcard rust/Cargo.toml),rust,../../..)
-TARGET_DIR = $(CURDIR)/rust-target
+TARGET_DIR = $(CURDIR)/rust/target
 STATLIB = $(TARGET_DIR)/$(RUST_TARGET)/release/libspatial_r.a
 VENDOR_ARCHIVE = $(wildcard rust/vendor.tar.xz)
+VENDOR_CONFIG = $(wildcard rust/vendor-config.toml)
 VENDOR_ENV = $(if $(VENDOR_ARCHIVE),CARGO_HOME="$(TARGET_DIR)/cargo-home",)
-VENDOR_ARGS = $(if $(VENDOR_ARCHIVE),--offline,)
-PKG_LIBS = $(STATLIB) -lws2_32 -luserenv -lbcrypt -lntdll
+VENDOR_ARGS = $(if $(VENDOR_ARCHIVE),--offline $(if $(VENDOR_CONFIG),--config target/vendor-config.toml,),)
+# Rust's standard library uses WaitOnAddress and WakeByAddress on Windows.
+PKG_LIBS = $(STATLIB) -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lsynchronization -lm
 
 all: $(SHLIB)
+	$(if $(VENDOR_ARCHIVE),rm -rf "$(TARGET_DIR)" rust/vendor,)
 
-$(SHLIB): $(STATLIB)
+$(SHLIB): $(STATLIB) spatialSpur-win.def
 
-.PHONY: $(STATLIB)
+.PHONY: $(STATLIB) clean
 $(STATLIB):
-	$(if $(VENDOR_ARCHIVE),tar -xf "$(VENDOR_ARCHIVE)" -C rust && mkdir -p rust/.cargo && cp rust/vendor-config.toml rust/.cargo/config.toml,:)
+	"$(CARGO)" --version && rustc --version
+	$(if $(VENDOR_ARCHIVE),tar -xf "$(VENDOR_ARCHIVE)" -C rust && mkdir -p "$(TARGET_DIR)" && cp "$(VENDOR_CONFIG)" "$(TARGET_DIR)/vendor-config.toml",:)
 	cd "$(RUST_ROOT)" && $(VENDOR_ENV) CARGO_TARGET_DIR="$(TARGET_DIR)" "$(CARGO)" build -j "$(CARGO_BUILD_JOBS)" --release --locked $(VENDOR_ARGS) --target "$(RUST_TARGET)" -p spatial-r
+
+clean:
+	rm -rf $(SHLIB) *.o "$(TARGET_DIR)" rust-target rust/vendor rust/.cargo

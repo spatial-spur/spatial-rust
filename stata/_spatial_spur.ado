@@ -5,6 +5,7 @@ program _spatial_spur, rclass
 
     if "`operation'" == "load" {
         syntax [, BACKend(string) nthreads(integer -1)]
+        local backend = lower(trim(`"`backend'"'))
         if !inlist("`backend'", "", "auto", "rust") {
             di as error "backend() must be rust or auto"
             exit 198
@@ -27,7 +28,13 @@ program _spatial_spur, rclass
                 exit 199
             }
         }
+        capture plugin call _spatial_spur_plugin, require_spec 0.4.0
+        if _rc {
+            di as error "The installed spatial_spur.plugin does not match specification 0.4.0"
+            exit 199
+        }
         quietly plugin call _spatial_spur_plugin, result_metadata
+        return local backend "rust"
         return local provider "`native_provider'"
         return local specification "`native_methods'"
         exit
@@ -86,24 +93,69 @@ program _spatial_spur, rclass
 
     if "`operation'" == "draws" {
         syntax , Q(integer) NRep(integer) SEED(real) FILE(string)
-        if `q' < 1 | `nrep' < 1 | !inrange(`seed',0,4294967295) | `seed' != floor(`seed') {
-            di as error "Draw dimensions and seed() must be valid integer values"
+        if `q' < 1 | `nrep' < 1 | !inrange(`seed',0,2147483647) | `seed' != floor(`seed') {
+            di as error "Draw dimensions must be positive and seed() must be an integer in [0, 2147483647]"
             exit 198
         }
+        local seed_str = trim(string(`seed', "%15.0f"))
         local rngstate `"`c(rngstate)'"'
+        capture erase `"`file'"'
+        mata: _sp_fd = -1
         capture noisily {
-            quietly set seed `seed'
-            mata: spatial_spur_write_draws(`"`file'"', `q', `nrep')
+            quietly set seed `seed_str'
+            mata: _sp_draws = rnormal(`q', `nrep', 0, 1); _sp_fmt = bufio(); bufbyteorder(_sp_fmt, 2); _sp_fd = fopen(st_local("file"), "w"); fbufput(_sp_fmt, _sp_fd, "%8z", rowshape(_sp_draws, 1)); fclose(_sp_fd); _sp_fd = -1; _sp_draws = .
         }
         local rc = _rc
+        capture mata: if (_sp_fd >= 0) fclose(_sp_fd)
+        capture mata: mata drop _sp_fd _sp_fmt _sp_draws
         quietly set rngstate `rngstate'
         if `rc' exit `rc'
         exit
     }
 
+    if "`operation'" == "advisory" {
+        syntax , Q(integer) NRep(integer) [LEVEL(real -1) ALLdir(integer 0) POWer(real -1) TESTname(string)]
+        if `q' >= 40 | `alldir' == 1 {
+            local scope = cond(`alldir' == 1, " uses all positive directions and", "")
+            di as text "Note: q=`q'`scope' retains higher spatial frequencies. Results can be sensitive to local noise."
+        }
+        if `level' < 0 {
+            local unatt
+            foreach alpha in 1 5 10 {
+                if `nrep' + 1 < floor(100 / `alpha') {
+                    local unatt `unatt' `alpha'%
+                }
+            }
+            if "`unatt'" != "" {
+                local minp = trim(string(1 / (`nrep' + 1), "%8.4g"))
+                di as text "Note: With nrep=`nrep', minimum p-value is `minp'. Rejection is unattainable at`unatt'."
+            }
+            if `power' >= 0 & `power' < 0.45 {
+                local pct = trim(string(100 * `power', "%5.1f"))
+                di as text "Note: `testname' did not reach the 50% tuning target (best estimated power `pct'%)."
+            }
+        }
+        else {
+            if `q' <= 5 {
+                di as text "Note: q=`q' provides few spatial contrasts for estimating the half-life."
+            }
+            if (`nrep' / (`nrep' + 1)) < (`level' / 100) {
+                local minp = trim(string(1 / (`nrep' + 1), "%8.4g"))
+                di as text "Note: With nrep=`nrep', minimum p-value is `minp'. The `level'% confidence set covers [0, infinity]."
+            }
+        }
+        exit
+    }
+
     if inlist("`operation'", "validate", "commit") {
         syntax , OUTPUTS(string) [SOURCE(string) REPLACE]
+        local seen
         foreach name of local outputs {
+            if `: list name in seen' {
+                di as error "Duplicate output variable name `name'"
+                exit 198
+            }
+            local seen `seen' `name'
             capture confirm name `name'
             if _rc | strlen("`name'") > 32 {
                 di as error "Invalid output variable name `name'"
@@ -129,18 +181,4 @@ program _spatial_spur, rclass
 
     di as error "Unknown spatialSpur adapter operation `operation'"
     exit 198
-end
-
-mata:
-void spatial_spur_write_draws(string scalar path, real scalar q, real scalar nrep) {
-    real matrix draws
-    real scalar fd
-    real colvector format
-    draws = rnormal(q, nrep, 0, 1)
-    fd = fopen(path, "w")
-    format = bufio()
-    bufbyteorder(format, 2)
-    fbufput(format, fd, "%8z", rowshape(draws, 1))
-    fclose(fd)
-}
 end

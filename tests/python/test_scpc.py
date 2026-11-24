@@ -1,10 +1,11 @@
 import numpy as np
 import pandas as pd
 import pytest
+import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
 from reference.spatial import distances, regression, scpc_at_dimension
-from spatial_spur import scpc
+from spatial_spur import TiedEigenspaceError, __version__, build_info, scpc
 
 
 def fixture(n=72):
@@ -179,3 +180,99 @@ def test_statsmodels_panel_index_aligns_by_observation():
     shuffled = scpc(model, d.iloc[::-1], **options)
     assert aligned.observations.equals(d.index)
     np.testing.assert_array_equal(aligned.scpcstats, shuffled.scpcstats)
+
+
+def test_scpc_validation_methods_and_metadata():
+    assert TiedEigenspaceError.__module__ == "spatial_spur._native"
+    info = build_info()
+    assert info["package_version"] == __version__
+
+    d = fixture(32)
+    m = smf.ols("y ~ x", d).fit()
+    base = dict(coords_euclidean=["a", "b"], nthreads=1)
+    for bad in (
+        dict(avc=True),
+        dict(cv_tolerance=True),
+        dict(method="nystrom", landmarks=True),
+        dict(method="nystrom", landmark_samples=False),
+        dict(geographic=True),
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            scpc(m, d, **{**base, **bad})
+    with pytest.raises(ValueError, match="duplicate"):
+        scpc(m, d, coords_euclidean=["a", "a"], nthreads=1)
+
+    off = smf.ols("y ~ x", d, offset=d.z).fit()
+    with pytest.raises(ValueError, match="offsets"):
+        scpc(off, d, **base)
+    wls = smf.wls("y ~ x", d, weights=np.arange(1.0, len(d) + 1.0)).fit()
+    with pytest.raises(ValueError, match="unweighted"):
+        scpc(wls, d, **base)
+
+    res = scpc(m, d, cvs=True, **base)
+    np.testing.assert_allclose(res.coef(), m.params.to_numpy())
+    ci95 = res.confint()
+    ci90 = res.confint(level=0.90)
+    assert ci95.shape == (2, 2)
+    assert np.all(ci90.iloc[:, 1] - ci90.iloc[:, 0] < ci95.iloc[:, 1] - ci95.iloc[:, 0])
+    assert "SCPC" in repr(res)
+    summary_text = res.summary()
+    assert "avc=" in summary_text and "Two-sided critical values:" in summary_text
+
+    d_unhash = d.copy()
+    d_unhash["tags"] = [[i] for i in range(len(d))]
+    m_unhash = smf.ols("y ~ x", d_unhash).fit()
+    aligned = scpc(m_unhash, d_unhash, **base)
+    np.testing.assert_allclose(aligned.scpcstats, res.scpcstats)
+
+
+def test_pyfixest_weighted_and_residualizer_exception_preservation():
+    from spatial_spur import _native
+
+    d = fixture(40)
+    coords = d[["a", "b"]].to_numpy()
+    coef = np.array([1.0])
+    bread = np.array([[1.0]])
+    scores = d[["y"]].to_numpy()
+
+    class CustomResidualizerError(RuntimeError):
+        pass
+
+    def raise_interrupt(_matrix):
+        raise KeyboardInterrupt("user stop")
+
+    def raise_custom(_matrix):
+        raise CustomResidualizerError("boom from callback")
+
+    for err_cls, fn in ((KeyboardInterrupt, raise_interrupt), (CustomResidualizerError, raise_custom)):
+        with pytest.raises(err_cls):
+            _native.run_model_scpc(
+                coords,
+                coef,
+                bread,
+                scores,
+                0.03,
+                inference="conditional_ols",
+                method="exact",
+                design=d[["x"]].to_numpy(),
+                direction_design=d[["x"]].to_numpy(),
+                residualizer=fn,
+                nthreads=1,
+            )
+
+    pf = pytest.importorskip("pyfixest")
+    wfit = pf.feols("y ~ x", d.assign(w=np.arange(1.0, len(d) + 1.0)), weights="w")
+    with pytest.raises(ValueError, match="unweighted"):
+        scpc(wfit, d, coords_euclidean=["a", "b"], nthreads=1)
+    unhash = pf.feols("y ~ x", d)
+    d_list = d.copy()
+    d_list["meta"] = [[i] for i in range(len(d))]
+    out = scpc(unhash, d_list.iloc[::-1], coords_euclidean=["a", "b"], nthreads=1)
+    assert out.n_obs == len(d)
+
+
+def test_native_build_info_matches_package_version():
+    from spatial_spur import _native
+
+    assert isinstance(sm, object)
+    assert _native.build_info()["package_version"] == __version__

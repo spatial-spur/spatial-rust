@@ -36,7 +36,7 @@ program spurhalflife, rclass sortpreserve
     if !`normal' {
         scalar `lower' = scalar(`lower') * scalar(`diameter')
         scalar `upper' = scalar(`upper') * scalar(`diameter')
-        matrix `components' = `components' * scalar(`diameter')
+        mata: st_matrix("`components'", st_matrix("`components'") * st_numscalar("`diameter'"))
     }
     local units = cond(`ll', "meters", "coordinate units")
     local display_units = cond(`normal', "sample diameters", "`units'")
@@ -51,6 +51,8 @@ program spurhalflife, rclass sortpreserve
         return matrix components = `components'
     }
     else di as result "Empty confidence set"
+    local alldir = `info'[1,2]
+    _spatial_spur advisory, q(`q') nrep(`nrep') level(`level') alldir(`alldir')
     return scalar ci_l = scalar(`lower')
     return scalar ci_u = scalar(`upper')
     return scalar max_dist = scalar(`diameter')

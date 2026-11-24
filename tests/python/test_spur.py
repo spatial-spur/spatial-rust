@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -142,3 +144,43 @@ def test_nn_tolerance_preserves_ties_and_distinguishes_resolved_neighbors():
     assert transformed(matrix) == pytest.approx(4 / 3)
     matrix[2:] *= 1.000001
     assert transformed(matrix) == 2
+
+
+def test_spur_booleans_nullable_formulas_self_col_and_summaries():
+    rng = np.random.default_rng(77)
+    d = pd.DataFrame(
+        {
+            "a": rng.normal(size=30),
+            "b": rng.normal(size=30),
+            "y": pd.Series(rng.normal(size=30), dtype="Float64"),
+            "x": pd.Series(rng.normal(size=30), dtype="Float64"),
+            "self": rng.normal(size=30),
+        }
+    )
+    d.loc[2, "y"] = pd.NA
+    d.loc[5, "x"] = pd.NA
+    opts = dict(coords_euclidean=["a", "b"], nthreads=1)
+
+    with pytest.raises((TypeError, ValueError)):
+        spurhalflife("y", d, level=True, q=4, nrep=50, **opts)
+    with pytest.raises((TypeError, ValueError)):
+        spurtransform("y", d, transformation="iso", radius=True, **opts)
+    with pytest.raises((TypeError, ValueError)):
+        spur("y ~ x", d, q=4, nrep=50, avc=True, **opts)
+
+    tr = spurtransform("y ~ I(x ** 2) + self", d, transformation="lbmgls", **opts)
+    assert "h_y" in tr.columns and "h_I(x ** 2)" in tr.columns and "h_self" in tr.columns
+    assert np.isnan(tr.loc[2, "h_y"]) and np.isnan(tr.loc[5, "h_y"])
+    assert tr["h_y"].notna().sum() == 28
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        t_res = spurtest_i0("y", d.dropna(), q=4, nrep=80, **opts)
+        hl_res = spurhalflife("y", d.dropna(), q=4, nrep=10, level=95, **opts)
+        s_res = spur("y ~ x", d, q=4, nrep=80, **opts)
+    assert any("unattainable" in str(w.message) for w in caught)
+    assert any("few spatial contrasts" in str(w.message) for w in caught)
+    assert t_res.cvalue_mat.shape == (31, 3)
+    assert "P-value:" in t_res.summary() and repr(t_res).startswith("TestResult(")
+    assert "half-life confidence set" in hl_res.summary() and repr(hl_res).startswith("HalfLifeResult(")
+    assert "SPUR diagnostic p-values" in s_res.summary()

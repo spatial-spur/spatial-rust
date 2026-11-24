@@ -78,3 +78,15 @@ try {
 } finally {
     Pop-Location
 }
+
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$stataDir = Join-Path $repoRoot 'stata'
+Copy-Item (Join-Path $stataDir '*.ado') $output -Force
+Copy-Item (Join-Path $stataDir '*.pkg') $output -Force
+Copy-Item (Join-Path $stataDir 'stata.toc') $output -Force
+Get-ChildItem -Path $stataDir -Filter '*.sthlp' | ForEach-Object {
+    Copy-Item $_.FullName $output -Force
+}
+Copy-Item (Join-Path $repoRoot 'LICENSE') (Join-Path $output 'LICENSE') -Force
+Copy-Item (Join-Path $repoRoot 'crates/spatial-py/THIRD_PARTY_NOTICES.txt') (Join-Path $output 'THIRD_PARTY_NOTICES.txt') -Force
+Copy-Item (Join-Path $source 'SPI-NOTICE') (Join-Path $output 'SPI-NOTICE') -Force

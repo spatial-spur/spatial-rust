@@ -1,3 +1,6 @@
 ^src/rust-target$
-^src/.*\\.(o|so|dll)$
+^src/rust/target$
+^src/.*\.(o|so|dll)$
 ^src/rust/vendor$
+^src/rust/\.cargo$
+\.DS_Store$

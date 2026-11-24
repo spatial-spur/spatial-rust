@@ -399,49 +399,86 @@ pub fn regression_scores(
     }
     check_matrix(x, n, columns)?;
     check_matrix(residuals, n, 1)?;
-    let fitted = if let Some((z, width)) = instruments {
+    let (fitted, dual) = if let Some((z, width)) = instruments {
         if width < columns || width > i32::MAX as usize {
             return Err(CoreError::invalid_input("too few fitted instruments"));
         }
         check_matrix(z, n, width)?;
-        let mut scaled = z.to_vec();
-        equilibrate(&mut scaled, width);
-        let z = thin_svd(&scaled, n, width, false)?;
-        let rank = z.s.iter().take_while(|&&v| v > z.s[0] * RANK_TOL).count();
+        let mut z_scaled = z.to_vec();
+        equilibrate(&mut z_scaled, width);
+        let z_svd = thin_svd(&z_scaled, n, width, false)?;
+        let rank = z_svd
+            .s
+            .iter()
+            .take_while(|&&v| v > z_svd.s[0] * RANK_TOL)
+            .count();
         if rank < columns {
             return Err(CoreError::invalid_input(
                 "fitted instruments have insufficient rank",
             ));
         }
-        let q: Vec<_> =
-            z.u.chunks_exact(z.s.len())
-                .flat_map(|row| row[..rank].iter().copied())
-                .collect();
-        let qtx = product(&q, x, rank, n, columns, true)?;
-        product(&q, &qtx, n, rank, columns, false)?
-    } else {
-        x.to_vec()
-    };
-    let mut scaled = fitted.clone();
-    let scales = equilibrate(&mut scaled, columns);
-    let fit = thin_svd(&scaled, n, columns, true)?;
-    if fit.s[columns - 1] <= fit.s[0] * RANK_TOL || scales.contains(&0.0) {
-        return Err(CoreError::invalid_input(
-            "fitted coefficients are not separately identified (rank-deficient design)",
-        ));
-    }
-    let mut dual = fit.vt;
-    for (row, s) in dual.chunks_exact_mut(columns).zip(fit.s) {
-        for (v, scale) in row.iter_mut().zip(&scales) {
-            *v = (*v / s) / scale;
+        let q: Vec<_> = z_svd
+            .u
+            .chunks_exact(z_svd.s.len())
+            .flat_map(|row| row[..rank].iter().copied())
+            .collect();
+        let mut x_scaled = x.to_vec();
+        let scales = equilibrate(&mut x_scaled, columns);
+        if scales.contains(&0.0) {
+            return Err(CoreError::invalid_input(
+                "fitted coefficients are not separately identified (zero column)",
+            ));
         }
-    }
+        // Equilibrate X before projecting onto Q_z so orthogonal noise cannot
+        // be rescaled to O(1) and extreme regressor units cannot overflow.
+        let c = product(&q, &x_scaled, rank, n, columns, true)?;
+        let csvd = thin_svd(&c, rank, columns, true)?;
+        if csvd.s[columns - 1] <= RANK_TOL * csvd.s[0].max(1.0) {
+            return Err(CoreError::invalid_input(
+                "fitted coefficients are not separately identified (rank-deficient 2SLS projection)",
+            ));
+        }
+        let mut fitted = product(&q, &c, n, rank, columns, false)?;
+        for row in fitted.chunks_exact_mut(columns) {
+            for (value, &scale) in row.iter_mut().zip(&scales) {
+                *value *= scale;
+            }
+        }
+        let mut dual = csvd.vt;
+        for (row, s) in dual.chunks_exact_mut(columns).zip(csvd.s) {
+            for (v, scale) in row.iter_mut().zip(&scales) {
+                *v = (*v / s) / scale;
+            }
+        }
+        (fitted, dual)
+    } else {
+        let mut scaled = x.to_vec();
+        let scales = equilibrate(&mut scaled, columns);
+        let fit = thin_svd(&scaled, n, columns, true)?;
+        if fit.s[columns - 1] <= fit.s[0] * RANK_TOL || scales.contains(&0.0) {
+            return Err(CoreError::invalid_input(
+                "fitted coefficients are not separately identified (rank-deficient design)",
+            ));
+        }
+        let mut dual = fit.vt;
+        for (row, s) in dual.chunks_exact_mut(columns).zip(fit.s) {
+            for (v, scale) in row.iter_mut().zip(&scales) {
+                *v = (*v / s) / scale;
+            }
+        }
+        (x.to_vec(), dual)
+    };
     let bread = product(&dual, &dual, columns, columns, columns, true)?;
     let mut scores = fitted;
     for (row, &u) in scores.chunks_exact_mut(columns).zip(residuals) {
         for value in row {
             *value *= u;
         }
+    }
+    if scores.iter().any(|v| !v.is_finite()) || bread.iter().any(|v| !v.is_finite()) {
+        return Err(CoreError::invalid_input(
+            "regression scores or bread exceed the floating-point range",
+        ));
     }
     Ok((scores, bread))
 }
@@ -1062,5 +1099,24 @@ mod tests {
                 .unwrap_err();
             assert!(err.message().contains("between 1 and 1024"), "got: {err:?}");
         }
+    }
+
+    #[test]
+    fn regression_scores_rejects_roundoff_only_iv_and_handles_extreme_scale() {
+        let x = [1., 0., 0., 1., 0., 0., 0., 0.];
+        let resid = [1., -1., 0.5, -0.5];
+        for projected in [1e-16, 1e-310] {
+            let z = [projected, 0., 0., projected, 1., 0., 0., 1.];
+            let err = regression_scores(&x, &resid, 2, Some((&z, 2))).unwrap_err();
+            assert!(
+                err.message().contains("rank-deficient 2SLS projection"),
+                "got: {err:?}"
+            );
+        }
+        let x_huge = [1e200, 0., 0., 1e200, 1e200, 1e200, 2e200, -1e200];
+        let z_huge = [1., 0., 0., 1., 1., 1., 2., -1.];
+        let (scores, bread) = regression_scores(&x_huge, &resid, 2, Some((&z_huge, 2))).unwrap();
+        assert!(scores.iter().all(|v| v.is_finite()));
+        assert!(bread.iter().all(|v| v.is_finite()));
     }
 }

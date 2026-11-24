@@ -22,6 +22,7 @@ from ._model import (
 
 STAT_COLUMNS = ("coef", "se", "t", "p", "ci_lower", "ci_upper")
 CV_COLUMNS = ("32%", "10%", "5%", "1%")
+CV_LEVELS = {0.68: 0, 0.90: 1, 0.95: 2, 0.99: 3}
 
 
 def integer(value: Any, name: str, minimum: int, maximum: int | None = None) -> int:
@@ -34,6 +35,60 @@ def integer(value: Any, name: str, minimum: int, maximum: int | None = None) -> 
     if number < minimum or (maximum is not None and number > maximum):
         raise ValueError(f"{name} is outside its supported range")
     return number
+
+
+def real_float(
+    value: Any,
+    name: str,
+    *,
+    gt: float | None = None,
+    lt: float | None = None,
+) -> float:
+    if isinstance(value, (bool, np.bool_, complex, np.complexfloating, str, bytes)):
+        raise ValueError(f"{name} must be a finite real number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite real number") from exc
+    if not np.isfinite(number):
+        raise ValueError(f"{name} must be finite")
+    if gt is not None and not (number > gt):
+        raise ValueError(f"{name} must be greater than {gt}")
+    if lt is not None and not (number < lt):
+        raise ValueError(f"{name} must be less than {lt}")
+    return number
+
+
+def _resolve_parm_indices(
+    coef_names: tuple[str, ...],
+    parm: str | int | Sequence[str] | Sequence[int] | None,
+) -> list[int]:
+    if parm is None:
+        return list(range(len(coef_names)))
+    if isinstance(parm, str):
+        if parm not in coef_names:
+            raise ValueError(f"Unknown coefficient {parm!r}")
+        return [coef_names.index(parm)]
+    if isinstance(parm, (int, np.integer)) and not isinstance(parm, (bool, np.bool_)):
+        idx = int(parm)
+        if not 0 <= idx < len(coef_names):
+            raise ValueError(f"Coefficient index {idx} out of range")
+        return [idx]
+    values = list(parm)
+    if not values:
+        return []
+    if all(isinstance(v, str) for v in values):
+        out = []
+        for name in values:
+            if name not in coef_names:
+                raise ValueError(f"Unknown coefficient {name!r}")
+            out.append(coef_names.index(name))
+        return out
+    out = []
+    for v in values:
+        idx = integer(v, "parm", 0, len(coef_names) - 1)
+        out.append(idx)
+    return out
 
 
 def native_info(backend: str | None, nthreads: int | None) -> dict:
@@ -92,12 +147,57 @@ class SCPCResult:
     def table(self) -> pd.DataFrame:
         return pd.DataFrame(self.scpcstats, index=self.coef_names, columns=STAT_COLUMNS)
 
+    def __repr__(self) -> str:
+        return (
+            f"SCPCResult(ncoef={len(self.coef_names)}, q={self.q}, "
+            f"avc={self.avc!r}, method={self.method!r}, inference={self.inference!r})"
+        )
+
+    def coef(self) -> pd.Series:
+        return pd.Series(self.scpcstats[:, 0], index=self.coef_names, name="coef")
+
+    def confint(
+        self,
+        parm: str | int | Sequence[str] | Sequence[int] | None = None,
+        level: float = 0.95,
+    ) -> pd.DataFrame:
+        level = real_float(level, "level", gt=0.0, lt=1.0)
+        idx = _resolve_parm_indices(self.coef_names, parm)
+        names = [self.coef_names[i] for i in idx]
+        if level == 0.95:
+            values = self.scpcstats[idx, 4:6]
+        else:
+            if self.scpccvs is None or level not in CV_LEVELS:
+                raise ValueError(f"Confidence level {level} is not available (pass cvs=True for 68%/90%/99%)")
+            cv_vals = self.scpccvs[idx, CV_LEVELS[level]]
+            coef_vals = self.scpcstats[idx, 0]
+            se_vals = self.scpcstats[idx, 1]
+            values = np.column_stack((coef_vals - cv_vals * se_vals, coef_vals + cv_vals * se_vals))
+        lower = 100 * (1 - level) / 2
+        upper = 100 * (1 + level) / 2
+        return pd.DataFrame(values, index=names, columns=[f"{lower:g} %", f"{upper:g} %"])
+
     def summary(self) -> str:
         table = self.table.assign(critical_95=self.critical_95)
-        return (
-            f"SCPC {self.inference}, {self.method}, q={self.q}, "
-            f"{self.n_obs} observations at {self.n_sites} sites\n{table.to_string()}"
-        )
+        provider = self.execution.get("linalg_provider", "unknown")
+        details = [
+            f"SCPC {self.inference}, {self.method}",
+            f"q={self.q}",
+            f"avc={self.avc:g}",
+            f"{self.n_obs} observations at {self.n_sites} sites",
+            f"backend=rust ({provider})",
+        ]
+        if self.method == "nystrom":
+            details.append(
+                f"seed={self.large_n_seed}, landmarks={self.landmarks}, samples={self.landmark_samples}"
+            )
+        lines = [", ".join(details), table.to_string()]
+        if self.scpccvs is not None:
+            cvs = pd.DataFrame(self.scpccvs, index=self.coef_names, columns=CV_COLUMNS)
+            lines.extend(["", "Two-sided critical values:", cvs.to_string()])
+        if self.tied:
+            lines.extend(["", "Note: Leading spatial eigenvalues exhibited a numerical tie."])
+        return "\n".join(lines)
 
     def __str__(self) -> str:
         return self.summary()
@@ -135,6 +235,19 @@ def scpc(
     site_membership maps each fitted observation to a row of that matrix.
     """
     execution = native_info(backend, nthreads)
+    avc = real_float(avc, "avc", gt=0.001, lt=0.99)
+    cv_tolerance = real_float(cv_tolerance, "cv_tolerance", gt=0.0)
+    if (
+        not isinstance(uncond, (bool, np.bool_))
+        or not isinstance(cvs, (bool, np.bool_))
+        or not isinstance(geographic, (bool, np.bool_))
+    ):
+        raise ValueError("uncond, cvs, and geographic must be booleans")
+    uncond = bool(uncond)
+    cvs = bool(cvs)
+    geographic = bool(geographic)
+    landmarks = integer(landmarks, "landmarks", 2)
+    landmark_samples = integer(landmark_samples, "landmark_samples", 1)
     fit = extract_fit(model)
     estimator = "ols" if fit.instruments is None else "2sls"
     procedure = inference or ("unconditional" if uncond else f"conditional_{estimator}")
@@ -146,11 +259,13 @@ def scpc(
         )
 
     if coords is None:
+        if coords_euclidean is not None and geographic:
+            raise ValueError("Do not set geographic=True with Euclidean coordinates")
         columns = coordinate_columns(lon, lat, coords_euclidean)
         keys = (*columns, cluster) if isinstance(cluster, str) else columns
         sample, obs = align_frame(fit, data, row_id, keys)
         coordinates = coordinates_from_frame(sample, columns)
-        geographic = geographic or lon is not None
+        geographic = lon is not None
         if isinstance(cluster, str):
             if cluster not in sample:
                 raise ValueError(f"Spatial cluster column {cluster!r} is missing")
@@ -173,8 +288,6 @@ def scpc(
         method = "nystrom" if len(sites.ids) >= 4500 else "exact"
     if method == "nystrom":
         seed = integer(large_n_seed, "large_n_seed", 0, 2**32 - 1)
-        landmarks = integer(landmarks, "landmarks", 2)
-        landmark_samples = integer(landmark_samples, "landmark_samples", 1)
     else:
         seed = None
     conditional = procedure != "unconditional"

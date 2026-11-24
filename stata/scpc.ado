@@ -4,7 +4,13 @@ program scpc, eclass sortpreserve
     syntax , [CVS K(integer -1) AVC(real .03) LATlong UNCond EXACT APPROX METHOD(string) ///
         SEED(real 1) LANDmarks(integer 1000) SAMples(integer 20) TOLerance(real .001) ///
         CLuster(varname) BACKend(string) NThreads(integer -1) WEIGHTS CAPabilities]
-    if "`capabilities'" != "" exit
+    if "`capabilities'" != "" {
+        _spatial_spur load, backend(`"`backend'"') nthreads(`nthreads')
+        di as text "specification: " as result "`r(specification)'" ///
+            as text "  backend: " as result "`r(backend)'" ///
+            as text "  provider: " as result "`r(provider)'"
+        exit
+    }
 
     local estimator "`e(cmd)'"
     if !inlist("`estimator'", "regress", "areg", "ivregress") {
@@ -32,7 +38,7 @@ program scpc, eclass sortpreserve
             di as error "SCPC supports areg with one plain categorical absorb() variable"
             exit 198
         }
-        capture confirm numeric variable `fe', exact
+        capture confirm variable `fe', exact
         if _rc {
             di as error "SCPC supports areg with one plain categorical absorb() variable"
             exit 198
@@ -42,17 +48,26 @@ program scpc, eclass sortpreserve
             exit 198
         }
     }
+    local method = lower(trim(`"`method'"'))
     if ("`exact'" != "" & "`approx'" != "") | ///
         ("`method'" != "" & ("`exact'" != "" | "`approx'" != "")) {
         di as error "Specify the geometry method once"
         exit 198
     }
     if "`exact'" != "" local method exact
-    if inlist("`approx'", "approx") & "`approx'" != "" local method nystrom
+    if "`approx'" != "" local method nystrom
     if "`method'" == "approx" local method nystrom
     if "`method'" == "" local method auto
     if !inlist("`method'", "auto", "exact", "nystrom") | `k' == 0 | `k' < -1 {
         di as error "Use method(auto), method(exact), or method(nystrom) and a positive k()"
+        exit 198
+    }
+    if !(`avc' > 0.001 & `avc' < 0.99) {
+        di as error "avc() must be strictly between 0.001 and 0.99"
+        exit 198
+    }
+    if !(`tolerance' > 0 & `tolerance' < .) | `landmarks' < 2 | `samples' < 1 {
+        di as error "Require tolerance() > 0, landmarks() >= 2, and samples() >= 1"
         exit 198
     }
     if !inrange(`seed',0,4294967295) | `seed' != floor(`seed') {
@@ -117,6 +132,10 @@ program scpc, eclass sortpreserve
     foreach term of local columns {
         local ++j
         if `omitted'[1,`j'] != 0 continue
+        if `has_cons' {
+            di as error "_cons must be the last fitted column"
+            exit 198
+        }
         if "`term'" == "_cons" {
             if "`estimator'" == "areg" continue
             local has_cons = 1
@@ -165,7 +184,12 @@ program scpc, eclass sortpreserve
             local is_exog : list normalized in exog_terms
             if `is_exog' continue
             quietly fvrevar `term' if `esample'
-            local excluded `excluded' `r(varlist)'
+            local materialized `r(varlist)'
+            if `: word count `materialized'' != 1 {
+                di as error "Cannot identify excluded instrument `term'"
+                exit 198
+            }
+            local excluded `excluded' `materialized'
         }
     }
     if "`estimator'" == "areg" {
@@ -215,15 +239,64 @@ program scpc, eclass sortpreserve
         matrix rownames `cuts' = `labels'
         matrix colnames `cuts' = cv32 cv10 cv05 cv01
     }
+    mata: st_matrix("e(scpccvs)", J(0, 0, .))
+    mata: st_matrix("e(W)", J(0, 0, .))
+    mata: st_matrix("e(site_rows)", J(0, 0, .))
+    mata: st_numscalar("e(seed)", J(0, 0, .))
+    mata: st_numscalar("e(landmarks)", J(0, 0, .))
+    mata: st_numscalar("e(landmark_samples)", J(0, 0, .))
+
     if "`weights'" != "" {
-        mata: spatial_spur_read_weights("`w'", "`site_rows'", `"`weights_path'"', ///
-            st_matrix("`meta'")[1,7], st_matrix("`meta'")[1,4]+1, "`esample'", "`groups'")
+        local w_n = `meta'[1,7]
+        local w_q = `meta'[1,4] + 1
+        if `w_n' > c(max_matsize) | `w_q' > c(max_matsize) {
+            di as error "weights matrix dimensions (`w_n' x `w_q') exceed max_matsize (`c(max_matsize)')"
+            exit 198
+        }
+        mata: _sp_fd = -1
+        capture noisily {
+            mata: _sp_rows = selectindex(st_data(., "`esample'"))
+            if "`groups'" == "" {
+                mata: _sp_rep = _sp_rows'
+            }
+            else {
+                mata: _sp_ids = st_data(_sp_rows, "`groups'")
+                mata: _sp_rep = J(1, `w_n', .)
+                mata: for (_sp_i = 1; _sp_i <= rows(_sp_rows); _sp_i++) if (missing(_sp_rep[_sp_ids[_sp_i]])) _sp_rep[_sp_ids[_sp_i]] = _sp_rows[_sp_i]
+            }
+            mata: _sp_fd = fopen(st_local("weights_path"), "r"); _sp_fmt = bufio(); bufbyteorder(_sp_fmt, 2); st_matrix("`w'", rowshape(fbufget(_sp_fmt, _sp_fd, "%8z", 1, `w_n' * `w_q'), `w_n')); fclose(_sp_fd); _sp_fd = -1
+            mata: st_matrix("`site_rows'", _sp_rep)
+        }
+        local rc = _rc
+        capture mata: if (_sp_fd >= 0) fclose(_sp_fd)
+        capture mata: mata drop _sp_fd _sp_fmt _sp_rows _sp_ids _sp_rep _sp_i
+        if `rc' exit `rc'
         ereturn matrix W = `w'
         ereturn matrix site_rows = `site_rows'
     }
-    if `cv' ereturn matrix scpccvs = `cuts'
     local inference = cond(`un', "unconditional", cond(`endog_count', "conditional_2sls", "conditional_ols"))
     matlist `table', title("SCPC `inference', `method'")
+    local summary_n_obs = `meta'[1,6]
+    local summary_n_sites = `meta'[1,7]
+    local summary_q = `meta'[1,4]
+    di as text "n_obs = " as result `summary_n_obs' ///
+        as text "  n_sites = " as result `summary_n_sites' ///
+        as text "  q = " as result `summary_q' ///
+        as text "  avc = " as result %6.4g `avc'
+    if "`method'" == "nystrom" {
+        local used_landmarks = min(`landmarks', `n_sites')
+        di as text "Nystrom: seed = " as result `seed' ///
+            as text "  landmarks = " as result `used_landmarks' ///
+            as text "  samples = " as result `samples'
+    }
+    if `meta'[1,5] == 1 {
+        di as text "Note: Spatial correlation matrix had tied boundary eigenvalues; critical values reflect a randomized eigenspace basis."
+    }
+    matlist `crit', title("SCPC 95% critical values")
+    if `cv' {
+        matlist `cuts', title("SCPC critical values")
+        ereturn matrix scpccvs = `cuts'
+    }
     ereturn matrix scpcstats = `table'
     ereturn matrix critical_95 = `crit'
     ereturn scalar c0 = `meta'[1,1]
@@ -250,29 +323,4 @@ program scpc, eclass sortpreserve
     ereturn local provider "`provider'"
     ereturn local spatial_cluster "`cluster'"
     ereturn local coordinate_units "`units'"
-end
-
-mata:
-void spatial_spur_read_weights(string scalar weights, string scalar row_matrix,
-    string scalar path, real scalar n, real scalar q, string scalar sample, string scalar groups) {
-    real rowvector representatives
-    real colvector rows, ids
-    real colvector format
-    real scalar i, fd
-    rows = selectindex(st_data(., sample))
-    if (groups == "") representatives = rows'
-    else {
-        ids = st_data(rows, groups)
-        representatives = J(1, n, .)
-        for (i=1; i<=rows(rows); i++) {
-            if (missing(representatives[ids[i]])) representatives[ids[i]] = rows[i]
-        }
-    }
-    fd = fopen(path, "r")
-    format = bufio()
-    bufbyteorder(format, 2)
-    st_matrix(weights, rowshape(fbufget(format, fd, "%8z", 1, n*q), n))
-    fclose(fd)
-    st_matrix(row_matrix, representatives)
-}
 end

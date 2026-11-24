@@ -95,7 +95,12 @@ impl<'a> SpurGeometry<'a> {
     }
 
     fn min_positive_distance(&self) -> f64 {
-        self.min_dist / self.max_dist
+        let ratio = self.min_dist / self.max_dist;
+        if ratio > 0.0 {
+            ratio
+        } else {
+            f64::MIN_POSITIVE
+        }
     }
 
     fn distance(&self, i: usize, j: usize) -> f64 {
@@ -181,11 +186,13 @@ impl<'a> SpurGeometry<'a> {
             self.validate_rhobar(rho)?;
         }
         self.cache_pairs()?;
-        let missing: Vec<_> = rhos
-            .iter()
-            .copied()
-            .filter(|&rho| !self.cbar_cache.iter().any(|&(cached, _)| cached == rho))
-            .collect();
+        let mut missing = Vec::new();
+        for &rho in rhos {
+            if !self.cbar_cache.iter().any(|&(cached, _)| cached == rho) && !missing.contains(&rho)
+            {
+                missing.push(rho);
+            }
+        }
         let solve = |rho| {
             let result = if let Some(cache) = &self.pair_cache {
                 solve_c0_from_avc(cache, rho)

@@ -42,11 +42,24 @@ class Sites:
 
 def numeric_matrix(values: Any, name: str, *, width: int | None = None) -> FloatMatrix:
     matrix = np.asarray(values, dtype=float)
-    if matrix.ndim != 2 or not matrix.shape[1] or (width is not None and matrix.shape[1] != width):
-        raise ValueError(f"{name} must be a matrix of the required width")
+    if (
+        matrix.ndim != 2
+        or not matrix.shape[0]
+        or not matrix.shape[1]
+        or (width is not None and matrix.shape[1] != width)
+    ):
+        raise ValueError(f"{name} must be a nonempty matrix of the required width")
     if not np.isfinite(matrix).all():
         raise ValueError(f"{name} contains missing or non-finite values")
     return matrix
+
+
+def is_real_numeric_dtype(values: Any) -> bool:
+    return (
+        pd.api.types.is_numeric_dtype(values)
+        and not pd.api.types.is_bool_dtype(values)
+        and not pd.api.types.is_complex_dtype(values)
+    )
 
 
 def factor_codes(values: Sequence, name: str) -> tuple[NDArray[np.int64], pd.Index]:
@@ -73,7 +86,10 @@ def coefficient_bread(x: FloatMatrix, names: tuple[str, ...]) -> FloatMatrix:
         aliases = ", ".join(name for name, bad in zip(names, nonidentified, strict=True) if bad)
         raise ValueError(f"Fitted coefficients are not separately identified: {aliases}")
     factor = vt.T / s / scale[:, None]
-    return factor @ factor.T
+    bread = factor @ factor.T
+    if not np.isfinite(bread).all():
+        raise ValueError("Fitted coefficient covariance exceeds the floating-point range")
+    return bread
 
 
 def fitted_directions(x: FloatMatrix, z: FloatMatrix | None) -> FloatMatrix:
@@ -86,7 +102,17 @@ def fitted_directions(x: FloatMatrix, z: FloatMatrix | None) -> FloatMatrix:
 
 def _extract_statsmodels(model) -> Fit:
     base = model.model
+    if getattr(base, "offset", None) is not None or getattr(base, "exposure", None) is not None:
+        raise ValueError("SCPC does not support regression offsets")
+    for attr in ("freq_weights", "var_weights"):
+        if getattr(base, attr, None) is not None:
+            raise ValueError("SCPC requires unweighted regression")
+    weights = getattr(base, "weights", None)
+    if weights is not None and not np.all(np.asarray(weights) == 1.0):
+        raise ValueError("SCPC requires unweighted regression")
     names = tuple(base.exog_names)
+    if not names:
+        raise ValueError("SCPC requires at least one fitted regressor")
     x = numeric_matrix(base.exog, "Fitted design", width=len(names))
     residuals = np.asarray(model.resid, dtype=float)
     data = base.data
@@ -116,16 +142,25 @@ def _extract_pyfixest(model) -> Fit:
     # separately exposed first-stage fit can be evaluated on a different sample.
     if getattr(model, "_method", None) != "feols" or type(model).__name__ not in {"Feols", "Feiv"}:
         raise ValueError("SCPC accepts one unweighted PyFixest feols() or ordinary 2SLS fit")
-    if getattr(model, "_weights_name", None) is not None:
+    weights = getattr(model, "_weights", None)
+    if (
+        getattr(model, "_weights_name", None) is not None
+        or getattr(model, "_has_weights", False)
+        or (weights is not None and not np.all(np.asarray(weights) == 1))
+    ):
         raise ValueError("SCPC requires unweighted regression")
     if getattr(model, "_lean", False) or not getattr(model, "_store_data", False):
         raise ValueError("Fit PyFixest with lean=False and store_data=True")
     names = tuple(map(str, model._coefnames))
+    if not names:
+        raise ValueError("SCPC requires at least one fitted regressor")
     x = numeric_matrix(model._X, "Stored PyFixest design", width=len(names))
     z = numeric_matrix(model._Z, "Stored PyFixest instruments") if model._is_iv else None
     direction = fitted_directions(x, z)
     bread = coefficient_bread(direction, names)
-    residuals = np.asarray(model._u_hat, dtype=float)
+    residuals = np.asarray(model._u_hat, dtype=float).ravel()
+    if len(residuals) != len(x):
+        raise ValueError("Stored PyFixest residuals do not match the fitted design")
     frame = model._data
     if not isinstance(frame, pd.DataFrame) or len(frame) != len(x):
         raise ValueError("Stored PyFixest estimation rows do not match the fit")
@@ -136,7 +171,10 @@ def _extract_pyfixest(model) -> Fit:
         if groups.shape[1] == 1:
             fe_id, _ = factor_codes(groups.iloc[:, 0], "Fitted fixed effect")
         else:
-            fe = np.ascontiguousarray(groups.to_numpy(), dtype=np.uintp)
+            fe_raw = groups.to_numpy()
+            if np.any(fe_raw < 0):
+                raise ValueError("PyFixest fixed-effect group codes must be non-negative")
+            fe = np.ascontiguousarray(fe_raw, dtype=np.uintp)
             weights = np.ones(len(x))
             demean = model._demean_func
             tol = min(1e-10, model._fixef_tol)
@@ -199,8 +237,36 @@ def _match_keys(fitted: pd.Index, supplied: pd.Index, name: str) -> NDArray[np.i
     return positions
 
 
+def _same_series_values(left: pd.Series, right: pd.Series) -> bool:
+    if is_real_numeric_dtype(left) and is_real_numeric_dtype(right):
+        lv = left.to_numpy(dtype=float, na_value=np.nan)
+        rv = right.to_numpy(dtype=float, na_value=np.nan)
+        return bool(np.array_equal(lv, rv, equal_nan=True))
+    return left.reset_index(drop=True).astype(object).equals(
+        right.reset_index(drop=True).astype(object)
+    )
+
+
 def _same_rows(a: pd.DataFrame, b: pd.DataFrame) -> bool:
-    return a.reset_index(drop=True).equals(b.reset_index(drop=True))
+    if len(a) != len(b) or list(a.columns) != list(b.columns):
+        return False
+    return all(_same_series_values(a[col], b[col]) for col in a.columns)
+
+
+def _comparable_columns(
+    stored: pd.DataFrame, data: pd.DataFrame, spatial_columns: Sequence[str]
+) -> list[str]:
+    columns = []
+    for col in stored.columns:
+        if col not in data or col in spatial_columns:
+            continue
+        try:
+            pd.util.hash_pandas_object(stored[col], index=False)
+            pd.util.hash_pandas_object(data[col], index=False)
+        except TypeError:
+            continue
+        columns.append(col)
+    return columns
 
 
 def align_frame(
@@ -216,6 +282,8 @@ def align_frame(
             )
         labels = fit.labels if fit.labels is not None else fit.frame.index
         if row_id is not None:
+            if row_id not in fit.frame:
+                raise ValueError(f"Fitted data does not contain row identifier {row_id!r}")
             labels = pd.Index(fit.frame[row_id])
             _match_keys(labels, labels, row_id)
         return fit.frame, labels
@@ -223,11 +291,7 @@ def align_frame(
     if not isinstance(data, pd.DataFrame) or not data.columns.is_unique:
         raise ValueError("data must be a pandas DataFrame with unique column names")
     stored = fit.frame
-    common = (
-        []
-        if stored is None
-        else [c for c in stored.columns if c in data and c not in spatial_columns]
-    )
+    common = [] if stored is None else _comparable_columns(stored, data, spatial_columns)
     if row_id is not None:
         if stored is None or row_id not in stored or row_id not in data:
             raise ValueError(
@@ -239,18 +303,32 @@ def align_frame(
         labels = fit.labels
         positions = _match_keys(labels, data.index, "Data index")
     else:
-        # PyFixest replaces the input index with positional labels. Compare raw
-        # fitted rows by value or use an explicit stable identifier column.
-        if not common or stored is None:
+        if fit.host != "pyfixest" or stored is None:
+            raise ValueError(
+                "Fitted model has no row labels; supply coords=... in fitted order or fit from a DataFrame"
+            )
+        if not common:
             raise ValueError("PyFixest needs shared fitted columns or a stable row_id column")
-        keys = [
-            pd.Index(pd.util.hash_pandas_object(frame[common], index=False))
-            for frame in (stored, data)
-        ]
-        positions = _match_keys(*keys, "Shared PyFixest rows (supply row_id if ambiguous)")
-        labels = data.index.take(positions)
-        if not labels.is_unique:
-            raise ValueError("Supply unique data index labels or row_id for the fitted rows")
+        if len(data) == len(stored) and _same_rows(stored[common], data[common]):
+            positions = np.arange(len(stored), dtype=np.intp)
+            labels = data.index.copy()
+        else:
+            stored_keys = pd.Index(pd.util.hash_pandas_object(stored[common], index=False))
+            supplied_keys = pd.Index(pd.util.hash_pandas_object(data[common], index=False))
+            if not stored_keys.is_unique:
+                raise ValueError(
+                    "Shared PyFixest rows are not unique; supply row_id=... to match observations"
+                )
+            counts = supplied_keys.value_counts()
+            matched_counts = counts.reindex(stored_keys, fill_value=0)
+            if (matched_counts != 1).any():
+                raise ValueError(
+                    "Shared PyFixest rows do not uniquely match fitted observations; supply row_id=..."
+                )
+            positions = supplied_keys.get_indexer(stored_keys)
+            labels = data.index.take(positions)
+            if not labels.is_unique:
+                labels = pd.RangeIndex(len(positions))
     sample = data.iloc[positions]
     if common and stored is not None and not _same_rows(stored[common], sample[common]):
         raise ValueError("Supplied data values disagree with the fitted observations")
@@ -263,7 +341,10 @@ def coordinate_columns(lon, lat, coords_euclidean) -> tuple[str, ...]:
             raise ValueError("Choose geographic or Euclidean coordinates")
         if isinstance(coords_euclidean, str) or len(coords_euclidean) == 0:
             raise ValueError("coords_euclidean must be a sequence of column names")
-        return tuple(coords_euclidean)
+        cols = tuple(coords_euclidean)
+        if len(set(cols)) != len(cols):
+            raise ValueError("coords_euclidean must not contain duplicate column names")
+        return cols
     if lon is None or lat is None or lon == lat:
         raise ValueError("Supply both lon and lat, or coords_euclidean")
     return (lon, lat)
@@ -274,7 +355,7 @@ def coordinates_from_frame(frame, columns) -> FloatMatrix:
     for column in columns:
         if column not in frame:
             raise ValueError(f"Coordinate column {column!r} is missing")
-        if not pd.api.types.is_numeric_dtype(frame[column]):
+        if not is_real_numeric_dtype(frame[column]):
             raise ValueError(f"Coordinate column {column!r} must be numeric")
         values = frame[column].to_numpy(dtype=float, na_value=np.nan)
         if not np.isfinite(values).all():
@@ -285,7 +366,9 @@ def coordinates_from_frame(frame, columns) -> FloatMatrix:
 
 def canonical_coordinates(array: FloatMatrix, geographic: bool) -> FloatMatrix:
     if not geographic:
-        return array
+        coordinates = numeric_matrix(array, "Coordinates").copy()
+        coordinates[coordinates == 0] = 0.0
+        return coordinates
     coordinates = numeric_matrix(array, "Geographic coordinates", width=2).copy()
     lon, lat = coordinates.T
     if np.any(np.abs(lat) > 90):
@@ -294,6 +377,7 @@ def canonical_coordinates(array: FloatMatrix, geographic: bool) -> FloatMatrix:
     lon[lon >= 180] -= 360
     lon[lon < -180] += 360
     lon[np.abs(lat) == 90] = 0
+    coordinates[coordinates == 0] = 0.0
     return coordinates
 
 

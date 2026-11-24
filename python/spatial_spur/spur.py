@@ -3,12 +3,14 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.resources import files
+import re
+import warnings
 
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from numpy.typing import ArrayLike
-from patsy import INTERCEPT, EvalEnvironment, dmatrices
+from patsy import INTERCEPT, EvalEnvironment, ModelDesc, PatsyError, dmatrices, dmatrix
 
 from . import _native
 from ._model import (
@@ -19,9 +21,10 @@ from ._model import (
     coordinate_columns,
     coordinates_from_frame,
     factor_codes,
+    is_real_numeric_dtype,
     numeric_matrix,
 )
-from .scpc import SCPCResult, integer, native_info, scpc
+from .scpc import SCPCResult, integer, native_info, real_float, scpc
 
 TESTS = ("i0", "i1", "i0resid", "i1resid")
 
@@ -52,6 +55,30 @@ class TestResult:
     execution: dict
     null_grid: FloatMatrix | None = None
     null_pvalues: FloatMatrix | None = None
+    cvalue_mat: FloatMatrix | None = None
+
+    def __repr__(self) -> str:
+        return (
+            f"TestResult(test={self.test!r}, lr={self.lr:.4f}, "
+            f"pvalue={self.pvalue:.4g}, q={self.simulation.q})"
+        )
+
+    def summary(self) -> str:
+        stat_name = "LFUR" if self.test.startswith("i1") else "LFST"
+        lines = [
+            f"Spatial {self.test.upper()} Test Results (q={self.simulation.q}, backend=rust)",
+            "-" * 45,
+            f"Test Statistic ({stat_name}):  {self.lr:9.4f}",
+            f"P-value:                {self.pvalue:9.4f}",
+            f"CV 1%:                  {self.cvalue[0]:9.4f}",
+            f"CV 5%:                  {self.cvalue[1]:9.4f}",
+            f"CV 10%:                 {self.cvalue[2]:9.4f}",
+            "-" * 45,
+        ]
+        return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.summary()
 
     @property
     def backend(self) -> str:
@@ -95,9 +122,24 @@ class HalfLifeResult:
     def n_sites(self) -> int:
         return len(self.observations)
 
-    def __str__(self) -> str:
+    def __repr__(self) -> str:
+        return (
+            f"HalfLifeResult(level={self.level:g}, ci=({self.ci_lower:.4g}, {self.ci_upper:.4g}), "
+            f"q={self.simulation.q}, normdist={self.normdist})"
+        )
+
+    def summary(self) -> str:
         units = "sample diameters" if self.normdist else self.distance_units
-        return f"{self.level:g}% spatial half-life confidence set ({units})\n{self.components}"
+        lines = [f"{self.level:g}% spatial half-life confidence set ({units})"]
+        if self.components.size:
+            lines.extend(f"[{lo:.6g}, {hi:.6g}]" for lo, hi in self.components)
+        else:
+            lines.append("Empty confidence set")
+        lines.append(f"Max distance in sample {self.max_dist:.6g} {self.distance_units}")
+        return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.summary()
 
 
 @dataclass(frozen=True)
@@ -152,6 +194,62 @@ def _coordinates(frame, lon, lat, coords_euclidean):
     return canonical_coordinates(coordinates_from_frame(frame, columns), geographic), geographic
 
 
+def _require_dataframe(data: pd.DataFrame) -> None:
+    if not isinstance(data, pd.DataFrame) or not data.columns.is_unique:
+        raise ValueError("data must be a pandas DataFrame with unique columns")
+
+
+def _coerce_masked_columns(data: pd.DataFrame) -> pd.DataFrame:
+    out = data.copy(deep=False)
+    for col in out.columns:
+        series = out[col]
+        if isinstance(series.dtype, pd.api.extensions.ExtensionDtype) and is_real_numeric_dtype(
+            series
+        ):
+            out[col] = series.to_numpy(dtype=float, na_value=np.nan)
+    return out
+
+
+def _warn_spur_inference(
+    q: int,
+    nrep: int,
+    tests: Sequence[TestResult],
+    *,
+    level: float | None = None,
+    all_directions: bool = False,
+) -> None:
+    notes = []
+    all_directions = all_directions or any(t.all_directions for t in tests)
+    if q >= 40 or all_directions:
+        scope = " uses all positive directions and" if all_directions else ""
+        notes.append(
+            f"q={q}{scope} retains higher spatial frequencies. Results can be sensitive to local noise."
+        )
+    if level is None:
+        unattainable = [f"{alpha}%" for alpha in (1, 5, 10) if nrep + 1 < 100 // alpha]
+        if unattainable:
+            notes.append(
+                f"With nrep={nrep}, the minimum p-value is {1 / (nrep + 1):.4g}. "
+                f"Rejection is unattainable at {', '.join(unattainable)}."
+            )
+        for test in tests:
+            if test.best_tuning_power is not None and test.best_tuning_power < 0.45:
+                notes.append(
+                    f"{test.test} did not reach the 50% tuning target. "
+                    f"The best estimated power was {test.best_tuning_power:.1%}."
+                )
+    else:
+        if q <= 5:
+            notes.append(f"q={q} provides few spatial contrasts for estimating the half-life.")
+        if nrep / (nrep + 1) < level / 100:
+            notes.append(
+                f"With nrep={nrep}, the minimum p-value is {1 / (nrep + 1):.4g}. "
+                f"The {level:g}% confidence set necessarily covers [0, infinity]."
+            )
+    if notes:
+        warnings.warn(" ".join(notes), UserWarning, stacklevel=3)
+
+
 def _diagnostic(test, native, sim, rows, geographic, execution):
     return TestResult(
         test,
@@ -169,11 +267,12 @@ def _diagnostic(test, native, sim, rows, geographic, execution):
         execution,
         native.get("rho_grid"),
         native.get("pvalue_mat"),
+        native.get("cvalue_mat"),
     )
 
 
 def _response(data, column):
-    if column not in data or not pd.api.types.is_numeric_dtype(data[column]):
+    if column not in data or not is_real_numeric_dtype(data[column]):
         raise ValueError(f"Response {column!r} must name a numeric column")
     values = data[column].to_numpy(dtype=float, na_value=np.nan)
     if not np.isfinite(values).all():
@@ -182,12 +281,21 @@ def _response(data, column):
 
 
 def _formula_design(formula, data, environment):
-    if not isinstance(data, pd.DataFrame) or not data.columns.is_unique:
-        raise ValueError("data must be a pandas DataFrame with unique columns")
+    _require_dataframe(data)
     if not data.index.is_unique:
         raise ValueError("Use a unique index to identify fitted regression rows")
+    if isinstance(formula, str) and re.search(r"\boffset\s*\(", formula):
+        raise ValueError("SPUR does not support regression offsets")
+    prepared = _coerce_masked_columns(data)
     # Keep the design and its term slices together across Statsmodels versions.
-    response, design = dmatrices(formula, data, eval_env=environment, return_type="dataframe")
+    try:
+        response, design = dmatrices(
+            formula, prepared, eval_env=environment, return_type="dataframe"
+        )
+    except PatsyError as exc:
+        raise ValueError(f"Invalid SPUR formula: {exc}") from exc
+    if len(design) == 0:
+        raise ValueError("SPUR formula has no complete finite observations")
     if response.shape[1] != 1 or not np.isfinite(response.to_numpy()).all():
         raise ValueError("SPUR requires one finite numeric response")
     x = numeric_matrix(design, "Fitted SPUR design")
@@ -214,20 +322,24 @@ def spurtest(
 ) -> TestResult:
     if test not in TESTS:
         raise ValueError("test must be i0, i1, i0resid, or i1resid")
+    _require_dataframe(data)
     execution = native_info(backend, nthreads)
+    q = integer(q, "q", 2)
     if test.endswith("resid"):
         environment = _environment or EvalEnvironment.capture(1)
         response, design, sample = _formula_design(formula, data, environment)
         model_inputs = (response.to_numpy(), design.to_numpy())
+        max_q = len(sample) - design.shape[1]
     else:
         sample = data
         column, _, rhs = formula.partition("~")
         if rhs.strip() not in ("", "1"):
             raise ValueError("Levels diagnostics take one response column")
         model_inputs = (_response(data, column.strip()),)
+        max_q = len(sample) - 1
     coords, geographic = _coordinates(sample, lon, lat, coords_euclidean)
-    if integer(q, "q", 2) >= len(coords):
-        raise ValueError("q must be smaller than the fitted sample size")
+    if q > max_q:
+        raise ValueError("q exceeds the available spatial or residual degrees of freedom")
     block, sim = _draw_blocks(q, nrep, seed, draws, tuning_draws, tune=True)
     compute = {
         "i0": _native.run_spur_i0,
@@ -244,7 +356,9 @@ def spurtest(
         latlong=geographic,
         nthreads=execution["nthreads_requested"],
     )
-    return _diagnostic(test, result, sim, sample.index, geographic, execution)
+    out = _diagnostic(test, result, sim, sample.index, geographic, execution)
+    _warn_spur_inference(sim.q, sim.inference_draws, [out])
+    return out
 
 
 def spurtest_i0(var: str, data: pd.DataFrame, **kwargs) -> TestResult:
@@ -283,10 +397,13 @@ def spurhalflife(
     backend: str | None = None,
     nthreads: int | None = None,
 ) -> HalfLifeResult:
+    _require_dataframe(data)
+    if not isinstance(normdist, (bool, np.bool_)):
+        raise ValueError("normdist must be a boolean")
+    normdist = bool(normdist)
     execution = native_info(backend, nthreads)
     q = integer(q, "q", 2, 100)
-    if not 0 < level < 100:
-        raise ValueError("level must lie strictly between 0 and 100")
+    level = real_float(level, "level", gt=0.0, lt=100.0)
     coords, geographic = _coordinates(data, lon, lat, coords_euclidean)
     if q >= len(coords):
         raise ValueError("q must be smaller than the fitted sample size")
@@ -300,6 +417,9 @@ def spurhalflife(
         level=level / 100,
         latlong=geographic,
         nthreads=execution["nthreads_requested"],
+    )
+    _warn_spur_inference(
+        sim.q, sim.inference_draws, [], level=level, all_directions=out["all_directions"]
     )
     diameter = out["max_dist"] * (EARTH_CIRCUMFERENCE_M if geographic else 1)
     factor = 1 if normdist else diameter
@@ -321,6 +441,58 @@ def spurhalflife(
     )
 
 
+def _transform_inputs(
+    formula: str | Sequence[str], data: pd.DataFrame, environment: EvalEnvironment
+) -> tuple[tuple[str, ...], pd.DataFrame]:
+    work = _coerce_masked_columns(data).reset_index(drop=True)
+    if isinstance(formula, str):
+        stripped = formula.strip()
+        if stripped in work:
+            columns = (stripped,)
+        elif "~" not in formula and all(
+            part.strip() in work for part in formula.split("+") if part.strip()
+        ):
+            columns = tuple(part.strip() for part in formula.split("+") if part.strip())
+        else:
+            if re.search(r"\boffset\s*\(", formula):
+                raise ValueError("SPUR transformation does not support offsets")
+            try:
+                desc = ModelDesc.from_formula(formula)
+                terms = [
+                    term
+                    for term in desc.lhs_termlist + desc.rhs_termlist
+                    if term != INTERCEPT
+                ]
+                if not terms:
+                    raise ValueError("Supply at least one response variable to transform")
+                pos_work = work.reset_index(drop=True)
+                design = dmatrix(
+                    ModelDesc([], terms),
+                    pos_work,
+                    eval_env=environment,
+                    NA_action="drop",
+                    return_type="dataframe",
+                )
+                design = design.reindex(pos_work.index)
+                design.index = work.index
+            except PatsyError as exc:
+                raise ValueError(f"Invalid SPUR transformation formula: {exc}") from exc
+            return tuple(design.columns), design
+    else:
+        columns = tuple(formula)
+    if not columns or not all(isinstance(col, str) for col in columns):
+        raise ValueError("Supply distinct response columns")
+    missing = [col for col in columns if col not in work]
+    if missing:
+        raise ValueError(f"Response {missing[0]!r} must name a numeric column")
+    selected = pd.DataFrame(index=work.index)
+    for col in columns:
+        if not is_real_numeric_dtype(work[col]):
+            raise ValueError(f"Response {col!r} must name a numeric column")
+        selected[col] = work[col].to_numpy(dtype=float, na_value=np.nan)
+    return columns, selected
+
+
 def spurtransform(
     formula: str | Sequence[str],
     data: pd.DataFrame,
@@ -336,47 +508,89 @@ def spurtransform(
     backend: str | None = None,
     nthreads: int | None = None,
 ) -> pd.DataFrame:
+    _require_dataframe(data)
+    if not isinstance(replace, (bool, np.bool_)):
+        raise ValueError("replace must be a boolean")
+    replace = bool(replace)
+    if not isinstance(prefix, str) or not prefix:
+        raise ValueError("Supply a nonempty string output prefix")
     execution = native_info(backend, nthreads)
-    columns = (
-        tuple(
-            term.strip()
-            for term in formula.replace("~", "+").split("+")
-            if term.strip() not in ("", "1", "0")
-        )
-        if isinstance(formula, str)
-        else tuple(formula)
-    )
-    if not columns or len(set(columns)) != len(columns) or not prefix:
-        raise ValueError("Supply distinct response columns and a nonempty output prefix")
-    outputs = [prefix + name for name in columns]
-    if not replace and any(name in data for name in outputs):
-        raise ValueError("The requested output columns already exist")
     if transformation not in {"lbmgls", "nn", "iso", "cluster"}:
         raise ValueError("transformation must be lbmgls, nn, iso, or cluster")
     if (transformation == "iso") != (radius is not None):
         raise ValueError("Supply radius only for the ISO transformation")
     if (transformation == "cluster") != (clustvar is not None):
         raise ValueError("Supply clustvar only for the cluster transformation")
-    response = np.column_stack([_response(data, name) for name in columns])
+    if transformation == "cluster" and any(
+        val is not None for val in (lon, lat, coords_euclidean)
+    ):
+        raise ValueError("Do not supply spatial coordinates for the cluster transformation")
+    if radius is not None:
+        radius = real_float(radius, "radius", gt=0.0)
+
+    columns, selected = _transform_inputs(formula, data, EvalEnvironment.capture(1))
+    if not columns or len(set(columns)) != len(columns):
+        raise ValueError("Supply distinct response columns and a nonempty output prefix")
+    outputs = [prefix + name for name in columns]
+    if not replace and any(name in data for name in outputs):
+        raise ValueError("The requested output columns already exist")
+
+    resp_raw = selected.to_numpy(dtype=float, na_value=np.nan)
+    if np.isinf(resp_raw).any():
+        raise ValueError("Response contains non-finite values")
+    valid_mask = ~np.isnan(resp_raw).any(axis=1)
+
     if clustvar is None:
-        coords, geographic = _coordinates(data, lon, lat, coords_euclidean)
+        coord_cols = coordinate_columns(lon, lat, coords_euclidean)
+        geographic = lon is not None
+        work = data.reset_index(drop=True)
+        for col in coord_cols:
+            if col not in work:
+                raise ValueError(f"Coordinate column {col!r} is missing")
+            if not is_real_numeric_dtype(work[col]):
+                raise ValueError(f"Coordinate column {col!r} must be numeric")
+            vals = work[col].to_numpy(dtype=float, na_value=np.nan)
+            if np.isinf(vals).any():
+                raise ValueError(f"Coordinate column {col!r} contains non-finite values")
+            valid_mask &= ~np.isnan(vals)
+        valid_rows = np.flatnonzero(valid_mask)
+        min_rows = 2
+        if len(valid_rows) < min_rows:
+            raise ValueError("SPUR transformation requires at least 2 complete observations")
+        coords = canonical_coordinates(
+            coordinates_from_frame(work.iloc[valid_rows], coord_cols), geographic
+        )
         groups = None
     else:
-        coords, geographic = None, False
-        groups, _ = factor_codes(data[clustvar], "Spatial cluster")
+        if not isinstance(clustvar, str) or clustvar not in data:
+            raise ValueError(f"Spatial cluster column {clustvar!r} is missing")
+        geographic = False
+        cluster_series = data[clustvar].reset_index(drop=True)
+        valid_mask &= ~cluster_series.isna().to_numpy()
+        valid_rows = np.flatnonzero(valid_mask)
+        if len(valid_rows) < 1:
+            raise ValueError("Cluster transformation requires at least 1 complete observation")
+        coords = None
+        groups, _ = factor_codes(cluster_series.iloc[valid_rows], "Spatial cluster")
+
     if radius is not None and geographic:
         radius /= EARTH_CIRCUMFERENCE_M
     result = _native.run_spur_transform(
         transformation,
-        len(data),
-        response,
+        len(valid_rows),
+        np.ascontiguousarray(resp_raw[valid_rows]),
         coords=coords,
         latlong=geographic,
         radius=radius,
         cluster_id=groups,
         nthreads=execution["nthreads_requested"],
     )["transformed"]
-    return data.assign(**dict(zip(outputs, result.T, strict=True)))
+    padded = np.full((len(data), len(outputs)), np.nan, dtype=float)
+    padded[valid_rows] = result
+    out = data.copy()
+    for name, col in zip(outputs, padded.T, strict=True):
+        out[name] = col
+    return out
 
 
 def spur(
@@ -400,6 +614,7 @@ def spur(
     nthreads: int | None = None,
 ) -> PipelineResult:
     execution = native_info(backend, nthreads)
+    avc = real_float(avc, "avc", gt=0.001, lt=0.99)
     response, design, sample = _formula_design(formula, data, EvalEnvironment.capture(1))
     intercept = design.design_info.term_slices.get(INTERCEPT)
     if intercept is None:
@@ -425,6 +640,7 @@ def spur(
         test: _diagnostic(test, out[test], sim, sample.index, geographic, execution)
         for test in TESTS
     }
+    _warn_spur_inference(sim.q, sim.inference_draws, list(tests.values()))
     raw = out["transformed_vars"]
     transformed_design = x.copy()
     transformed_design[:, regressors] = raw[:, 1:]
@@ -464,5 +680,13 @@ def load_chetty_data() -> pd.DataFrame:
 
 def standardize(data: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
     """Center and scale columns using their sample standard deviations."""
-    values = data[list(columns)]
-    return data.assign(**((values - values.mean()) / values.std()).to_dict("series"))
+    _require_dataframe(data)
+    cols = list(columns)
+    missing = [col for col in cols if col not in data]
+    if missing:
+        raise ValueError(f"Column {missing[0]!r} is missing from data")
+    out = data.copy()
+    for col in cols:
+        values = out[col]
+        out[col] = (values - values.mean()) / values.std()
+    return out

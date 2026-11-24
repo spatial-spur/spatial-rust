@@ -1,24 +1,31 @@
 CARGO ?= cargo
 CARGO_BUILD_JOBS ?= 2
 RUST_ROOT = $(if $(wildcard rust/Cargo.toml),rust,../../..)
-TARGET_DIR = $(CURDIR)/rust-target
+TARGET_DIR = $(CURDIR)/rust/target
 STATLIB = $(TARGET_DIR)/release/libspatial_r.a
 VENDOR_ARCHIVE = $(wildcard rust/vendor.tar.xz)
+VENDOR_CONFIG = $(wildcard rust/vendor-config.toml)
 VENDOR_ENV = $(if $(VENDOR_ARCHIVE),CARGO_HOME="$(TARGET_DIR)/cargo-home",)
-VENDOR_ARGS = $(if $(VENDOR_ARCHIVE),--offline,)
+VENDOR_ARGS = $(if $(VENDOR_ARCHIVE),--offline $(if $(VENDOR_CONFIG),--config target/vendor-config.toml,),)
 PKG_LIBS = $(STATLIB) -lpthread -ldl -lm
 
 ifeq ($(shell uname -s),Darwin)
 PKG_LIBS += -framework Accelerate -Wl,-exported_symbol,_R_init_spatialSpur
 else
-PKG_LIBS += -Wl,--exclude-libs,ALL
+EXPORT_MAP = rust/exports.map
+PKG_LIBS += -Wl,--gc-sections -Wl,--version-script=$(EXPORT_MAP) -Wl,--exclude-libs,ALL
 endif
 
 all: $(SHLIB)
+	$(if $(VENDOR_ARCHIVE),rm -rf "$(TARGET_DIR)" rust/vendor,)
 
-$(SHLIB): $(STATLIB)
+$(SHLIB): $(STATLIB) $(EXPORT_MAP)
 
-.PHONY: $(STATLIB)
+.PHONY: $(STATLIB) clean
 $(STATLIB):
-	$(if $(VENDOR_ARCHIVE),tar -xf "$(VENDOR_ARCHIVE)" -C rust && mkdir -p rust/.cargo && cp rust/vendor-config.toml rust/.cargo/config.toml,:)
+	"$(CARGO)" --version && rustc --version
+	$(if $(VENDOR_ARCHIVE),tar -xf "$(VENDOR_ARCHIVE)" -C rust && mkdir -p "$(TARGET_DIR)" && cp "$(VENDOR_CONFIG)" "$(TARGET_DIR)/vendor-config.toml",:)
 	cd "$(RUST_ROOT)" && $(VENDOR_ENV) CARGO_TARGET_DIR="$(TARGET_DIR)" "$(CARGO)" build -j "$(CARGO_BUILD_JOBS)" --release --locked $(VENDOR_ARGS) -p spatial-r
+
+clean:
+	rm -rf $(SHLIB) *.o "$(TARGET_DIR)" rust-target rust/vendor rust/.cargo

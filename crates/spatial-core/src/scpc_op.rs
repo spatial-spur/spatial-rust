@@ -16,7 +16,6 @@ use probability::ProbabilityWorkspace;
 
 const MIN_AVC: f64 = 0.00001;
 const CGRID_FAC: f64 = 1.2;
-const DEFAULT_CV_TOL: f64 = 0.001;
 const EXTRA_CV_LEVELS: [f64; 3] = [0.32, 0.10, 0.01];
 const SCALE_REL_TOL: f64 = 1e-12;
 
@@ -460,11 +459,12 @@ fn validate_common_inputs(
             "avc must lie strictly in (0.001, 0.99)",
         ));
     }
-    let tol = if cv_tolerance > 0.0 && cv_tolerance.is_finite() {
-        cv_tolerance
-    } else {
-        DEFAULT_CV_TOL
-    };
+    if !cv_tolerance.is_finite() || cv_tolerance <= 0.0 {
+        return Err(CoreError::invalid_input(
+            "cv_tolerance must be finite and strictly positive",
+        ));
+    }
+    let tol = cv_tolerance;
     let m_obs = if let Some(cl) = cluster_id {
         if cl.len() < n {
             return Err(CoreError::invalid_input(
@@ -1036,7 +1036,7 @@ pub fn run_approx_scpc_with_projection(
                 let oms = project(&[&lb.weights], &[full_width], &scales)?.remove(0);
                 let (q_opt, cv_opt) =
                     select_final_q(&oms, full_width, &lb.candidates, cv_tolerance)?;
-                if q_opt < qmax || qmax >= q_limit {
+                if q_opt < qmax || !lb.more_positive || qmax >= q_limit {
                     break (lb, scales, oms, q_opt, cv_opt);
                 }
                 qmax = ((qmax as f64) + (qmax as f64) * 0.5).round() as usize;

@@ -1,11 +1,35 @@
 # Fitted regression state and the distinct, explicitly ordered spatial sites.
 
 .real_matrix <- function(x, name) {
-  if (!is.matrix(x) || !is.numeric(x) || ncol(x) == 0L || any(!is.finite(x))) {
-    stop(name, " must be a finite numeric matrix", call. = FALSE)
+  if (!is.matrix(x) || !is.numeric(x) || nrow(x) == 0L || ncol(x) == 0L || any(!is.finite(x))) {
+    stop(name, " must be a nonempty finite numeric matrix", call. = FALSE)
   }
   storage.mode(x) <- "double"
   x
+}
+
+.scalar_logical <- function(x, name) {
+  if (!is.logical(x) || length(x) != 1L || is.na(x)) {
+    stop(name, " must be TRUE or FALSE", call. = FALSE)
+  }
+  x
+}
+
+.scalar_double <- function(x, name, gt = NULL, lt = NULL) {
+  if (!is.numeric(x) || is.logical(x) || length(x) != 1L || is.na(x) || !is.finite(x)) {
+    stop(name, " must be a single finite number", call. = FALSE)
+  }
+  val <- as.double(x)
+  if (!is.null(gt) && !(val > gt)) stop(name, " must be greater than ", gt, call. = FALSE)
+  if (!is.null(lt) && !(val < lt)) stop(name, " must be less than ", lt, call. = FALSE)
+  val
+}
+
+.require_data_frame <- function(data) {
+  if (!is.data.frame(data) || anyDuplicated(names(data))) {
+    stop("data must be a data frame with unique column names", call. = FALSE)
+  }
+  data
 }
 
 .integer_option <- function(x, name, min = 1, max = .Machine$integer.max) {
@@ -37,23 +61,36 @@
   tcrossprod(factor)
 }
 
-.has_offset <- function(formula) {
-  length(attr(stats::terms(formula), "offset")) > 0L
+.has_offset <- function(formula, data = NULL) {
+  terms_obj <- if (is.null(data)) {
+    tryCatch(stats::terms(formula), error = function(e) NULL)
+  } else {
+    stats::terms(formula, data = data)
+  }
+  !is.null(terms_obj) && length(attr(terms_obj, "offset")) > 0L
 }
 
 .extract_lm <- function(model) {
+  if (inherits(model, "mlm")) {
+    stop("SCPC supports single-response unweighted lm fits", call. = FALSE)
+  }
   if (!is.null(model$weights)) stop("SCPC requires an unweighted fit", call. = FALSE)
-  if (!is.null(model$offset) || .has_offset(stats::formula(model))) {
+  if (!is.null(model$offset) || .has_offset(stats::formula(model), model$model)) {
     stop("SCPC does not support regression offsets", call. = FALSE)
   }
   if (is.null(model$model) && is.null(model[["x"]])) {
     stop("Retain the fitted model frame or design with lm(model = TRUE) or lm(x = TRUE)",
          call. = FALSE)
   }
+  coefficients <- stats::coef(model)
   x <- .real_matrix(if (is.null(model[["x"]])) stats::model.matrix(model) else model[["x"]],
                     "Fitted lm design")
-  coefficients <- stats::coef(model)
   bread <- .coefficient_bread(x, names(coefficients))
+  if (anyNA(coefficients)) {
+    aliased <- names(coefficients)[is.na(coefficients)]
+    stop("Fitted coefficients are not separately identified: ",
+         paste(aliased, collapse = ", "), call. = FALSE)
+  }
   # Use stored residuals. residuals() can reinstate omitted rows with na.exclude.
   list(x = x, z = NULL, estimates = coefficients, scores = x * model$residuals,
        bread = bread, rows = rownames(x), source = model$model, host = "lm")
@@ -67,19 +104,24 @@
 }
 
 .extract_fixest <- function(model) {
-  if (model$method != "feols" || !is.null(model$weights)) {
+  if (!identical(model$method, "feols") || !is.null(model$weights)) {
     stop("SCPC supports unweighted fixest::feols() and ordinary 2SLS", call. = FALSE)
   }
-  if (!is.null(model$call$offset) || .has_offset(model$fml_all$linear)) {
+  if (!is.null(model$offset) || .has_offset(model$fml_all$linear, model$data)) {
     stop("SCPC does not support regression offsets", call. = FALSE)
   }
-  if (any(grepl("\\[", deparse(model$fml_all$fixef)))) {
+  if (!is.null(model$slope_flag) && any(model$slope_flag != 0L)) {
     stop("SCPC does not support varying-slope absorbed effects", call. = FALSE)
   }
   if (is.null(model$X_demeaned)) {
     stop("Retain the fitted design with fixest::feols(demeaned = TRUE)", call. = FALSE)
   }
   estimates <- stats::coef(model)
+  if (anyNA(estimates)) {
+    aliased <- names(estimates)[is.na(estimates)]
+    stop("Fitted coefficients are not separately identified: ",
+         paste(aliased, collapse = ", "), call. = FALSE)
+  }
   direction <- .align_design(model$X_demeaned, names(estimates), "Stored fixest design")
   x <- direction
   z <- NULL
@@ -118,8 +160,17 @@
   } else {
     residualize <- NULL
   }
-  positions <- fixest::obs(model)
-  source <- if (is.null(model$data)) NULL else model$data[positions, , drop = FALSE]
+  obs_removed <- model$obs_selection$obsRemoved
+  source <- if (is.null(model$data)) {
+    NULL
+  } else if (is.null(obs_removed)) {
+    model$data
+  } else {
+    model$data[obs_removed, , drop = FALSE]
+  }
+  if (!is.null(source) && nrow(source) != nrow(x)) {
+    stop("Stored fixest estimation rows do not match the fitted design", call. = FALSE)
+  }
   list(x = x, z = z, estimates = estimates, scores = direction * model$residuals,
        bread = .coefficient_bread(direction, names(estimates)), source = source,
        rows = if (is.null(source)) seq_len(nrow(x)) else rownames(source), host = "fixest",
@@ -136,13 +187,15 @@
 .coordinate_columns <- function(lon, lat, coords_euclidean) {
   if (!is.null(coords_euclidean)) {
     if (!is.null(lon) || !is.null(lat) || !is.character(coords_euclidean) ||
-        length(coords_euclidean) == 0L) {
-      stop("Supply either geographic or Euclidean coordinate columns", call. = FALSE)
+        length(coords_euclidean) == 0L || anyNA(coords_euclidean) ||
+        any(!nzchar(coords_euclidean)) || anyDuplicated(coords_euclidean)) {
+      stop("Supply distinct valid coordinate column names for coords_euclidean", call. = FALSE)
     }
     return(coords_euclidean)
   }
   if (!is.character(lon) || !is.character(lat) || length(lon) != 1L ||
-      length(lat) != 1L || identical(lon, lat)) {
+      length(lat) != 1L || is.na(lon) || is.na(lat) || !nzchar(lon) || !nzchar(lat) ||
+      identical(lon, lat)) {
     stop("Supply both lon and lat, or coords_euclidean", call. = FALSE)
   }
   c(lon, lat)
@@ -185,11 +238,29 @@
     if (is.null(source)) stop("Supply data or coords in fitted order", call. = FALSE)
     data <- source
   }
-  if (!is.data.frame(data) || anyDuplicated(names(data))) {
-    stop("data must be a data frame with unique column names", call. = FALSE)
+  .require_data_frame(data)
+  if (!is.null(row_id)) {
+    if (!is.character(row_id) || length(row_id) != 1L || is.na(row_id) || !nzchar(row_id)) {
+      stop("row_id must be a single column name", call. = FALSE)
+    }
+    if (!row_id %in% names(data)) {
+      stop("Supplied data does not contain row_id '", row_id, "'", call. = FALSE)
+    }
+    if (!is.null(source) && row_id %in% names(source)) {
+      rows <- source[[row_id]]
+      labels <- data[[row_id]]
+    } else if (fit$host == "lm" && !anyNA(match(fit$rows, rownames(data))) &&
+               !anyNA(data[[row_id]]) && !anyDuplicated(data[[row_id]])) {
+      rows <- fit$rows
+      labels <- rownames(data)
+    } else {
+      stop("Fitted model data does not contain row_id '", row_id,
+           "'; retain it in the fitted data or match by row names", call. = FALSE)
+    }
+  } else {
+    rows <- fit$rows
+    labels <- rownames(data)
   }
-  rows <- if (is.null(row_id)) fit$rows else source[[row_id]]
-  labels <- if (is.null(row_id)) rownames(data) else data[[row_id]]
   if (length(rows) != nrow(fit$x) || anyNA(rows) || anyNA(labels) ||
       anyDuplicated(rows) || anyDuplicated(labels)) {
     stop("The row identifiers must uniquely identify observations in both frames", call. = FALSE)
@@ -203,10 +274,10 @@
   }, logical(1)))) {
     stop("Supplied data values disagree with the fitted observations", call. = FALSE)
   }
-  list(data = out, rows = rows)
+  list(data = out, rows = if (!is.null(row_id)) out[[row_id]] else rows)
 }
 
-.make_sites <- function(coords, rows, group, geographic) {
+.make_sites <- function(coords, rows, group) {
   if (nrow(coords) != length(rows)) {
     stop("Coordinates must have one row per fitted observation", call. = FALSE)
   }

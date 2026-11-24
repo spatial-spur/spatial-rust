@@ -693,9 +693,12 @@ mod tests {
             "cil",
             "ciu",
             "md",
-            "t"
+            "info",
+            "comp",
+            "cnt"
         ])
-        .is_err());
+        .unwrap_err()
+        .contains("level must lie strictly in (0, 100)"));
 
         // Invalid transform combinations
         assert!(dispatch(&["spur_transform", "2", "iso", "1", "0", "0", "1", "-1"]).is_err());

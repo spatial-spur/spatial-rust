@@ -186,6 +186,12 @@ pub fn rust_run_model_scpc(
         };
     let (x, design_cols) = read_design(design)?;
     let (z, instrument_cols) = read_design(instruments)?;
+    if !cv_tolerance.is_finite() || cv_tolerance <= 0.0 {
+        return Err(Error::Other(
+            "cv_tolerance must be finite and strictly positive".into(),
+        )
+        .into());
+    }
     let seed = match seed {
         Nullable::Null => None,
         Nullable::NotNull(s) if (0.0..4_294_967_296.0).contains(&s) && s.fract() == 0.0 => {
@@ -812,6 +818,7 @@ pub fn run_spur_pipeline_r(
 pub fn build_info_r() -> List {
     list!(
         version = spatial_core::VERSION,
+        package_version = env!("CARGO_PKG_VERSION"),
         spec_version = spatial_core::SPEC_VERSION,
         earth_circumference_m = spatial_core::EARTH_CIRCUMFERENCE_M,
         os = std::env::consts::OS,

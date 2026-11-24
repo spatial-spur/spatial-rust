@@ -8,19 +8,42 @@ version = "0.6.0"
 description = "Spatial correlation-robust inference and spatial unit root diagnostics"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["numpy>=1.26", "pandas>=2.2", "patsy>=1.0", "scipy>=1.13", "statsmodels>=0.14.4"]
-license = "MIT"
-license-files = ["LICENSE", "crates/spatial-py/THIRD_PARTY_NOTICES.txt"]
+authors = [
+  { name = "Paul David Boll", email = "david.boll@warwick.ac.uk" },
+  { name = "Daniel Goettlich" },
+  { name = "Sascha O. Becker" },
+  { name = "Hans-Joachim Voth" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering :: Mathematics",
+]
+keywords = ["econometrics", "spatial", "scpc", "spur", "inference"]
+dependencies = ["numpy>=1.26", "pandas>=2.2", "patsy>=1.0", "statsmodels>=0.14.4"]
+license = "MIT AND CC-BY-4.0"
+license-files = ["LICENSE", "crates/spatial-py/THIRD_PARTY_NOTICES.txt", "python/spatial_spur/data/COPYRIGHTS.txt"]
+
+[project.urls]
+Repository = "https://github.com/spatial-spur/spatial-rust"
 
 [project.optional-dependencies]
-pyfixest = ["pyfixest>=0.50.1,<0.51", "formulaic>=1.2.1,<1.2.2"]
-test = ["pytest>=8", "ruff>=0.13"]
+pyfixest = ["pyfixest>=0.50.1,<0.51", "formulaic>=1.2.1,<2"]
+test = ["pytest>=8", "ruff>=0.13", "scipy>=1.13"]
 
 [tool.maturin]
 manifest-path = "crates/spatial-py/Cargo.toml"
 module-name = "spatial_spur._native"
 python-source = "python"
-python-packages = ["spatial_spur", "scpc", "spur"]
+python-packages = ["spatial_spur"]
 locked = true
 sdist-generator = "git"
 

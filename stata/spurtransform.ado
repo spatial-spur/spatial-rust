@@ -3,12 +3,14 @@ program spurtransform, rclass sortpreserve
     version 16.0
     syntax varlist(numeric) [if] [in], PREFIX(name) [TRANSformation(string) RADIUS(string) ///
         CLUSTVAR(varname) LATlong REPLACE SEParately BACKend(string) NThreads(integer -1)]
+    local transformation = lower(trim(`"`transformation'"'))
     if "`transformation'" == "" local transformation lbmgls
     if !inlist("`transformation'", "lbmgls", "nn", "iso", "cluster") {
         di as error "Choose lbmgls, nn, iso, or cluster"
         exit 198
     }
-    if ("`transformation'" == "iso") != (trim("`radius'") != "") {
+    local radius = trim(`"`radius'"')
+    if ("`transformation'" == "iso") != ("`radius'" != "") {
         di as error "Supply radius() only for ISO"
         exit 198
     }
@@ -44,7 +46,14 @@ program spurtransform, rclass sortpreserve
     if "`radius'" == "" local radius -1
     if "`separately'" == "" {
         marksample touse
-        if `cluster' quietly replace `touse' = 0 if missing(`groups')
+        if `cluster' {
+            quietly replace `touse' = 0 if missing(`groups')
+            quietly count if `touse'
+            if r(N) == 0 {
+                di as error "Too few observations in the selected sample"
+                exit 2001
+            }
+        }
         else {
             _spatial_spur coords, sample(`touse') `latlong'
             local coords `r(coords)'
@@ -61,7 +70,14 @@ program spurtransform, rclass sortpreserve
             local ++i
             tempvar touse
             quietly gen byte `touse' = `selected' & !missing(`v')
-            if `cluster' quietly replace `touse' = 0 if missing(`groups')
+            if `cluster' {
+                quietly replace `touse' = 0 if missing(`groups')
+                quietly count if `touse'
+                if r(N) == 0 {
+                    di as error "Too few observations in the selected sample"
+                    exit 2001
+                }
+            }
             else {
                 _spatial_spur coords, sample(`touse') `latlong'
                 local coords `r(coords)'

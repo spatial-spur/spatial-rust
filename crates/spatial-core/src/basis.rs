@@ -256,6 +256,14 @@ pub(crate) struct PositiveBlocks {
 
 pub(crate) fn positive_blocks(values: &[f64], next: Option<f64>, gap_floor: f64) -> PositiveBlocks {
     let leading = values[0];
+    if !leading.is_finite() || leading <= gap_floor {
+        return PositiveBlocks {
+            ends: Vec::new(),
+            tied: false,
+            cutoff_tied: false,
+            more_positive: false,
+        };
+    }
     let threshold = (1e-12 * leading).max(0.0);
     let tolerance = eigen_gap_tolerance(leading, gap_floor);
     let mut ends = Vec::new();

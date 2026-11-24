@@ -134,4 +134,55 @@ replace y = 1e12
 spurtransform y, prefix(h_) transformation(iso) latlong radius(1000000) nthreads(1) replace
 assert h_y == 0
 restore
+
+scpc, capabilities
+assert "`r(specification)'" == "0.4.0"
+assert "`r(backend)'" == "rust"
+
+spurhalflife y, q(4) nrep(200) normdist backend(rust) nthreads(1)
+matrix comp_norm = r(components)
+local max_d = r(max_dist)
+spurhalflife y, q(4) nrep(200) backend(rust) nthreads(1)
+assert r(normdist) == 0
+assert r(n_components) > 0
+matrix comp_raw = r(components)
+matrix comp_scaled = comp_norm * `max_d'
+assert mreldif(comp_raw, comp_scaled) < 1e-12
+
+mata: mata clear
+spurtest i0 y, q(4) nrep(200) backend(rust) nthreads(1)
+spurhalflife y, q(4) nrep(200) backend(rust) nthreads(1)
+quietly regress y x
+scpc, cvs method(nystrom) landmarks(52) samples(4) seed(7) weights nthreads(1)
+assert colsof(e(scpccvs)) == 4
+assert e(seed) == 7
+scpc, method(exact) nthreads(1)
+assert "`e(cmd)'" == "regress"
+capture confirm matrix e(scpccvs)
+assert _rc != 0
+capture confirm matrix e(W)
+assert _rc != 0
+capture confirm scalar e(seed)
+assert _rc != 0
+
+preserve
+gen str4 sg = string(g)
+quietly areg y x, absorb(g)
+quietly scpc, uncond nthreads(1)
+matrix slopes_num = e(scpcstats)
+quietly areg y x, absorb(sg)
+quietly scpc, uncond nthreads(1)
+matrix slopes_str = e(scpcstats)
+assert mreldif(slopes_num, slopes_str) < 1e-12
+restore
+
+preserve
+replace g = . in 1/3
+capture quietly spurtransform y in 1/3, prefix(cl_) transformation(cluster) clustvar(g) replace
+assert _rc == 2001
+restore
+
+capture quietly spur y x, q(4) nrep(200) replace method(bogus)
+assert _rc == 198
+
 di "Stata installed integration checks passed"

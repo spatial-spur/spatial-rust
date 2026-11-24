@@ -21,7 +21,7 @@ use std::mem::align_of;
 #[allow(unexpected_cfgs)]
 mod exceptions {
     use pyo3::exceptions::PyValueError;
-    pyo3::create_exception!(_native, TiedEigenspaceError, PyValueError);
+    pyo3::create_exception!(spatial_spur._native, TiedEigenspaceError, PyValueError);
 }
 use exceptions::TiedEigenspaceError;
 
@@ -164,6 +164,13 @@ fn extract_integer<'py, T: FromPyObject<'py>>(value: &Bound<'py, PyAny>) -> PyRe
     value.extract()
 }
 
+fn extract_f64<'py>(value: &Bound<'py, PyAny>) -> PyResult<f64> {
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err("expected a float, received bool"));
+    }
+    value.extract()
+}
+
 fn parse_nthreads(nthreads: Option<Bound<'_, PyAny>>) -> PyResult<Option<usize>> {
     check_not_forked()?;
     let Some(obj) = nthreads else {
@@ -276,7 +283,7 @@ fn run_model_scpc<'py>(
     coef: &Bound<'py, PyAny>,
     bread: &Bound<'py, PyAny>,
     scores: &Bound<'py, PyAny>,
-    avc: f64,
+    #[pyo3(from_py_with = "extract_f64")] avc: f64,
     inference: &str,
     method: &str,
     design: Option<Bound<'py, PyAny>>,
@@ -289,9 +296,9 @@ fn run_model_scpc<'py>(
     cvs: bool,
     nthreads: Option<Bound<'py, PyAny>>,
     #[pyo3(from_py_with = "extract_integer")] seed: Option<u32>,
-    landmarks: usize,
-    samples: usize,
-    cv_tolerance: f64,
+    #[pyo3(from_py_with = "extract_integer")] landmarks: usize,
+    #[pyo3(from_py_with = "extract_integer")] samples: usize,
+    #[pyo3(from_py_with = "extract_f64")] cv_tolerance: f64,
 ) -> PyResult<Bound<'py, PyDict>> {
     use spatial_core::{
         run_fitted_scpc, ScpcGeometry, ScpcInference, ScpcOptions, ScpcPreparation,
@@ -320,6 +327,11 @@ fn run_model_scpc<'py>(
     if !avc.is_finite() || avc <= 0.001 || avc >= 0.99 {
         return Err(PyValueError::new_err(
             "avc must lie strictly in (0.001, 0.99)",
+        ));
+    }
+    if !cv_tolerance.is_finite() || cv_tolerance <= 0.0 {
+        return Err(PyValueError::new_err(
+            "cv_tolerance must be finite and strictly positive",
         ));
     }
     let (require, kwargs) = make_float64_kwargs(py)?;
@@ -375,7 +387,8 @@ fn run_model_scpc<'py>(
             "conditional model matrices have incompatible dimensions",
         ));
     }
-    let output = allow_threads_checked(py, || {
+    let callback_err = std::sync::Mutex::new(None);
+    let output_result = allow_threads_checked(py, || {
         let project = |values: &mut [f64], width| {
             Python::with_gil(|py| {
                 let matrix = vec_to_pyarray2(py, values.to_vec(), n_obs, width)?;
@@ -396,8 +409,11 @@ fn run_model_scpc<'py>(
                 Ok(())
             })
             .map_err(|err: PyErr| {
-                CoreError::invalid_input("host residualizer failed")
-                    .with_message(format!("Fixed-effect projection failed: {err}"))
+                let msg = format!("Fixed-effect projection failed: {err}");
+                if let Ok(mut slot) = callback_err.lock() {
+                    *slot = Some(err);
+                }
+                CoreError::invalid_input("host residualizer failed").with_message(msg)
             })
         };
         run_fitted_scpc(
@@ -432,8 +448,11 @@ fn run_model_scpc<'py>(
                 .as_ref()
                 .map(|_| &project as &spatial_core::Residualize<'_>),
         )
-    })?
-    .map_err(map_core_err)?;
+    })?;
+    if let Ok(Some(err)) = callback_err.into_inner() {
+        return Err(err);
+    }
+    let output = output_result.map_err(map_core_err)?;
     build_scpc_result_dict(py, output, n_sites, k)
 }
 
@@ -741,7 +760,7 @@ fn run_spur_halflife<'py>(
     emat: &Bound<'py, PyAny>,
     #[pyo3(from_py_with = "extract_integer")] q: usize,
     #[pyo3(from_py_with = "extract_integer")] nrep: usize,
-    level: f64,
+    #[pyo3(from_py_with = "extract_f64")] level: f64,
     latlong: bool,
     nthreads: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -966,6 +985,7 @@ fn run_spur_pipeline<'py>(
 fn build_info<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
     let info = PyDict::new_bound(py);
     info.set_item("version", spatial_core::VERSION)?;
+    info.set_item("package_version", env!("CARGO_PKG_VERSION"))?;
     info.set_item("spec_version", spatial_core::SPEC_VERSION)?;
     info.set_item("earth_circumference_m", spatial_core::EARTH_CIRCUMFERENCE_M)?;
     info.set_item("os", std::env::consts::OS)?;

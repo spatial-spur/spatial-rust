@@ -223,19 +223,20 @@ impl<'a> Distances<'a> {
     }
 
     pub fn rounding_resolution(&self, i: usize) -> f64 {
-        if self.geographic.is_some() {
-            return 0.0;
+        fn ulp(v: f64) -> f64 {
+            let a = v.abs();
+            let bits = a.to_bits();
+            let next = f64::from_bits(if a == f64::MAX { bits - 1 } else { bits + 1 });
+            (next - a).abs()
+        }
+        if let Some(points) = &self.geographic {
+            let p = points[i];
+            let lat_arc = ulp(p.lat).to_radians();
+            let lon_arc = ulp(p.lon).to_radians() * p.cos_lat;
+            return self.multiplier * 0.5 * lat_arc.hypot(lon_arc);
         }
         let row = &self.coordinates[i * self.width..(i + 1) * self.width];
-        row.iter().fold(0.0_f64, |norm, &v| {
-            let bits = v.abs().to_bits();
-            let next = f64::from_bits(if v.abs() == f64::MAX {
-                bits - 1
-            } else {
-                bits + 1
-            });
-            norm.hypot((next - v.abs()).abs())
-        })
+        row.iter().fold(0.0_f64, |norm, &v| norm.hypot(ulp(v)))
     }
 
     pub(crate) fn pair(&self, i: usize, j: usize) -> f64 {
@@ -280,7 +281,7 @@ pub fn canonical_coordinates(
     let distances = Distances::new(coordinates, n, width, metric)?;
     Ok(distances
         .canonical_coordinates()
-        .unwrap_or_else(|| coordinates.to_vec()))
+        .unwrap_or_else(|| coordinates.iter().copied().map(positive_zero).collect()))
 }
 
 /// The full symmetric distance matrix in row-major order.
@@ -352,5 +353,43 @@ mod tests {
             assert_eq!(distances[1], distances[2]);
         }
         assert!(distance_matrix(&[f64::MAX, -f64::MAX], 2, 1, Metric::Euclidean).is_err());
+    }
+
+    #[test]
+    fn geographic_nn_rounding_preserves_decimal_grid_ties_without_merging_distinct_sites() {
+        let coords = [
+            0.0,
+            -120.0,
+            0.0,
+            -120.0 + 0.1,
+            0.0,
+            -120.0 + 0.2,
+            0.0,
+            -120.0 + 0.3,
+        ];
+        let distances = Distances::new(
+            &coords,
+            4,
+            2,
+            Metric::GreatCircle { radius: 6_371_008.8 },
+        )
+        .unwrap();
+        let index = crate::neighbors::NeighborIndex::new(distances).unwrap();
+        let mut nn = Vec::new();
+        index.nearest(1, &mut nn).unwrap();
+        assert_eq!(nn, vec![0, 2]);
+
+        let distinct = [0.0, -120.0, 0.0, -120.0001, 0.0, -120.000101];
+        let distances = Distances::new(
+            &distinct,
+            3,
+            2,
+            Metric::GreatCircle { radius: 6_371_008.8 },
+        )
+        .unwrap();
+        let index = crate::neighbors::NeighborIndex::new(distances).unwrap();
+        nn.clear();
+        index.nearest(0, &mut nn).unwrap();
+        assert_eq!(nn, vec![1]);
     }
 }

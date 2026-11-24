@@ -40,7 +40,11 @@ program spurtest, rclass sortpreserve
     matrix `info' = J(1,3,.)
     _spatial_spur invoke, vars("`coords' `y' `x'") sample(`touse') ///
         command(`"`native' `d' `p' `residual' `ll' `q' `nrep' "`nthreads'" "`use_file'" `critical' `statistic' `pvalue' `alternative' `info'"')
-    di as text "SPUR `test' p-value " as result %8.5f scalar(`pvalue')
+    di as text "SPUR `test' statistic " as result %8.4f scalar(`statistic') ///
+        as text "  p-value " as result %8.5f scalar(`pvalue')
+    local alldir = `info'[1,2]
+    local power = `info'[1,3]
+    _spatial_spur advisory, q(`q') nrep(`nrep') alldir(`alldir') power(`power') testname("SPUR `test'")
     return scalar p = scalar(`pvalue')
     return scalar teststat = scalar(`statistic')
     return scalar ha_param = scalar(`alternative')

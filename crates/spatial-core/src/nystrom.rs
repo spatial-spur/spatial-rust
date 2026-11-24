@@ -118,6 +118,7 @@ pub struct LandmarkBasis {
     pub candidates: Vec<usize>,
     pub tied: bool,
     pub cutoff_tied: bool,
+    pub more_positive: bool,
 }
 
 /// Embed complete local eigenspaces, then take the leading subspace of the
@@ -129,6 +130,17 @@ pub fn landmark_basis(
     width: usize,
     metric: Metric,
     request: &LandmarkRequest,
+) -> Result<LandmarkBasis, CoreError> {
+    landmark_basis_with_shortcut(coords, n, width, metric, request, true)
+}
+
+fn landmark_basis_with_shortcut(
+    coords: &[f64],
+    n: usize,
+    width: usize,
+    metric: Metric,
+    request: &LandmarkRequest,
+    allow_exact_shortcut: bool,
 ) -> Result<LandmarkBasis, CoreError> {
     let distance = Distances::new(coords, n, width, metric)?;
     let q = request.components;
@@ -172,7 +184,7 @@ pub fn landmark_basis(
 
     let decay = decay_limits(&distances, request.avc, request.min_avc)?;
 
-    if m == n {
+    if allow_exact_shortcut && m == n {
         let dense = crate::distance::distance_matrix(coords, n, width, metric)?;
         let exact = basis::scpc_basis(&dense, n, decay[0], q)?;
         return Ok(LandmarkBasis {
@@ -181,6 +193,7 @@ pub fn landmark_basis(
             candidates: exact.candidates,
             tied: exact.tied,
             cutoff_tied: exact.cutoff_tied,
+            more_positive: exact.more_positive,
         });
     }
 
@@ -264,6 +277,7 @@ pub fn landmark_basis(
         candidates: blocks.ends,
         tied: blocks.tied,
         cutoff_tied: blocks.cutoff_tied,
+        more_positive: blocks.more_positive,
     })
 }
 
@@ -325,7 +339,7 @@ fn combine_landmarks(
     linalg::multiply(wall, wall, &mut gram, columns, n, columns, true);
     let retained = q.min(columns);
     let eigen = basis::symmetric_eigenpairs(&gram, columns, retained)?;
-    let blocks = basis::positive_blocks(&eigen.values, eigen.next_value, 1.6e-11);
+    let mut blocks = basis::positive_blocks(&eigen.values, eigen.next_value, 1.6e-11);
     let rank = blocks.ends.last().copied().unwrap_or(0);
     let mut weights = vec![(n as f64).sqrt().recip(); checked_len(&[n, q + 1])?];
     for row in weights.chunks_exact_mut(q + 1) {
@@ -346,11 +360,54 @@ fn combine_landmarks(
         }
         let mut directions = crate::zeroed(&[n, rank], "pooled landmark basis")?;
         linalg::multiply(wall, &right, &mut directions, n, columns, rank, false);
-        for (row, direction) in weights
-            .chunks_exact_mut(q + 1)
-            .zip(directions.chunks_exact(rank))
-        {
-            row[1..=rank].copy_from_slice(direction);
+
+        // Forming W'W squares the condition number; re-center and run two-pass
+        // Modified Gram-Schmidt to restore centering and orthogonality.
+        let mut ortho_cols: Vec<Vec<f64>> = (0..rank)
+            .map(|c| {
+                let mut col: Vec<f64> = directions.chunks_exact(rank).map(|r| r[c]).collect();
+                let mean = col.iter().sum::<f64>() / n as f64;
+                for v in &mut col {
+                    *v -= mean;
+                }
+                col
+            })
+            .collect();
+        let mut kept = 0usize;
+        for c in 0..rank {
+            let mut col = std::mem::take(&mut ortho_cols[c]);
+            for _ in 0..2 {
+                let mean = col.iter().sum::<f64>() / n as f64;
+                for v in &mut col {
+                    *v -= mean;
+                }
+                for prev in &ortho_cols[..kept] {
+                    let dot: f64 = prev.iter().zip(&col).map(|(a, b)| a * b).sum();
+                    for (v, &p) in col.iter_mut().zip(prev) {
+                        *v -= dot * p;
+                    }
+                }
+            }
+            let norm = col.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if !norm.is_finite() || norm <= 1e-12 {
+                break;
+            }
+            for v in &mut col {
+                *v /= norm;
+            }
+            ortho_cols[kept] = col;
+            kept += 1;
+        }
+        if kept < rank {
+            blocks.ends.retain(|&end| end <= kept);
+            blocks.cutoff_tied = blocks.ends.is_empty();
+            blocks.more_positive = false;
+        }
+        let final_rank = blocks.ends.last().copied().unwrap_or(0);
+        for (i, row) in weights.chunks_exact_mut(q + 1).enumerate() {
+            for (c, col) in ortho_cols[..final_rank].iter().enumerate() {
+                row[1 + c] = col[i];
+            }
         }
     }
     Ok((weights, blocks))
@@ -405,7 +462,7 @@ mod tests {
             coords.push(-170.0 + (fi * 37.3).rem_euclid(340.0));
             coords.push(-65.0 + (fi * 19.7).rem_euclid(130.0));
         }
-        let lb = landmark_basis(
+        let lb = landmark_basis_with_shortcut(
             &coords,
             n,
             2,
@@ -418,6 +475,7 @@ mod tests {
                 samples: 1,
                 seed: 7,
             },
+            false,
         )
         .unwrap();
         let dm = distance_matrix(&coords, n, 2, Metric::GreatCircleFractionLonLat).unwrap();
@@ -468,5 +526,33 @@ mod tests {
         for (a, b) in norm.iter().zip(&norm_ref) {
             assert!((a - b).abs() < 1e-12, "a={a}, b={b}");
         }
+    }
+
+    #[test]
+    fn colocated_landmark_sample_is_rejected_without_injecting_roundoff_noise() {
+        // 8 co-located sites out of 9 (floor = 28/36 < 0.9), landmarks = 7.
+        // With 200 samples, an all-co-located subset is drawn with overwhelming probability.
+        let mut coords = vec![0.0_f64; 16];
+        coords.extend_from_slice(&[1.0, 0.0]);
+        let err = landmark_basis(
+            &coords,
+            9,
+            2,
+            Metric::Euclidean,
+            &LandmarkRequest {
+                avc: 0.9,
+                min_avc: 1e-4,
+                components: 2,
+                landmarks: 7,
+                samples: 200,
+                seed: 1,
+            },
+        )
+        .err()
+        .expect("an all-colocated landmark subset must not accept roundoff directions");
+        assert!(
+            err.message().contains("no positive spatial directions"),
+            "got: {err:?}"
+        );
     }
 }

@@ -16,9 +16,9 @@ targets. The source archive includes the entire locked Cargo workspace.
 Verify that it can build a wheel with the lock enforced.
 
 The R archive uses a two-member workspace with the same dependency versions.
-It vendors locked registry sources, compresses them, and tests the result
-with an empty Cargo cache and network disabled. The 10 MB archive size is a
-project build budget.
+It filters and vendors locked registry sources with `cargo-vendor-filterer`,
+compresses them, and tests the result with an empty Cargo cache and network
+disabled. The archive must stay below the 5 MB CRAN source budget.
 
 Install test artifacts from a working directory outside all source
 checkouts. Use SCPC and SPUR with `backend="rust"` or `backend(rust)`.

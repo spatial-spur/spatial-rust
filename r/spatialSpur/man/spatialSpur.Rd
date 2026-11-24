@@ -1,13 +1,24 @@
+\encoding{UTF-8}
 \name{spatialSpur}
 \alias{spatialSpur}
 \alias{scpc}
+\alias{print.scpc}
+\alias{summary.scpc}
+\alias{print.summary.scpc}
+\alias{coef.scpc}
+\alias{confint.scpc}
 \alias{spur}
+\alias{print.spatial_spur_pipeline}
+\alias{summary.spatial_spur_pipeline}
 \alias{spurtest}
 \alias{spurtest_i0}
 \alias{spurtest_i1}
 \alias{spurtest_i0resid}
 \alias{spurtest_i1resid}
+\alias{print.spatial_spur_test}
+\alias{summary.spatial_spur_test}
 \alias{spurhalflife}
+\alias{print.spatial_spur_halflife}
 \alias{spurtransform}
 \alias{load_chetty_data}
 \alias{spatial_build_info}
@@ -48,6 +59,17 @@ spurtransform(formula, data, lon = NULL, lat = NULL, coords_euclidean = NULL,
 
 load_chetty_data()
 spatial_build_info()
+
+\method{print}{scpc}(x, ...)
+\method{summary}{scpc}(object, ...)
+\method{print}{summary.scpc}(x, ...)
+\method{coef}{scpc}(object, ...)
+\method{confint}{scpc}(object, parm, level = 0.95, ...)
+\method{print}{spatial_spur_halflife}(x, ...)
+\method{print}{spatial_spur_test}(x, ...)
+\method{summary}{spatial_spur_test}(object, ...)
+\method{print}{spatial_spur_pipeline}(x, ...)
+\method{summary}{spatial_spur_pipeline}(object, ...)
 }
 \arguments{
 \item{model}{An unweighted \code{lm} or a \code{fixest::feols} OLS or 2SLS fit.
@@ -82,14 +104,16 @@ the supplied draw matrix.}
 draw matrices explicitly if the caller uses R's Box-Muller normal generator.}
 \item{draws, tuning_draws}{Optional matrices with \code{q} rows of independent
 standard Gaussian drivers for inference and tuning. Half-life uses one draw matrix.}
-\item{level}{Confidence level in percent.}
+\item{level}{Confidence level (in percent for \code{spurhalflife}, or as a fraction in \code{(0, 1)} for \code{confint.scpc}).}
 \item{normdist}{Return half-life in sample diameters when true.}
 \item{prefix}{Prefix for transformed columns.}
 \item{transformation}{One of \code{"lbmgls"}, \code{"nn"}, \code{"iso"}, or \code{"cluster"}.}
 \item{radius}{A strictly positive ISO radius in input units or meters for geography.}
 \item{clustvar}{Site label column for cluster demeaning.}
 \item{replace}{Allow replacement of existing output columns in the returned data.}
-\item{...}{Additional arguments to \code{spurtest}.}
+\item{x, object}{A fitted result object returned by \code{scpc}, \code{spur}, \code{spurtest}, or \code{spurhalflife}.}
+\item{parm}{Optional vector of coefficient names or indices for \code{confint.scpc}.}
+\item{...}{Additional arguments passed to \code{spurtest} or S3 print and summary methods.}
 }
 \value{
 \code{scpc} returns coefficient estimates, uncertainty, effective critical values

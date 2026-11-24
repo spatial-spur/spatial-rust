@@ -236,6 +236,19 @@ fn dispatch(args: &[&str]) -> Result<(), String> {
     match subcmd {
         "fitted_scpc" => fitted::run_scpc(&args[1..]),
         "ping_unified_v1" => Ok(()),
+        "require_spec" => {
+            let [expected] = args[1..] else {
+                return Err("require_spec expects one specification version argument".into());
+            };
+            if expected == spatial_core::SPEC_VERSION {
+                Ok(())
+            } else {
+                Err(format!(
+                    "installed spatial_spur plugin implements specification {}, expected {expected}",
+                    spatial_core::SPEC_VERSION
+                ))
+            }
+        }
         "result_metadata" => {
             stata_spi::save_macro("_native_provider", spatial_core::linalg_provider())?;
             stata_spi::save_macro("_native_methods", spatial_core::SPEC_VERSION)
@@ -928,6 +941,10 @@ mod tests {
         let mut bad_seed = args;
         bad_seed[13] = "-1";
         assert!(fitted::run_scpc(&bad_seed).unwrap_err().contains("seed"));
+        assert!(dispatch(&["require_spec", spatial_core::SPEC_VERSION]).is_ok());
+        assert!(dispatch(&["require_spec", "0.0.0"])
+            .unwrap_err()
+            .contains("specification"));
         assert!(fitted::run_scpc(&args)
             .unwrap_err()
             .contains("fitted dimensions"));
