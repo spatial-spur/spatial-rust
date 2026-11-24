@@ -26,15 +26,17 @@ the implemented-method identifier.
 
 | Area | Required change relative to the reviewed baseline | Completion evidence |
 | --- | --- | --- |
-| SCPC Student floor | Permit downward critical-value bracketing; no undeclared IID addition | V01, V02 |
+| SCPC Student floor and degenerate benchmark | Permit downward bracketing; no undeclared IID addition; detect identically zero benchmark denominator before finite-root search | V01, V02 |
 | SCPC finite tail | Add every prescribed finite-tail point, use common mesh for q/CV/p, expose actual rates/status | V03 |
 | I(0) extreme tail | Replace silently coarsened wide/dense fallback with the declared budget error | V04 |
 | Probability convergence | Separate depth/iteration exhaustion from satisfied accuracy; error-aware bracket checks | V02, V05 |
 | Decay/root and numerical metadata | Report attained criterion/bracket; no silent looser fallback | V05 |
 | Fitted-state support | Reject unsupported estimator subclasses and missing/misaligned fitted state | V10 |
-| SPUR diagnostics | Canonical reference_tuning_power, precise fallback/status and normalization metadata | V06 |
+| SPUR diagnostics | Unit-trace statistics, bounded alternative strength/search, shared tuning/inference rank cutoff, separate draw counts and reference_tuning_power | V06 |
 | Uninformative cases | Conservative p=1/full-domain outputs for valid nonzero contrasts under the profile; no substitution for failure | V07 |
-| Half-life output | Reusable point-null evaluation; all actual evaluations/counts; mapped transition brackets; completed heuristic versus incomplete status | V08 |
+| Half-life output and preparation | Direct finite-h kernels; bounded short-scale work; all actual evaluations/counts; endpoint membership separate from outer brackets; heuristic versus incomplete status | V08 |
+| Randomness and basis conventions | Maintained unbiased landmark sampler; seeded local RNG or explicit draws; projector invariance without bespoke eigenvector anchoring | V06, V09, V10 |
+| Nearest neighbors | Replace absolute-coordinate-ULP tie allowances with the distance-relative rule | V09 |
 | Efficiency | Reuse geometry/decay limits through q expansion and geometry/factors/point evaluations within half-life | V11 |
 | Combined workflow | Require separable constant column; preserve one sample and identifiable transformed slopes | V10 |
 | Documentation/results | Scope, provenance, metric/units, numerical domains and applicable diagnostics consistent across hosts | V09, V10, V12 |
@@ -84,6 +86,16 @@ strict rejection probabilities; do not assert equality of those functions
 at an atom. Check zero variance, zero influence directions, no-intercept SCPC
 and the prohibition on manufactured significance.
 
+Use the exact conditional-degeneracy fixture with coordinates (0,0,1,1),
+intercept plus x=(1,3,-3,-1), and y=(1,7,-5,-3). Here f=1/3,
+avc=0.5 gives c0=log4, and q=1 has R=(1,1,-1,-1)'/2. The slope is 2,
+observed SE is 1/5 and observed t is 10. Conditional numerator and denominator
+weights are respectively (1,3,3,1)'/40 and (-1,1,-1,1)'/40. The denominator
+sums to zero within each co-location group at every decay while numerator
+variance is positive. The ordinary weight-collapse check passes. Require the
+specific calibration-degeneracy error, with no bracket retries, q reselection
+or removed covariance. This fixture needs no simulation.
+
 An error-aware critical bracket must have satisfied the same complete family
 on both sides. Ordinary continuous-law p/CI differences must be explainable
 by the recorded t bracket or assessed probability uncertainty.
@@ -109,11 +121,15 @@ help distinguish a targeted fixture from a claim about common default behavior.
 
 ### V04. Correlation-floor and tail-budget cases
 
-Check avc domain endpoints and f<avc. For I(0), verify f<0.03, exact
+Check the mathematical avc domain f<avc<1, including admissible requests
+below 0.001 and above 0.99. Actual precision/rank/resource limitations may
+produce their specific errors; no historical domain cutoff remains.
+For I(0), verify f<0.03, exact
 f=0.03 limit-only inference, and f>0.03 infeasibility. Exercise the .001
 reference-correlation fallback and the .0001 hybrid-grid target fallback.
 
-Verify actual distinct mesh counts and endpoint inclusion, not a literal
+Verify delta_min is included when delta_min<s, including the attainable
+0.0001 target, and s is included once. Check actual distinct mesh counts and endpoint inclusion, not a literal
 "80" count. Check log-domain generation when a direct rate ratio overflows.
 When more than 256 tail intervals or an unrepresentable tail endpoint is
 required, assert the documented error. There must be no silent truncation,
@@ -139,15 +155,36 @@ solely to enumerate unrealistic floating-point inputs.
 ### V06. SPUR definition, normalization and simulation ranks
 
 Construct Brownian and residual projection matrices independently. Verify
-I(0)/I(1) statistics, reference alternatives and the finite-rate raw
-normalization maps. At the co-location fallback, verify its direct definition
-rather than substituting an infinite number into a finite-rate formula.
+unit-trace I(0)/I(1) statistics, reference alternatives and the positive-scalar
+maps to paper/author statistics for fixed finite alternatives. Test unchanged
+simulation ordering, cutoffs scaled by the same factor, and unchanged rank
+p-values. Verify direct endpoint alternatives instead of substituting infinity
+into a finite-rate conversion. The new tuning search may choose a different
+alternative; that intentional profile change is separate from normalization.
 
-Use fixed supplied independent draw blocks to compare hosts. Verify inclusive
+Use fixed supplied independent draw blocks with aligned bases and coloring to compare hosts. Verify inclusive
 plus-one p-values, strict cutoffs, exact integer order-statistic ranks and ties,
 including B too small to reject at a requested size. Check reference-tuning
 status and the meaning of achieved power; the final composite cutoff must
 not be confused with the reference cutoff.
+
+The tuning cutoff uses the same rank helper as inference. Exercise unequal
+B_tune and B, B_tune=19, smaller invalid tuning blocks, exact limiting shapes,
+the bounded search and selected-candidate tie rule. Zero strength is only a
+weak bracket anchor, never a selected nontrivial alternative. Check that a
+missed target is reported without a false convergence or global-power claim.
+Compare achieved reference power and workload on ordinary, clustered and
+Chetty geometries before release; numerical order/validity does not by itself
+establish equal power to the older search.
+
+The specification review included an independent prototype with n=60,
+q=15 and B_tune=5000 on ordinary, clustered, exact-duplicate and line
+geometries. Its chosen alternatives met the empirical target in 5–10 candidate
+evaluations. A new 20000-draw reference check gave powers as high as 0.5313,
+illustrating that meeting the tuning tolerance is not a population-power
+guarantee. These are focused design checks, not production benchmarks or
+default 100000-draw release validation; the release comparisons above remain
+required.
 
 Check that user-supplied invalid norms/shapes fail and that the documented
 distribution/independence requirement is visible. Batch results remain
@@ -171,6 +208,13 @@ covariance scaling. Independently integrate the uniform-in-h **density**
 mixture, including determinant weights. Check true zero/infinite limits and
 physical versus normalized units.
 
+Check finite h for which log(2)/h would overflow, and very large finite h
+whose compactified value rounds to 1. The point-null operation must preserve
+the requested finite value and use the stable direct-h kernel. Compare the
+long-scale phi representative with ordinary-scale independent projection and
+its Brownian limit. A large requested-unit value may overflow a display bound
+without changing the tested normalized experiment.
+
 The audit compared 10-node with 40-node panels on a regular n=128/q=100 line,
 an irregular n=80/q=15 geometry, four tight clusters, and a five-point close-pair
 geometry. Its maximum relative density differences were approximately
@@ -185,6 +229,14 @@ evaluated grid/refinement/bisection point and its count is available, with
 phase labels and no invented counts for bypassed work. Check mapped endpoint
 brackets and outward rounding.
 
+Include the transition bracket [t_acc,1] with accepted finite endpoint and
+rejected exact infinity: its infinite outer enclosure must not display an
+accepted unit root. Check the analogous rejected zero case and requested-unit
+overflow. Verify exact_inf_accepted independently of upper_bound_is_inf.
+Exercise 64-panel/640-node and 512 short-probe preparation limits; excess work
+must give the declared error before costly simulation, never silently clip
+the supported scale range.
+
 Synthetic narrow gaps/islands may test search mechanics, but must not be cited
 as a proof of actual-likelihood completeness. Check that all component results
 carry heuristic scope and incomplete searches do not masquerade as completed
@@ -195,17 +247,30 @@ confidence sets.
 Verify complete-block behavior under simple and tied eigenvalues, using
 projectors for orientation-independent comparisons. Test row permutations,
 translations and common unit changes within representable input precision.
-For finite supplied simulations, distinguish canonical fixed-draw comparisons
-from arbitrary rotated-basis distributional invariance.
+For finite supplied simulations, distinguish aligned fixed-draw comparisons
+from arbitrary rotated-basis distributional invariance. Couple colored
+realizations for exact rotation checks; blindly rotating/reusing base normals
+under a new Cholesky factor is not the same test fixture. Verify rotation
+invariance of the Frobenius trace-shape criterion. Do not require custom
+canonical eigenspace anchors or an error on non-unique orientation.
 
 Check full-landmark/exact subspace agreement and recorded seed/subset reuse
 through q expansion. Verify pooled Frobenius weighting and post-Gram
 orthogonality, without demanding a full eigensolve solely for diagnostics.
+Local landmark blocks use their own unscaled centered-K rule. Verify uniform
+without-replacement sampling with the chosen maintained sampler and record
+its version; cross-implementation fixtures align actual landmark indices.
 
 For transformations check Brownian pseudoinverse and constant annihilation,
 the inherited strict whitening threshold, nearest positive distance and tied
 neighbors, strict ISO boundaries/isolated rows, and cluster demeaning.
 Geographic tests must distinguish arc from chordal distance and verify units.
+
+For the nearest-neighbor regression, use coordinates (0,1,17/8) and
+y=(0,1,4). Adding exactly representable 10^15 to all coordinates preserves
+the query point's distances 1 and 9/8 and its unique nearest neighbor. Its
+transformed value must remain 1. The previous origin-dependent allowance
+would include both neighbors and change it to -1.
 
 ### V10. Host/sample contract and Chetty comparison
 
@@ -214,16 +279,23 @@ expressions/interactions, duplicate row labels, FE selections, coefficient
 aliases and ordinary IV where supported. Verify both correctly aligned arrays
 and clear rejection of ambiguous frame matching or unsupported estimators.
 
+Check repeated explicit-seed calls and unchanged caller RNG state on every
+host. R seed=NULL must receive the actionable unsupported-mode error; caller-
+generated supplied blocks remain supported. Do not retain a hidden global-RNG
+compatibility path or require cross-host bitstream identity from a seed alone.
+
 The combined workflow must use one sample, actual evaluated design columns,
 a separable constant, and an identified transformed slope fit with no added
 intercept. A full-indicator design without a separable constant receives the
 documented error; residual diagnostics can still accept its constant span.
 
-Run the Chetty example across supported hosts with common supplied draws and
-coordinate conventions. Compare point estimates, q, SEs, cutoffs, p-values,
+Run the Chetty example across supported hosts with common supplied draws,
+aligned retained bases/coloring, landmark subsets and coordinate conventions.
+Compare point estimates, q, SEs, cutoffs, p-values,
 half-life components and transformation output. Explain intended differences
 from author/main fixtures due to corrected projections, exact Brownian
 geometry, finite-simulation ranks, true endpoints and the adopted 0.6.0 mesh.
+Include intended statistic-normalization and alternative-tuning changes.
 Agreement with an obsolete approximation is not a conformance requirement.
 
 ### V11. Efficiency checks
@@ -256,8 +328,9 @@ gates pass.
 
 1. Implement the common SCPC family/bracketing and bounded tail policy, plus
    accuracy failure propagation. Verify V01–V05.
-2. Add output/status contracts, conservative uninformative handling, complete
-   half-life trace and point-null access; verify V06–V08.
+2. Implement the simplified SPUR shape/tuning/rank contracts and explicit local
+   randomness; add output/status contracts, stable half-life kernels, bounded
+   preparation, complete trace and point-null access; verify V06–V08.
 3. Finish adapter/sample/estimator and transformation obligations and
    cross-host Chetty comparisons; verify V09–V10.
 4. Verify per-call reuse and representative performance, resolve remaining

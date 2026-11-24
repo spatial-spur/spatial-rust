@@ -61,11 +61,15 @@ identify provenance; they do not import unspecified algorithms into this version
 | Delta | Positive sample diameter in external distance units |
 | K(c) | Matrix with entries exp(-c d_ij) |
 | f | Fraction of off-diagonal pairs at exactly the same location |
-| B | Number of inference draws, and separately the tuning-block length when used |
+| B, B_tune | Inference and independent tuning draw counts; they may differ |
 | alpha | Rejection probability; a confidence level is 1-alpha |
 
 Matrix formulas describe mathematical operations, not a requirement to
 materialize dense projectors or invert matrices explicitly.
+Method chapters may define local symbols explicitly: for example, SCPC uses
+N for observations and B for regression bread, while the half-life chapter
+uses B for the Brownian matrix. Local definitions take precedence within that
+chapter; quantities crossing an API boundary need descriptive field names.
 
 ## 3. Supported calculations and scientific assumptions
 
@@ -211,6 +215,22 @@ an estimated adjusted intercept or restore one by an undocumented correction.
 The workflow rules are in
 [half-life and transformations](half-life-and-transforms.md).
 
+### 4.3 Shared implementation boundary
+
+Keep one numerical implementation in the shared core. Adapters translate
+verified fitted state, numeric arrays, options and structured results; they
+must not maintain separate versions of the inference mathematics. Separate
+geometry/design preparation from response-dependent evaluation so repeated
+responses, coefficients and half-life points can reuse the required work.
+These are logical boundaries, not a requirement for a public cache object,
+an extensive class hierarchy or a particular internal module layout. **[D]**
+
+The ordinary interface should expose the scientific choices and a small set
+of accuracy/workload controls. The recorded profile owns its internal constants;
+do not turn every implementation tolerance into a public tuning option.
+Provide structured diagnostics without forcing users to parse a solver trace
+for a routine result.
+
 ## 5. Spatial sites and distance geometry
 
 ### 5.1 Sites and duplicates
@@ -288,10 +308,12 @@ do not dump matrices or suggest arbitrary jitter.
 | q exceeds positive rank or cuts a tied block | Error with requested q, available rank and eligible block boundaries |
 | Zero/invalid response projection | Degeneracy error; a directional statistic is undefined |
 | Zero SCPC estimated variance | Return explicit degenerate inference status and no ordinary t/p/CI claim, or fail that coefficient explicitly; do not manufacture significance |
+| Required SCPC benchmark with positive numerator variance and identically zero denominator variance | Calibration-degeneracy error for that coefficient; the mathematical cutoff is infinite, so finite-root retries cannot help |
 | Valid nonzero response but no discrimination within the profile/tolerance | Conservative p=1, unbounded cutoffs/full half-life domain, and uninformative_within_profile status as defined by the method chapter |
 | Materially indefinite covariance or failed factorization | Numerical/model error; no diagonal jitter or uninformative substitution |
 | Unsatisfied integration/root accuracy at budget | Accuracy error or explicit incomplete diagnostic result without finalized inference |
 | Incomplete half-life search | Retain evaluated point diagnostics with incomplete status; do not label the result a completed confidence set |
+| Infinite half-life outer bound with rejected exact infinity | Report the unresolved outer bracket and exact endpoint decision separately; an infinite numeric bound is not acceptance of a unit root |
 | Finite-mesh calibration / completed heuristic inversion | Return the specified approximation status and concise interpretation |
 | Large q or unattained reference power target | Return the diagnostic with the achieved quantity and interpretive limit |
 
@@ -330,18 +352,27 @@ must be available without parsing printed text. Bounds may be infinite; do not
 replace true infinity with a finite display sentinel.
 
 Default simulation seed is 42; default Nyström landmark seed is 1, with a
-uint32 landmark seed domain. Simulation RNGs are local to the call and MUST NOT
-alter the caller's global RNG state. A seed alone does not promise cross-language
-or cross-version bitwise equality. Record the RNG/sampler identity and version.
-Supplied, identical valid draws are the cross-host numerical comparison
-mechanism. **[D]**
+uint32 landmark seed domain. Generated simulations use an explicit integer seed
+and local RNG state; they MUST NOT alter the caller's global RNG state.
+An implicit unseeded host mode such as R seed=NULL is not part of 0.6.0 support.
+Reject it with a message to supply an integer seed or explicit draw blocks.
+A caller wanting to consume a host RNG can generate those blocks explicitly
+before the call. No save/restore or global-state compatibility path is required
+inside the numerical methods. **[D]**
+
+A seed alone does not promise cross-language or cross-version bitwise equality.
+Record the RNG/sampler identity and version. Supplied, identical valid draws
+compare realized host results when the retained basis and covariance coloring
+are aligned. Otherwise the requirement is distributional agreement, with
+coupled colored draws available for exact algebraic comparisons. **[D, I]**
 
 Distributional invariance under an orthogonal basis rotation differs from
-fixed-draw reproducibility. The canonical orientation and complete-block rules
-in numerics.md support row-permutation comparisons. Floating-point providers
-need agree within stated tolerances, not bit for bit. Symmetries involving
-indistinguishable duplicate rows must be assessed through projectors and
-inference, without inventing persistent row identifiers.
+fixed-draw reproducibility. Complete-block and projector checks in numerics.md
+establish subspace invariance; they do not require custom canonical eigenvectors
+or identical finite Monte Carlo ranks after every row permutation. Floating-point
+providers need agree within stated tolerances for aligned calculations, not bit
+for bit. Symmetries involving indistinguishable duplicate rows must be assessed
+through projectors and inference, without inventing persistent row identifiers.
 
 ## 8. Versioning and conformance
 
@@ -353,8 +384,10 @@ accuracy, diagnostics and conformance evidence.
 
 Historical MATLAB/Stata output matching is a provenance check, not an override
 of this specification. Do not add production compatibility modes for reversed
-projections, finite infinity sentinels, old Brownian proxies, or the undeclared
-Student floor. Preserve archived fixtures with explanations of intended changes.
+projections, finite infinity sentinels, old Brownian proxies, the undeclared
+Student floor, type-7 tuning quantiles, raw author-code statistic normalizations,
+the custom landmark LCG, or implicit global-RNG consumption. Preserve archived
+fixtures with explanations of intended changes.
 
 Until the [migration gates](verification.md) pass, spec/VERSION, core
 SPEC_VERSION and host compatibility checks MUST continue to identify the

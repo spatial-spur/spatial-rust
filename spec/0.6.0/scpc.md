@@ -156,7 +156,7 @@ $$
 \Xi_j=\operatorname{diag}(a_j)A\in\mathbb R^{N\times m}.
 $$
 
-For each site with a nonzero column of $\Xi_j$, normalize that column to unit Euclidean length to obtain $S_j\in\mathbb R^{N\times m}$. The conditional benchmark is
+For each site with a nonzero column of $\Xi_j$, normalize that column to unit Euclidean length to obtain $S_j\in\mathbb R^{N\times m}$. Zero columns use the explicit singleton/cluster convention below; in particular the singleton convention is $\operatorname{sgn}_+(0)=+1$. The conditional benchmark is
 
 $$
 \eta\mid(X,Z,F,A,s)\sim N(0,K(c)),\qquad
@@ -245,6 +245,10 @@ $$
 
 Genuine atom cases may be evaluated algebraically from the projected Gaussian experiment. If a required degenerate boundary cannot be resolved within the supported numerical precision, report a clear calibration-degeneracy error instead of inventing finite significance or elaborate unverified fallback behavior. The precision and equality-detection rules are in [numerics.md](numerics.md).
 
+**[I/D] No finite cutoff.** Write $\Omega_{DD}$ for the covariance block of the $q$ denominator coordinates. If a required valid covariance has $\Omega_{00}>0$ and $\Omega_{DD}=0$, positive semidefiniteness also makes its numerator-denominator cross-covariances zero. Then $r_\Omega(k)=1$ for every finite $k$, and the extended-real critical-value target is $+\infty$; the inclusive tail is likewise one for every finite observed $t$. This is algebraic degeneracy, not failure to find a sufficiently large numerical bracket.
+
+The supported profile reports a clear calibration-degeneracy error for the affected coefficient, identifying the family and covariance point and explaining that the benchmark leaves no random estimated-variance direction. It does not add a special successful infinite-interval path. For conditional SCPC, keep the location-selected $q$: do not reselect it, drop the offending covariance, or repeatedly expand a root bracket to conceal this condition. Co-location-group cancellation can cause it even when the unprojected conditional weight norm passes the projection check, and can hold at finite rates as well as at $K(\infty)$. Check the covariance after projection onto the actual kernel support. An exactly zero numerator and denominator law is separately undefined for the ratio and also receives a degeneracy error. A numerically unresolved small covariance is a precision error; a tolerance comparison alone is not proof of an exactly infinite mathematical cutoff.
+
 The marginal confidence interval is
 
 $$
@@ -289,7 +293,7 @@ The complete full-site geometry determines $c_0$, the finite mesh limits, and $\
 
 ### 7.2 Embedded and pooled operator
 
-**[D/I]** For subset $S_r$ of size $\ell$, obtain complete leading positive blocks $U_r$ of its centered covariance at the common $c_0$. Let $\bar\Lambda_r$ replace the eigenvalues in each numerical tie block by their block mean. Define
+**[D/I]** For subset $S_r$ of size $\ell$, obtain complete leading positive blocks $U_r$ of its centered covariance $C_\ell K_{S_r,S_r}(c_0)C_\ell$ at the common $c_0$, where $C_\ell=I_\ell-\mathbf1_\ell\mathbf1_\ell^\top/\ell$. Apply the unscaled-centered-$K$ SCPC rank and block-gap rules to this local matrix. The separately normalized pooled operator below uses its own pooled rule; the two scales must not be interchanged. Let $\bar\Lambda_r$ replace the eigenvalues in each numerical tie block by their block mean. Define
 
 $$
 E_r=C_mK_{:,S_r}(c_0)U_r\bar\Lambda_r^{-1/2},
@@ -321,7 +325,7 @@ The current automatic policy selects Nyström at 4,500 sites and exact below tha
 
 **[D]** Fail clearly for an unsupported estimator, unidentifiable coefficient, invalid site mapping, unattainable decay target, no complete positive spatial direction, or a numerically degenerate observed variance projection. A zero estimated standard error gives an explicit degenerate-inference outcome with no ordinary $t$, p-value, or confidence interval, or a clear error. It is not converted into a zero-width interval or manufactured significance. Rank and collapse tests use the scale-aware criteria in [numerics.md](numerics.md).
 
-Singular positive semidefinite projected covariances are not automatically errors; their Gaussian quadratic-form events are evaluated with the specified boundary convention. A materially indefinite covariance, an unbracketed finite cutoff, or unmet required numerical checks must produce the profile's explicit error/status, rather than an apparently successful finite interval. Reaching a computational cap does not prove that a mathematical finite cutoff does not exist.
+Singular positive semidefinite projected covariances are not automatically errors; their Gaussian quadratic-form events are evaluated with the specified boundary convention. The proven no-finite-cutoff case in section 5 receives its specific calibration-degeneracy error before root finding. A materially indefinite covariance, an unbracketed otherwise finite cutoff, or unmet required numerical checks must produce the profile's explicit error/status, rather than an apparently successful finite interval. Reaching a computational cap does not prove that a mathematical finite cutoff does not exist.
 
 Decay rates must have recorded units. If Euclidean conditioning uses $D_{\rm work}=D_{\rm input}/s$, then $c_{\rm input}=c_{\rm work}/s$. The returned scale and distance convention must make this conversion unambiguous. Geographic SCPC rates are inverse fractions of the stated Earth circumference. In either case $K(c)$ and inference are invariant to a common positive change of distance units when rates are transformed consistently.
 

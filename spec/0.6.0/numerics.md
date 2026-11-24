@@ -40,6 +40,23 @@ Do not form an explicit covariance inverse merely to compute a quadratic form.
 Solving once for a reusable factor is permitted. Projector notation does not
 require an n by n projector allocation.
 
+For a retained SPUR contrast with R'1=0, small positive decay must not be
+evaluated by subtracting two nearly constant projected matrices. A stable
+representative of the projected exponential covariance is
+
+$$
+R^\top\left[\frac{\operatorname{expm1}(-c d_{ij})}{2c}\right]_{ij}R
+=-\tfrac12 R^\top[\,d_{ij}\phi(c d_{ij})\,]_{ij}R,
+\qquad \phi(x)=-\operatorname{expm1}(-x)/x,\quad\phi(0)=1.
+$$
+
+It is proportional to R'K(c)R and has the Brownian limit at c=0. Use this
+or equivalent stable arithmetic before trace normalization. The subtraction
+of the constant kernel is valid only for a contrast annihilating constants;
+do not apply it to an unprojected SCPC numerator. At short correlation scales,
+the unscaled kernel can be the more stable representative. Any branch must
+preserve the same covariance shape and pass the stated accuracy checks.
+
 Let epsilon=2^-52. Symmetry and PSD checks MUST be scale-aware. For a p by p
 projected covariance, the default entrywise symmetry allowance is
 32 p epsilon times its largest absolute diagonal scale. A zero scale requires
@@ -71,17 +88,22 @@ The following dimension decisions are part of this profile:
 | Fitted-design estimability | Scale columns safely, use a rank-revealing decomposition, and compare singular values relative to the leading singular value at 1e-10 |
 | Leading spatial eigenvalue eligibility | Require lambda_max>1.6e-11 for SCPC and the normalized Nyström pooled operator; require lambda_max>8 epsilon n for the unit-diameter SPUR Brownian construction |
 | Spatial positive eigenvalues | Retain lambda > 1e-12 lambda_max, provided the leading value is above the applicable construction floor |
-| SCPC eigenvalue-block gap | A block ends only at a gap greater than max(1.6e-11, 1.6e-11 abs(lambda_max)) for the unscaled centered K matrix |
+| SCPC eigenvalue-block gap | A block ends only at a gap greater than max(1.6e-11, 1.6e-11 abs(lambda_max)) for the unscaled centered K matrix, including each local Nyström landmark covariance |
 | Nyström pooled eigenvalue-block gap | The same max(1.6e-11, 1.6e-11 abs(lambda_max)) rule on H_pool=EE' as defined in scpc.md, after each sample has unit Frobenius norm; use its own leading eigenvalue |
 | SPUR eigenvalue-block gap | A block ends only at a gap greater than max(8 epsilon n, 1.6e-11 abs(lambda_max)) for the unit-diameter Brownian construction |
 | Brownian whitening rank | Strict lambda > 1e-10 at unit diameter; defined further in half-life-and-transforms.md |
-| Covariance shape equivalence | Maximum entrywise difference of trace-normalized matrices <=1e-12, after finite positive traces and valid factors are established |
+| Covariance shape equivalence | Frobenius norm of the difference of trace-normalized matrices <=1e-12, after finite positive traces and valid factors are established |
 
 These thresholds are numerical support decisions, not scientific significance
 levels. A user-specified q MUST end at a complete positive block. Automatic
 selection MUST expand a partial eigensolve far enough to determine the retained
 block boundary or return an error. Do not break a numerical tie arbitrarily to
 obtain a requested dimension.
+
+The Frobenius shape comparison is invariant under a common orthogonal change
+of contrast coordinates. An entrywise comparison is not a substitute. Shape
+closeness is a profile decision, not a bound on tail-probability differences
+for ill-conditioned laws.
 
 A partial eigensolve must verify residuals and orthogonality and resolve the
 boundary gap before being accepted. Using a dense solve is an allowed fallback
@@ -123,25 +145,39 @@ rescaling consistently before comparing norms. A materially unresolved
 construction error is a precision error. A constant outcome in a supported
 no-intercept SCPC regression is not rejected merely for being constant.
 
-### 2.2 Canonical orientation and invariance
+The weight-norm check does not replace covariance-specific checks. If a required
+SCPC covariance has exactly positive numerator variance and an identically
+zero denominator block, follow scpc.md's calibration-degeneracy error before
+starting a finite-cutoff solve. Co-location group cancellation can cause this
+even when the weight-norm check passes. Distinguish algebraically established
+zero from a numerically unresolved small variance.
+
+### 2.2 Basis conventions and invariance
 
 SCPC calibrations depend on the retained subspace, not its chosen orthonormal
 orientation. SPUR statistics have the same distribution under orthogonal basis
 rotation, but fixed simulation draws make orientation relevant to realized
 results. **[I]**
 
-Use a canonical lexicographic ordering of canonical coordinates. For a simple
-SPUR eigenvector, orient its sign by the first maximal-magnitude coordinate
-anchor, treating magnitudes within 1e-12 of the maximum as tied. For a tied
-eigenspace, form anchors from its projector in canonical coordinate order,
-using rank-revealing orthogonalization and a deterministic sign rule. A
-complete block must be invariant to the eigensolver's arbitrary rotation.
+Canonical coordinate ordering is used for geometry and landmark sampling.
+Within a fixed implementation and numerical environment, use a deterministic
+basis convention and reproduce seeded calls. No bespoke projector-anchor
+construction or unique orientation of a tied eigenspace is required. Validate
+the complete retained projector, eigen residuals and orthogonality; do not
+use the tested response to orient or select directions. **[D]**
+
+Identical supplied base Gaussian draws compare realized host outputs only when
+their retained bases and coloring conventions agree. For a deliberate basis
+change R_new=R_old O, an exact coupled comparison uses colored contrasts
+G_new=O' G_old. With Cholesky factors, equivalent base draws are
+Z_new=L_new^{-1} O' L_old Z_old, not generally O' Z_old. The map is orthogonal
+for positive-definite covariances. Otherwise assess distributional invariance,
+not identical realized Monte Carlo ranks. **[I]**
 
 Repeated indistinguishable coordinate rows do not create an intrinsic order
-among themselves. Do not claim deterministic individual eigenvectors under
-every unresolved symmetry. Verify the projector and inference, distinguish
-distributional invariance from fixed-draw identity, and report any unresolved
-orientation restriction rather than secretly using outcome values as anchors.
+among themselves. Do not invent persistent row identifiers, report an error
+merely because an eigenbasis orientation is non-unique, or promise unchanged
+fixed-seed ranks under every row permutation/backend change.
 
 ### 2.3 SCPC candidate expansion and landmark sampler
 
@@ -160,20 +196,18 @@ report the limitation instead of splitting it. This bounded search is an
 efficiency heuristic. Geometry, decay limits, meshes and landmark subsets are
 reused throughout expansion.
 
-The default recorded landmark sampler is lcg64389-partial-fisher-yates-v1:
+Sample uniform landmark subsets without replacement using a maintained,
+versioned RNG implementation and its unbiased bounded-integer/subset sampler.
+Do not prescribe the author replication's custom 32-bit LCG or retain a
+legacy-bitstream inference mode. Record generator, sampler, version and seed;
+use default seed 1. A fixed implementation must reproduce its subsets. **[D]**
 
-1. Start with the uint32 seed and the canonical site order [0,...,m-1].
-2. For position i=0,...,ell-1, update state=(64389*state+1) modulo 2^32,
-   set u=state/2^32, choose j=i+floor(u*(m-i)), and swap order[i],order[j].
-3. Take the first ell entries as that subset. Retain the mutated order and
-   generator state for the next subset.
-
-Use the default seed 1, and record any skipped unusable subset. Reconstructing
-the same subsets during q expansion must not consume a different stream.
-When ell=m use the complete-sample shortcut in scpc.md. This versioned sampler
-defines reproducibility of the current profile; its particular bitstream is
-not a paper requirement. A different sampler may be adopted in a new recorded
-profile without preserving a separate historical inference algorithm. **[A, D]**
+Use the canonical site order and retain each selected subset throughout q
+expansion. Subsets may overlap across samples; an unusable subset is reported,
+not silently replaced by an outcome-dependent sample. Reconstructing the same
+subsets must not consume a different stream. When ell=m use the complete-sample
+shortcut in scpc.md. Cross-implementation approximation comparisons must align
+the actual subsets, not merely assume equal seeds imply equal samples.
 
 ## 3. Common decay calibration
 
@@ -184,9 +218,11 @@ $$
 $$
 
 Solve rho(c)=rho_target only when f<rho_target<1 and there is a positive
-distance. The SCPC default is avc=0.03; its public avc domain is additionally
-the strict interval (0.001,0.99). **[D]** An all-co-located geometry or unattainable target is a
-support error, not a reason to change the requested correlation bound.
+distance. The SCPC default is avc=0.03 and its public domain is f<avc<1.
+There is no additional inherited 0.001/0.99 restriction. Precision, rank and
+resource checks determine whether a particular mathematically admissible
+request can be computed. **[D]** An all-co-located geometry or unattainable
+target is a support error, not a reason to change the requested correlation bound.
 
 Evaluate the positive-pair contribution separately near f, and use stable
 exponential differences near correlation one. A safeguarded monotone
@@ -299,7 +335,8 @@ $$
 $$
 
 When delta_min<s, generate 48 log-spaced offsets from delta_min through s,
-retaining values strictly inside the interval and then the endpoint. Add
+retaining offsets in [delta_min,s), then include the endpoint s. Thus the
+smallest offset is retained; it lies strictly inside (0,s). Add
 the 31 linear interior offsets s*i/32 for i=1,...,31 and the endpoint s.
 Convert to correlations by adding f, sort and deduplicate at absolute
 correlation tolerance 1e-13*0.03, and include rho=0.03 exactly. This is a
@@ -325,13 +362,22 @@ representation and its complementary form are the reference approach; a
 validated mathematically equivalent solver is permitted. The solver must
 distinguish strict from inclusive tails for genuine atoms as defined in scpc.md.
 An unsupported atom or numerically unresolved singular ratio requires a
-descriptive error rather than an invalid strict-tail p-value.
+descriptive error rather than an invalid strict-tail p-value. Check the exact
+zero-denominator/positive-numerator case before root finding: its cutoff is
+mathematically infinite, and this profile returns the explicit
+calibration-degeneracy error in scpc.md. It is not a failure to bracket an
+otherwise finite root. A zero numerator and denominator law is undefined.
 
 For ordinary probabilities, the default requested absolute integration accuracy
 is 1e-11. For a tail or complement smaller than 1e-8, request relative accuracy
 1e-8 for that smaller probability; if it lies outside the representable range,
 report the numerical limit instead of inventing a positive floor.
 These are numerical error criteria, not Monte Carlo standard errors.
+The relative criterion applies to the directly evaluated small tail or
+complement. A binary64 public p-value may round to one when its accurately
+computed complement is too small to survive subtraction. Do not claim that
+forming 1-p recovers that complement at the same relative accuracy; retain
+its directly computed value in diagnostics when needed to explain the limit.
 
 The reference adaptive integrator has maximum recursion depth 20. At the cap
 it MUST either have satisfied its declared error criterion or return an
@@ -366,7 +412,9 @@ Exact equality uses the closed-interval/strict-cutoff convention in scpc.md.
 ## 7. Simulations, tuning, and half-life quadrature
 
 The default SPUR inference block has B=100000 independent standard Gaussian
-q-vectors. Diagnostics use a separate block of the same size for tuning.
+q-vectors. Diagnostics use an independent tuning block with its own count
+B_tune, also defaulting to 100000; the counts need not match. Require B>=1
+and B_tune>=19, so the 5% tuning test can have a finite rank cutoff.
 Half-life uses one inference block because its alternative is geometry-only.
 Reuse the same base Gaussian vectors across parameter points and recolor them
 separately by each null covariance's specified Cholesky factor. A radial rescaling
@@ -384,21 +432,30 @@ geometry/design and independent tuning result where applicable. A fixed
 realized draw matrix supports reproducibility; it is not a conditional size
 certificate for every possible realized simulation matrix.
 
-Minimum attainable p is 1/(B+1). Rank/tie and cutoff definitions are in spur.md
+Minimum attainable p is 1/(B+1). This is rank resolution, not probability
+accuracy: a fixed point-null tail near 0.05 has binomial Monte Carlo standard
+error about 0.00069 at B=100000. No such scalar error bar certifies the maximum
+over a composite family or the completeness of a confidence-set search.
+Rank/tie and cutoff definitions are in spur.md
 and half-life-and-transforms.md. Finite-simulation inference is a numerical
 profile in its own right; do not label its p-values exact deterministic Gaussian
 probabilities. Common seeds across different host RNGs do not imply common
 draws.
 
 The ten-node geometry-dependent composite half-life quadrature and complete
-bounded search recipe are defined in half-life-and-transforms.md. That chapter
-owns their constants. This profile retains them because independent convergence
+bounded search recipe are defined in half-life-and-transforms.md, including
+64 quadrature panels and 512 short-scale probe caps. That chapter owns their
+constants. This profile retains them because independent convergence
 checks supported ten-node integration; it does not increase orders or rounds
 without evidence of a material remaining error.
 
-The reference-tuning heuristic is fully defined in spur.md. Failure to reach
-the target is reported with achieved estimated power and status; it must not
-be advertised as final-test power or global optimum.
+The bounded reference-tuning search is fully defined in spur.md. It uses
+unit-trace covariance shapes, a strength parameter in [0,1], exact endpoint
+laws, and the same rank-cutoff helper as inference. There are no type-7
+quantiles, unbounded multiplier searches, author-code starting constants or
+floating-point-underflow stopping rules. Failure to reach the target is
+reported with achieved estimated power and status; it must not be advertised
+as final-test power or global optimum.
 
 ## 8. Efficiency and resource contract
 

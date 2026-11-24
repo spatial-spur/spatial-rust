@@ -114,6 +114,12 @@ z=R^\top My=R^\top y,\qquad
 \Omega_K(c)=R^\top MK(c)MR.
 $$
 
+For every eligible projected covariance define its unit-trace shape
+$H(\Omega)=\Omega/\operatorname{tr}(\Omega)$, and write
+$H_B=H(\Omega_B)$ and $H_K(c)=H(\Omega_K(c))$. Compute positive traces and
+normalize safely. These shapes remove the arbitrary covariance scale from
+the numerical representation as well as from the statistical model. **[D, I]**
+
 The paper scales its eigenvector columns by $\sqrt n$. Consistently using unit
 columns rescales the observation and covariance coordinates without changing
 the ratio or inference. Implementations must compute the covariance of the
@@ -123,10 +129,12 @@ replace that covariance by an unrelated diagonal matrix.
 **[D]** Complete numerical eigenvalue blocks are retained. A requested cutoff
 that splits a block is rejected with the requested $q$ and an actionable
 description of the eligible dimension. Rank thresholds, gap thresholds and
-canonical orientation are fixed by [the numerical profile](numerics.md).
-Canonical orientation serves reproducibility for supplied finite draws; an
-orthogonal change of basis must otherwise transform the observation and every
-covariance consistently.
+the basis policy are fixed by [the numerical profile](numerics.md).
+A deterministic implementation basis serves reproducibility within its
+recorded numerical profile. An orthogonal change of basis must transform the
+observation and every covariance consistently. The profile does not require
+projector-anchor machinery solely to reproduce the same realized finite-draw
+p-value under every row permutation or linear-algebra provider.
 
 ### 2.3 Dimension policy and nonzero responses
 
@@ -156,40 +164,62 @@ preserve the invariances and arithmetic safeguards in [the numerical profile](nu
 
 ## 3. I(1) statistic and parameterization
 
-**[P, A, D]** For a selected finite $c_a>0$, define the reported statistic
+**[D, I]** Parameterize alternative strength by $w\in[0,1]$. In the
+unit-diameter geometry, for $0<w<1$ define
 
 $$
-T_1(z;c_a)
-=\frac{z^\top\Omega_B^{-1}z}
-       {z^\top\Omega_K(c_a)^{-1}z}.
+c(w)=\frac{w}{1-w},\qquad H_{1,a}(w)=H_K(c(w)).
 $$
 
-Reject for large values. Its canonical null is
-$z\sim N(0,\sigma^2\Omega_B)$, $\sigma^2>0$. The alternative used for
-tuning is $N(0,\sigma^2\Omega_K(c_a))$. The common unknown scale is immaterial
-to the statistic. Residual I(1) uses the same definitions with the residual
-$M$, $R$ and $z$.
-
-**[A, I]** The reported normalization follows the author diagnostic software:
-it omits the positive $1/(2c)$ factor from the exponential covariance. If
-$T_{1,\mathrm{paper}}$ is evaluated with the same normalized distances and
-Brownian normalization but with
-$\Omega_{\mathrm{LTU}}(c)=\Omega_K(c)/(2c)$, then
+This is a direct compact parameterization of every positive finite decay.
+It requires no average-correlation root solve at each tuning candidate.
+Define the exact endpoints $H_{1,a}(0)=H_B$ and
+$H_{1,a}(1)=H_K(\infty)$. The weak endpoint is the projected exponential
+shape limit as $c\downarrow0$; it is not the zero contrast covariance
+$M\mathbf1\mathbf1^\top M$. The strong endpoint uses the exact co-location
+covariance, with no finite decay sentinel or hardware-underflow stopping rule.
+For a selected $0<w_a\le1$, define the reported statistic
 
 $$
-T_1=2c_a T_{1,\mathrm{paper}}.
+T_1(z;w_a)
+=\frac{z^\top H_B^{-1}z}
+       {z^\top H_{1,a}(w_a)^{-1}z}.
 $$
 
-Its corresponding critical values scale by the same factor. P-values and
-decisions are unchanged when observation and simulation use one convention
-consistently. Raw statistics under the two conventions are not interchangeable.
+**[P, D]** Reject for large values. Its canonical null is
+$z\sim N(0,\sigma^2 H_B)$, $\sigma^2>0$. The alternative used for tuning
+is $N(0,\sigma^2 H_{1,a}(w_a))$. Because variance scale is unrestricted,
+normalizing these covariances does not change the null or alternative
+experiments. Residual I(1) uses the same definitions with the residual $M$,
+$R$ and $z$.
 
-**[D]** Report the alternative parameter as $c_a$, with kind
-`exponential_decay`. It is the decay multiplying diameter-normalized distance;
-for an absolute diameter $L$, the decay per absolute distance unit is
-$c_a/L$. It is not an estimated persistence parameter of the observed
-response. The tuning selection depends on geometry, the eligible design and
-tuning draws, not on $z$.
+**[A, D, I]** Unit-trace ratios replace the author software's scale-dependent
+reported ratio. For a fixed finite alternative decay $c_a=c(w_a)$,
+
+$$
+T_1
+=\frac{\operatorname{tr}(\Omega_B)}
+        {\operatorname{tr}(\Omega_K(c_a))}\,T_{1,\mathrm{author}}
+=\frac{2c_a\operatorname{tr}(\Omega_B)}
+        {\operatorname{tr}(\Omega_K(c_a))}\,T_{1,\mathrm{paper}}.
+$$
+
+The paper expression here uses
+$\Omega_{\mathrm{LTU}}(c)=\Omega_K(c)/(2c)$ and the same Brownian
+normalization and distances. These are positive, response-independent factors;
+critical values scale identically, preserving ordering, p-values and decisions
+for the same selected alternative and draws. The exact endpoint definitions
+stand on their own; no finite-rate conversion is asserted at $c=\infty$.
+There is no separate legacy-normalization production mode.
+
+**[D]** Report the selected `alternative_strength` $w_a$ with meaning
+`compact_decay`, its achieved average correlation, and $c_a$ with its units,
+using an exact-limit marker when $w_a=1$. A finite $c_a$ multiplies
+diameter-normalized distance;
+for absolute diameter $L$, its decay per absolute distance unit is $c_a/L$.
+These are statistic-tuning parameters, not estimates of the observed response's
+persistence. Selection depends on geometry, the eligible design and tuning
+draws, not on $z$.
 
 ## 4. I(0) statistic and composite null
 
@@ -202,35 +232,42 @@ $c_\star=\infty$. The latter is the adopted attainable-limit extension;
 the solver must not claim to have found a finite rate for an unattainable
 correlation.
 
-Write $\Omega_\star=\Omega_K(c_\star)$. For a selected
-$\gamma_a>0$, define
+Write $H_\star=H_K(c_\star)$. For strength $w\in[0,1]$, define
+$H_{0,a}(w)=(1-w)H_\star+wH_B$. For a selected $0<w_a\le1$, report
 
 $$
-\Omega_a=\Omega_\star+\gamma_a\Omega_B,\qquad
-T_0(z;\gamma_a)
-=\frac{z^\top\Omega_\star^{-1}z}
-       {z^\top\Omega_a^{-1}z}.
+T_0(z;w_a)
+=\frac{z^\top H_\star^{-1}z}
+       {z^\top H_{0,a}(w_a)^{-1}z}.
 $$
 
-**[P, D]** The Brownian addition supplies the alternative shape. The null used
-to tune $\gamma_a$ is the reference $\Omega_\star$; the null family used
-for final inference is wider. The same $T_0$, including its fixed reference
-and selected alternative, must be evaluated under every null covariance. Do
-not retune the statistic at each nuisance point or for each observed response.
+**[P, D]** The Brownian mixture supplies the alternative shape. The weak
+endpoint $w=0$ equals the reference, and $w=1$ is exactly Brownian. The null
+used to tune $w_a$ is the reference $H_\star$; the null family used for final
+inference is wider. The same $T_0$, including its fixed reference and selected
+alternative, must be evaluated under every null covariance. Do not retune the
+statistic at each nuisance point or for each observed response.
 
-**[A, I]** Report the alternative parameter as $\gamma_a$, with kind
-`brownian_covariance_multiplier`. The paper's normalization writes an
-alternative $\Omega_{\mathrm{LTU}}(c_\star)+g_a^2\Omega_B$. For finite
-$c_\star$, the matching code-normalized parameter is
+**[A, D, I]** This bounded strength replaces the author software's unbounded
+covariance multiplier. Writing $\Omega_\star=\Omega_K(c_\star)$, the
+matching author alternative for $0<w_a<1$ is
+$\Omega_\star+\gamma_a\Omega_B$, where
 
 $$
-\gamma_a=2c_\star g_a^2.
+\gamma_a=\frac{w_a}{1-w_a}
+          \frac{\operatorname{tr}(\Omega_\star)}
+               {\operatorname{tr}(\Omega_B)},\qquad
+T_0=(1-w_a)T_{0,\mathrm{author}}.
 $$
 
-Thus the reported parameter is a covariance multiplier, not the paper's
-Brownian standard-deviation amplitude. When $c_\star=\infty$, define
-$\gamma_a$ directly through $\Omega_K(\infty)+\gamma_a\Omega_B$; no
-finite-rate conversion is asserted.
+For finite $c_\star$, the paper's Brownian amplitude satisfies
+$\gamma_a=2c_\star g_a^2$ under its LTU normalization. These maps explain
+provenance; implementations use the bounded mixture directly, without forming
+an overflowing $\gamma_a$ near $w=1$. The positive factor preserves statistic
+ordering for the same alternative. The exact Brownian endpoint needs no finite
+multiplier. Report `alternative_strength` $w_a$ with meaning
+`brownian_mixture_share`; no duplicate author-parameter field or compatibility
+calculation is required.
 
 ### 4.2 Continuous target and adopted numerical family
 
@@ -282,82 +319,89 @@ alone establishes a projected-tail-probability bound.
 
 ### 5.1 What is tuned
 
-**[R, A, D]** Choose an alternative targeting 50% power for a 5% reference-null
-test. Use one independent tuning block of $B$ standard Gaussian directions,
-with default $B=100{,}000$. It has the same column count as the independent
-inference block in §6. Do not use the observed response to choose the
-alternative.
+**[R, D]** Choose an alternative targeting 50% power for a 5% reference-null
+test. Use one independent tuning block of $B_{\rm tune}$ standard Gaussian
+directions, with default $B_{\rm tune}=100{,}000$. Its count may differ from
+the inference count $B$ in §6; equal counts are not a theoretical requirement.
+Require $B_{\rm tune}\ge19$, so the 5% reference rejection threshold is
+attainable. A smaller requested tuning block is an input error explaining that
+minimum. Do not use the observed response to choose the alternative.
 
-For reference covariance $\Omega_0$, candidate $\Omega_a$, and common
-tuning directions $e_b$, form null draws $L_0e_b$ and alternative draws
-$L_ae_b$, where $L_0L_0^\top=\Omega_0$ and
-$L_aL_a^\top=\Omega_a$. For these simulations, use the positive-diagonal
-lower-triangular Cholesky factors in the canonical retained basis. A different
-factorization may implement the same calculation only if it preserves the
-specified colored vectors for supplied draws. Evaluate the candidate's same quadratic-form ratio
-on both sets. The tuning cutoff is the type-7 empirical 95th percentile of the
-null statistics. For ascending values $t_{(1)},\ldots,t_{(B)}$, it uses
-$h=1+0.95(B-1)$ and linear interpolation between adjacent ranks; when
-$B=1$, it equals the sole statistic. The estimated reference power is the
-fraction of alternative statistics **strictly above** that cutoff.
+For reference shape $H_0$, candidate $H_a$, and common tuning directions
+$e_b$, form null draws $L_0e_b$ and alternative draws $L_ae_b$, where
+$L_0L_0^\top=H_0$ and $L_aL_a^\top=H_a$. For these simulations, use the
+positive-diagonal lower-triangular Cholesky factors in the implementation's
+retained basis.
+Equivalent algebra may reuse factors and quadratic forms if it preserves the
+specified colored vectors for supplied draws. Evaluate the candidate's same
+quadratic-form ratio on both sets. The tuning cutoff uses the same rank rule
+as final inference in §6: the $k$-th largest null statistic, with
+$k=\lfloor(B_{\rm tune}+1)/20\rfloor$, calculated by checked integer
+division. The estimated reference power is the fraction of alternative
+statistics **strictly above** that cutoff.
 
-**[A, D]** This quantile is a tuning objective, not the final inference cutoff.
-Final p-values and critical values always use the inclusive-rank rule in §6.
-Retaining a type-7 quantile here does not import the author software's historical
-strict `count/B` rule into final inference.
+**[D]** This reference calculation chooses the statistic; it does not supply
+the final inference draws or replace the final composite-null calibration.
+One rank-cutoff implementation is sufficient for both operations. The author
+software's interpolated type-7 tuning quantile is not retained as a separate
+production convention.
 
-**[D]** For I(1), $\Omega_0=\Omega_B$. For I(0),
-$\Omega_0=\Omega_\star$, even though final I(0) inference protects the
+**[D]** For I(1), $H_0=H_B$. For I(0),
+$H_0=H_\star$, even though final I(0) inference protects the
 larger nuisance family. Consequently, the reported I(0) tuning power is not the
 power of its final composite-null test.
 
-### 5.2 Fixed bounded search
+### 5.2 Bounded strength search
 
-**[A, D]** The adopted Monte Carlo profile uses the following bounded search.
-Each candidate is recorded with its parameter, estimated reference power and
-termination status. The selected alternative must be a successfully evaluated
-candidate; no extrapolated parameter is substituted at a limit.
+**[D]** Both diagnostics use one search on the bounded strength interval.
+The weak limit $w=0$ has an analytically constant statistic and zero strict
+exceedance power. It supplies a lower reference but is never selected as an
+alternative. The search uses at most **20 interior candidates**, including
+$w=1/2$, plus the exact strong endpoint $w=1$:
 
-1. For I(0), start the lower-bracket search at $\gamma=1$. For I(1), first
-   solve rates at correlations $f+(1-f)r$, for
-   $r\in\{0.01,0.5,0.95\}$, and start at the rate for $r=0.95$.
-2. Evaluate and halve the parameter until estimated power is at most 0.5,
-   allowing at most 200 evaluations in this lower-bracket phase. An estimate
-   exactly equal to 0.5 selects that evaluated candidate immediately. Failure
-   to obtain the lower bracket is a clear tuning/calibration error.
-3. If halving was needed, the first upper trial is twice the lower-bracket
-   parameter. Otherwise it is 30 for I(0), or the rate for $r=0.01$ for
-   I(1). Evaluate and double until estimated power is at least 0.5, allowing
-   at most 200 upper-phase evaluations.
-4. In the upper phase, stop at the following limiting-shape condition. For
-   I(0), the maximum absolute entry of the difference between the
-   trace-normalized mixture and trace-normalized Brownian limit must be at
-   most $8\epsilon$, where $\epsilon=2^{-52}$. This stopping tolerance is
-   distinct from the shared covariance-shape equivalence tolerance. For I(1), the inherited
-   endpoint condition is that every positive-distance exponential correlation
-   has rounded to zero. If the target is still unattained at that condition
-   or the upper-phase budget, select the evaluated candidate with the largest
-   estimated reference power. Break equal-power ties by the smaller parameter.
-   Record `target_unattained` and the actual stopping reason.
-5. With a bracket, select the upper candidate immediately if its evaluated
-   power is within 0.01 of 0.5. Otherwise bisect in the parameter, replacing
-   the upper endpoint when estimated power exceeds 0.5 and the lower endpoint
-   when it is below 0.5. Stop at an evaluated power within 0.01 of 0.5, or after
-   20 midpoint evaluations. Select the last evaluated candidate. If the
-   tolerance was not met, record `target_tolerance_not_met` rather than claiming
-   convergence. An exact 0.5 estimate stops immediately.
+1. Evaluate $w=1$ and $w=1/2$. Keep every successfully evaluated positive
+   strength with its estimated reference power.
+2. If any retained power is within 0.01 of 0.5, select the retained candidate
+   closest to 0.5; break ties by the smaller strength.
+3. Otherwise, in the ordered points $0,1/2,1$, find adjacent endpoints with
+   lower power below 0.5 and upper power above 0.5. If no such bracket exists,
+   select the retained positive candidate closest to 0.5 and report
+   `target_unattained`, with reason `no_evaluated_bracket`. This is not a proof
+   that another strength or the population power could not attain the target.
+4. With a bracket, evaluate its arithmetic midpoint. Stop if a retained
+   candidate meets the power tolerance. Otherwise replace the lower endpoint
+   when the midpoint power is below 0.5, or the upper endpoint when it is above
+   0.5. Repeat until the tolerance is met or the 20-interior-candidate budget
+   is exhausted. Select the retained positive candidate closest to the target,
+   again breaking ties by smaller strength. A missed tolerance has status
+   `target_tolerance_not_met`, not a convergence claim.
 
-**[D]** Arithmetic failures, nonfinite parameters and invalid covariance
-factorizations are errors under [the numerical profile](numerics.md), not
-evidence of low power. A step or iteration budget must never be reported as a
-proof that 50% population power is unattainable. The finite-draw power function
-can have steps and simulation variability; this search is an adopted tuning
-heuristic, not a global power optimizer.
+Record the actual evaluated strengths, powers, selected candidate, candidate
+count and stopping reason. The analytic weak endpoint must be identified as
+such; it is not an invented simulation evaluation. The selected alternative
+must be one of the successfully evaluated positive strengths. The exact strong
+endpoint is a permissible selected alternative for either diagnostic.
 
-**[D]** If the reference and candidate shapes coincide at a trial, use the
-constant-statistic, zero strict-exceedance-power convention for that trial;
-it can supply the weak end of a bracket. A weak trial alone does not make the
-entire diagnostic uninformative. The operation-wide rules are in §7.
+**[D]** Covariance shapes close to the weak endpoint must use the stable
+projected-exponential construction in [the numerical profile](numerics.md),
+including `expm1` where needed, before trace normalization. Arithmetic failures,
+invalid factors or unresolved geometry remain errors. Failure to reach a
+preferred reference power after valid evaluations does not invalidate the
+independently calibrated test and is reported as a tuning status.
+
+This is a bounded tuning heuristic, not a proof of monotone power or a global
+optimizer. Finite-draw power can be stepwise, and the chosen exponential shape
+path need not be assumed to have globally monotone power. The old correlation
+anchors, special upper starts, 200-step doubling/halving phases and
+underflow-based endpoint detection are not part of this profile.
+
+**[D]** If the reference and candidate shapes agree within the shared shape
+tolerance at a trial, assign zero strict-exceedance tuning power for that
+trial as a conservative profile convention. Call the statistic algebraically
+constant only under exact proportionality. A weak trial or a proportional
+strong endpoint alone does not establish that all intermediate I(1) shapes
+are uninformative. Apply §7 only to a structurally uninformative I(0) family or
+the finally selected pair.
 
 ### 5.3 Reporting and warnings
 
@@ -368,8 +412,9 @@ name mapping, but 0.6.0 requires neither duplicate fields nor a compatibility
 algorithm. The word “best” must not be interpreted as a continuous optimum or
 final composite-test power.
 
-Report the selected parameter and its kind, target 0.5, reference size 0.05,
-achieved estimate, tuning draw count, number of evaluated candidates and
+Report the selected strength and its diagnostic-specific meaning, target 0.5,
+reference size 0.05, achieved estimate, tuning draw count, number of evaluated
+candidates and
 tuning status. Emit a single low-power advisory per operation when an achieved
 estimate is below 0.45, naming the affected diagnostic. Always expose a missed
 tolerance or budget status even when the estimate is above that warning
@@ -381,18 +426,24 @@ threshold. An uninformative result has its own status and no purported
 ### 6.1 Draw contract and reproducibility
 
 **[D]** The default is Monte Carlo inference with $B=100{,}000$ columns and an
-independent tuning block of the same size. Users may request any positive
-integer $B$ within the shared resource limits. The API reports the inference
-and tuning counts separately; it does not imply that a two-block diagnostic
-uses only $B$ generated columns in total.
+independent tuning block with $B_{\rm tune}=100{,}000$ columns. Users may
+request any positive integer $B$ and any integer $B_{\rm tune}\ge19$ within
+the shared resource limits. Defaults and explicit controls for these counts
+must be documented independently; changing the inference count need not
+change the tuning count. Supplied blocks have $q$ rows but may have different
+column counts. The API reports both actual counts; a diagnostic uses
+$B+B_{\rm tune}$ generated columns in total.
 
 Each block must have independent isotropic standard Gaussian directions, or
 equivalently independent directions uniform on the unit sphere. Both blocks
 must be independent of the observed outcomes, and the inference block must be
 independent of the tuning block. The host RNG/seed policy is fixed in
 [the overview](README.md). Equal seeds in different RNG implementations are not
-a cross-host identity guarantee; supplied identical draw blocks are the parity
-contract.
+a cross-host identity guarantee. Identical supplied blocks support numerical
+parity comparisons when the retained bases and coloring coordinates are also
+aligned. Otherwise orthogonal basis changes preserve the simulation law, not
+necessarily the realized Monte Carlo p-value; compare invariant quantities
+and assess simulation variation as specified in [verification](verification.md).
 
 **[I, D]** Multiplying each column by any nonzero scalar preserves these
 homogeneous ratio calculations. Normalize finite nonzero columns by their
@@ -400,6 +451,11 @@ maximum absolute entry for arithmetic stability. All-zero or nonfinite columns
 are errors. The arithmetic check cannot certify a user-supplied block's
 distribution or independence; supplying arbitrary deterministic columns does
 not inherit the probabilistic finite-simulation guarantee.
+
+Generated tuning and inference blocks must use disjoint draws from the
+declared generator; do not initialize both blocks at the start of the same
+seeded stream. An explicitly documented independent-stream scheme is also
+permitted. **[D]**
 
 **[D]** Reuse the inference block across nuisance values and the tuning block
 across candidate alternatives. The same blocks may be reused across diagnostics
@@ -466,6 +522,16 @@ point-null p-value. No such argument fills an unexamined part of the continuous
 null family. Report Monte Carlo resolution and the numerical calibration status
 separately from claims about the scientific model or nuisance-search coverage.
 
+**[I, D]** Rank resolution $1/(B+1)$ is not a bound on Monte Carlo probability
+error. Conditional on a fixed observed statistic and selected alternative,
+the independent point-null exceedance count has a binomial distribution. A
+tail probability near 0.05 with $B=100{,}000$ has standard error about 0.00069,
+despite a rank step near 0.00001. Report enough information to recover the
+point-null counts and identify the simulation method; do not describe decimal
+resolution as probability accuracy. A standard error at one maximizing mesh
+point is not an uncertainty bound for the composite maximum or the tuning
+search.
+
 ## 7. Uninformative covariance shapes and failures
 
 **[I, D]** A nonzero response can provide no discrimination for the selected
@@ -473,7 +539,7 @@ scale-invariant experiment if its null and alternative covariance shapes are
 proportional, or indistinguishable under the shared shape tolerance. Such a
 case is a valid conservative result: return `pvalue = 1`, all reported critical
 thresholds $+\infty$, and status `uninformative_within_profile`, with a
-reason identifying the shape comparison or anchor check. Do not manufacture
+reason identifying the shape comparison. Do not manufacture
 a tuned 50%-power alternative. If no alternative was selected, report its
 parameter, the raw ratio and `reference_tuning_power` as unavailable, with
 the reason. If a valid alternative was already selected, report its defined
@@ -481,13 +547,13 @@ ratio as uninformative; call the ratio constant only under exact
 proportionality, not merely agreement within a numerical tolerance.
 
 For I(0), test the reference shape against the Brownian shape before tuning:
-proportionality makes every Brownian mixture in this specified alternative
-family uninformative. For I(1), use the three prescribed attainable-correlation
-anchors from §5.2. If all three are indistinguishable from the Brownian null,
-return the conservative uninformative result for this tuning profile. This
-anchor check is not a proof that every covariance at every untested decay is
-proportional. Also apply the uninformative rule if the finally selected pair
-is indistinguishable at the declared tolerance.
+exact proportionality makes every mixture in this specified alternative
+family uninformative; agreement within tolerance invokes the declared
+conservative profile decision. For I(1), run the bounded search. Matching a few
+anchors or the strong endpoint alone is not that proof. Apply the uninformative
+rule to the finally selected pair when it is indistinguishable at the declared
+tolerance. A conservative result for that selected pair is not a conclusion
+about every untested shape.
 
 Validate the response projection, null feasibility and all required arithmetic
 conditions before returning an uninformative result. A reusable geometry-only
@@ -560,8 +626,9 @@ requested/used $q$; validated positive-rank and retained-tie information; and
 whether all positive directions were used. A partial eigensolve may report a
 validated rank lower bound, unknown total rank and unknown all-directions-use
 status; metadata must not force a full decomposition solely to fill those
-fields. Report the raw-statistic normalization,
-p-value, critical thresholds, alternative parameter and its kind,
+fields. Report the unit-trace statistic normalization,
+p-value, critical thresholds, alternative strength and its meaning, the I(1)
+decay/correlation when applicable,
 `reference_tuning_power`, tuning status, numerical calibration status, draw
 counts and reproducibility metadata.
 

@@ -29,7 +29,7 @@ Let the analysis sample contain $n$ observations at locations $s_i$, with
 distance matrix $D$, positive diameter
 $d_{\max}=\max_{i,j}D_{ij}$, and
 $M=I-\mathbf1\mathbf1^\top/n$. Distances, exact co-location, geographic arc
-units, and canonical ordering follow [the common specification](README.md) and
+units, and input ordering follow [the common specification](README.md) and
 [SPUR geometry](spur.md). Define normalized distances $d=D/d_{\max}$ and
 
 $$
@@ -127,6 +127,9 @@ and simulated scores must not change the point-null ranking. [I]
 The public API must provide a point-null operation at any requested
 $h_0\in[0,\infty]$, using the same geometry, quadrature profile, and supplied
 or generated inference draws as the confidence-set operation. The operation
+preserves a supplied finite $h_0$ and evaluates its finite-half-life kernel
+directly; it must not first round $h_0/(1+h_0)$ to one and silently replace
+that request by the infinite-half-life experiment. It
 requires a finite confidence level $0<\mathrm{level}<1$, default 0.95,
 and sets the nominal rejection size to $\alpha=1-\mathrm{level}$.
 An adapter exposing percentages converts once to this normalized binary64
@@ -138,7 +141,7 @@ identify their source and do not fabricate simulation counts. [D]
 
 For a fixed null, generate $Z_b=L_{h_0}\xi_b$, where
 $L_{h_0}$ is the positive-diagonal lower Cholesky factor of the chosen
-positive covariance representative in the canonical retained basis, following
+positive covariance representative in the retained basis used by the operation, following
 the fixed-draw convention in [SPUR](spur.md#62-ranks-cutoffs-and-equality).
 The columns
 $\xi_b$ obey the distribution and independence contract in [SPUR](spur.md).
@@ -220,9 +223,14 @@ Let $d_{\min}$ be the smallest strictly positive normalized inter-site
 distance and let $\nu$ be the smallest positive normal binary64 number.
 Set $a=\max(d_{\min}/32,\nu)$. Starting from $r=2^{-9}$, halve $r$
 until $r\le a$. The panels are $[0,r],[r,2r],[2r,4r],\ldots$, ending
-at 1. Each panel uses the standard **ten-point Gauss–Legendre** nodes and
-positive integration weights transformed to that panel. The weights sum to
-one to numerical accuracy. [D]
+at 1. This profile supports **at most 64 panels**, or 640 mixture nodes.
+Determine the required panel count from geometry before constructing factors
+or simulations. Exceeding the cap is a resource/geometry error reporting
+$d_{\min}$, the sample diameter, the required count and the limit; do not
+merge near locations, clip the scale or substitute the zero-half-life law.
+Each panel uses the standard **ten-point Gauss–Legendre** nodes and positive
+integration weights transformed to that panel. The weights sum to one to
+numerical accuracy. [D]
 
 This preserves the current geometry-aware ten-node policy. The small first
 panel resolves scales below the closest positive separation: for
@@ -233,10 +241,24 @@ uniform bound on angular-mixture error for every projected experiment. [I, D]
 Construct the nodes and weights from geometry only, once per prepared
 operation. Cache their projected covariance factors and determinant terms.
 Use stable factor solves and log accumulation, or an equivalent calculation
-meeting [numerics](numerics.md). A small-decay implementation may project
-$\operatorname{expm1}(-cd)/(2c)$ to avoid subtracting nearly equal constants;
-the projected constant term vanishes. No finite sentinel replaces either
-endpoint law. [I, D]
+meeting [numerics](numerics.md). A finite positive half-life does **not**
+require a representable intermediate decay $c=\log(2)/h$. For short scales,
+evaluate $\exp[-\log(2)d_{ij}/h]$ with $d_{ij}=0$ handled exactly as one;
+a positive ratio too large to represent safely implies an exponential that
+underflows to zero. It does not turn the entire requested covariance into its
+zero-half-life limit. For long scales, a stable projected representative is
+
+$$
+ -\tfrac12 R_q^\top[\,d_{ij}\phi(\log(2)d_{ij}/h)\,]_{ij}R_q,
+ \qquad
+ \phi(x)=\frac{-\operatorname{expm1}(-x)}{x},\quad\phi(0)=1.
+$$
+
+After projection this is algebraically $R_q^\top K(c)R_q/(2c)$; the
+constant term vanishes. Evaluate small ratios and $\phi$ stably, avoiding
+avoidable overflow, cancellation or a $0/0$ operation. An equivalent stable
+kernel is permitted. No finite sentinel replaces either exact endpoint law.
+[I, D]
 
 Independent convergence checks summarized in [verification](verification.md)
 support retaining ten nodes without a further global increase. Those checks
@@ -277,7 +299,10 @@ Construct and sort the union of the following points. [D]
    $i=1,\ldots,255$.
 2. Short-scale points: initialize $h=1/255$; while
    $h>\max(d_{\min}/32,\nu)$, replace $h$ by $2^{-1/8}h$ and
-   insert $h/(1+h)$. There are eight probes per doubling in half-life.
+   insert $h/(1+h)$. There are eight probes per doubling in half-life,
+   with at most **512 generated short-scale probes**. Preflight the count
+   before simulation; a larger requirement is a resource/geometry error,
+   not permission to stop the tail early and report a completed search.
 3. Long-scale points: define
    $$
    h_{\max}=\min\{10^8,\max\{1024,1/(10^{-4}d_{\min})\}\}.
@@ -343,19 +368,32 @@ Construct components from the located acceptance changes. Round a lower
 component endpoint down to the rejected-side lower bracket bound and an upper
 endpoint up to the rejected-side upper bracket bound, thereby including the
 accepted side of each located transition. If zero is accepted, the first
-component starts at zero; if infinity is accepted, the final component is
-unbounded. An empty detected set is reported explicitly. The hull, when
+component starts at zero. Record exact endpoint-test membership separately
+from these outer numerical bounds. In particular, `exact_inf_accepted`
+records acceptance of the exact $h=\infty$ experiment, whereas
+`upper_bound_is_inf` records an infinite numeric enclosure. The two fields
+need not agree. An empty detected set is reported explicitly. The hull, when
 requested, is the smallest enclosing interval of the detected components; it
-is not a replacement for those components. [D]
+is not a replacement for those components or their endpoint-membership flags.
+[D]
 
 For every finite transition return both bounds in $t$, both bounds mapped
 to normalized $h=t/(1-t)$, and both bounds in requested output units.
 Since $dh/dt=(1+h)^2$, $\tau_t$ is not a uniform absolute or relative
-precision claim in half-life units. If a mapped outer bound is infinite
-because numerical rounding reaches $t=1$, record that fact separately
-from acceptance of the exact infinite-half-life point. [I, D]
+precision claim in half-life units. An upper enclosure may be infinite when
+the rejected side is **exactly $t=1$**, or when conversion of a finite
+$t<1$ overflows in the requested output units. Record which occurred. If
+the exact infinite-half-life test rejected, do not print an interval closed
+at infinity or describe the unit-root point as accepted: show the infinite
+outer enclosure with an excluded infinite endpoint and an endpoint-resolution
+note. This limitation concerns the located boundary; it is not evidence that
+all sufficiently large finite half-lives are accepted. The same separation
+applies if an outer lower bracket reaches zero but the exact zero test
+rejected: display an open zero endpoint and preserve that rejected endpoint
+test. An infinite numeric bound or a zero outer bound alone never determines
+endpoint-test membership. [I, D]
 
-The short-tail endpoint, long-tail cap, deduplication tolerance, three
+The quadrature and short-probe caps, long-tail cap, deduplication tolerance, three
 midpoint rounds, and transition precision define this profile's finite search
 budget. There is no additional universal evaluation-count cutoff in the
 method definition. Implementations may reject an operation at resource
@@ -383,8 +421,8 @@ container types without changing their meaning. [D]
 | --- | --- |
 | Sample and geometry | Observation identities, metric, physical units, sample diameter, $q$, and validated positive-rank/block information; a verified lower rank bound with unknown total rank is permitted after a partial eigensolve |
 | Simulation and score | Methods/profile version, requested level, actual draw use and identity metadata, and quadrature policy and actual node count where computed |
-| Set | Every detected component, optional separate hull, explicit empty/full/unbounded state, and whether the set comes from heuristic inversion or a conservative full-domain fallback |
-| Endpoint experiments | Evaluations at exact zero and infinity in a completed heuristic search, or an explicit bypass reason for an analytic/policy full-domain result; an unbounded rounded bracket is distinguished from an accepted infinite endpoint |
+| Set | Every detected component, optional separate hull, explicit empty/full state, numeric outer bounds and endpoint membership, and whether the set comes from heuristic inversion or a conservative full-domain fallback |
+| Endpoint experiments | Evaluations at exact zero and infinity in a completed heuristic search, or an explicit bypass reason for an analytic/policy full-domain result; `exact_inf_accepted` and `upper_bound_is_inf` are separate, with the corresponding zero-endpoint distinction and any resolution limit |
 | Full evaluation mesh | **Every distinct point test actually evaluated**, including initial, tail, midpoint and bisection points: $t$, normalized and requested-unit half-life, actual count/draw count if simulated, p-value and its source, acceptance, stage/round, and evaluation status |
 | Transition brackets | Initial and final bracket endpoints, endpoint acceptance states, stopping tolerance, mapped half-life bounds, and outward-rounding information |
 | Search diagnostics | `heuristic_complete`, structural uninformative, `uninformative_within_profile`, unattainable-rank-level full domain, or `incomplete`; number of rounds/evaluations, applicable limits, and any failure reason |
@@ -481,25 +519,21 @@ equal observation weight; do not silently replace them by a single equally
 weighted location. Fewer than two distinct locations is an eligibility error.
 These co-location and tie choices are package decisions. [P, D]
 
-For binary64 precision $\epsilon$, let $b_i$ denote the input-coordinate
-rounding allowance in distance units. For Euclidean coordinates it is
-$\sqrt{\sum_k\operatorname{ulp}(s_{ik})^2}$. For canonical geographic
-latitude/longitude in degrees, it is
-$r\sqrt{\operatorname{rad}(\operatorname{ulp}(\mathrm{lat}_i))^2+
-[\cos(\operatorname{rad}(\mathrm{lat}_i))\operatorname{rad}(\operatorname{ulp}(\mathrm{lon}_i))]^2}$,
-where $r$ is the sphere radius in the distance units being used.
-Here $\operatorname{ulp}$ is the distance to the adjacent representable
-number in magnitude, using the finite inward neighbor at the largest finite
-number. [D]
-
-Let $j_*$ be a minimum-distance neighboring location; when computed distances
-are exactly equal, choose a representative with largest $b_{j_*}$. A distinct
-location $j$ is included in the numerical tie set when
+For binary64 precision $\epsilon$, a distinct location $j$ is included
+in the numerical tie set when
 
 $$
  D_{ij}-\delta_i
- \le16\epsilon\delta_i+b_i+\max(b_j,b_{j_*}).
+ \le16\epsilon\delta_i.
 $$
+
+Evaluate the comparison without avoidable overflow or loss of a positive
+distance. This small distance-relative allowance covers final metric-rounding
+ties. Supplied coordinates define the geometry; their absolute magnitudes do
+not define an additional measurement-error radius. Thus translating a
+Euclidean sample must not expand its neighbor tie tolerance. Intended ties
+lost when source coordinates were rounded are a data-resolution question and
+are not reconstructed silently. [D]
 
 Apply this tolerance only to the nearest-distance comparison. It must not
 merge distinct coordinates into co-location groups or change the strict ISO
@@ -605,10 +639,12 @@ within-subspace rotation invariances with the distinctions in
 [the common reproducibility contract](README.md#7-result-contract-and-reproducibility).
 Mathematical operators and retained projectors have their stated deterministic
 invariances; angular inference has distributional invariance under a change
-of retained basis. Fixed-draw comparison requires the same canonical basis
-and coloring convention, or a corresponding transformation of the simulated
-realizations. It does not require an unchanged p-value after rotating the basis
-while leaving the draw construction unchanged. Indistinguishable duplicate-row
+of retained basis. Fixed-draw comparison requires the same basis and coloring
+convention, or the corresponding rotation of the **colored simulated
+realizations**. Reusing identical white-normal arrays with a newly oriented
+basis and its new Cholesky factor does not provide that coupling. An
+implementation may use a deterministic basis convention without a shared
+bespoke anchoring algorithm. Indistinguishable duplicate-row
 symmetries are checked through projectors and inference, without inventing
 row identifiers or promising bitwise equality. Include actual likelihood
 fixtures in addition to synthetic search-function tests. [D]
