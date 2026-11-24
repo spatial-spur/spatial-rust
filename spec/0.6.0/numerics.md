@@ -51,11 +51,15 @@ R^\top\left[\frac{\operatorname{expm1}(-c d_{ij})}{2c}\right]_{ij}R
 $$
 
 It is proportional to R'K(c)R and has the Brownian limit at c=0. Use this
-or equivalent stable arithmetic before trace normalization. The subtraction
-of the constant kernel is valid only for a contrast annihilating constants;
-do not apply it to an unprojected SCPC numerator. At short correlation scales,
-the unscaled kernel can be the more stable representative. Any branch must
-preserve the same covariance shape and pass the stated accuracy checks.
+or equivalent stable arithmetic before trace normalization. The same
+constant-annihilating `expm1(-c d)` form MAY be used for the centered SCPC
+basis matrix $H_0=C_mK(c_0)C_m$ (and local centered landmark matrices) when
+$\mathrm{avc}$ is close to one so small decay rates do not lose precision to
+constant cancellation. The subtraction of the constant kernel is valid only
+for a contrast annihilating constants; do not apply it to an unprojected SCPC
+numerator. At short correlation scales, the unscaled kernel can be the more
+stable representative. Any branch must preserve the same covariance shape and
+pass the stated accuracy checks.
 
 Let epsilon=2^-52. Symmetry and PSD checks MUST be scale-aware. For a p by p
 projected covariance, the default entrywise symmetry allowance is
@@ -169,10 +173,13 @@ use the tested response to orient or select directions. **[D]**
 Identical supplied base Gaussian draws compare realized host outputs only when
 their retained bases and coloring conventions agree. For a deliberate basis
 change R_new=R_old O, an exact coupled comparison uses colored contrasts
-G_new=O' G_old. With Cholesky factors, equivalent base draws are
-Z_new=L_new^{-1} O' L_old Z_old, not generally O' Z_old. The map is orthogonal
-for positive-definite covariances. Otherwise assess distributional invariance,
-not identical realized Monte Carlo ranks. **[I]**
+G_new=O' G_old. With Cholesky factors for one covariance Omega, equivalent base
+draws are Z_new=L_new^{-1} O' L_old Z_old, not generally O' Z_old. The map is
+orthogonal for positive-definite covariances, but because Cholesky factors are
+not rotation-equivariant, this map depends on Omega; multi-covariance
+operations (such as the I(0) composite mesh or half-life search) therefore
+require aligned retained bases R for identical finite-draw comparisons, or
+distributional invariance checks otherwise. **[I]**
 
 Repeated indistinguishable coordinate rows do not create an intrinsic order
 among themselves. Do not invent persistent row identifiers, report an error
@@ -246,32 +253,42 @@ MUST be computed once per geometry/parameter request and reused through q
 expansion and coefficient calibration. Nyström uses all full-site pairs for
 these quantities. Streaming pairs saves memory, not their quadratic time.
 
-## 4. SCPC covariance mesh
+## 4. Shared covariance mesh
+
+One bounded decay-rate mesh generator serves both SCPC (at caller $\rho_0=\mathrm{avc}$)
+and I(0) (at $\rho_0=0.03$), solving only the two boundary rates rather than
+running a separate root solve for every interior point. **[D]**
 
 ### 4.1 Interior and finite endpoint
 
-Let c0 solve rho(c0)=avc and let cmax solve
+For an attainable target $\rho_0\in(f,1)$, let $c_0$ solve $\rho(c_0)=\rho_0$
+and let $c_{\max}$ solve
 
 $$
 \rho(c_{\max})=
-f+\min\{(1-f)10^{-5},\ 0.1(\mathrm{avc}-f)\}.
+f+\min\{(1-f)10^{-5},\ 0.1(\rho_0-f)\}.
 $$
 
 cmax is the upper endpoint of the **interior** mesh; it is not the largest
 finite rate evaluated after tail augmentation. Report both cmax and c_tail.
-The formula ensures a lower correlation target than avc when representable;
+The formula ensures a lower correlation target than $\rho_0$ when representable;
 if a strictly positive span cannot be represented, return a clear calibration
 error. **[D]**
 
 The interior set is c0, all c0*1.05^k strictly between c0 and cmax, and cmax.
 Use log-domain generation when necessary and include the actual endpoints
 exactly once. Do not overshoot cmax merely to force a minimum point count.
-The 1.05 spacing is a retained numerical choice, not an accuracy certificate.
+**The interior mesh MUST NOT exceed 1,024 steps** (requiring
+$\lfloor(\log c_{\max}-\log c_0)/\log 1.05\rfloor\le 1{,}024$); if an extreme
+$\rho_0$ near $1$ or multiscale geometry exceeds this budget, fail at preflight
+with an explicit mesh-budget error naming the span and limit rather than
+coarsening silently. The 1.05 spacing is a retained numerical choice, not an
+accuracy certificate.
 
 ### 4.2 Shared bounded tail construction
 
 Let d_min be the smallest strictly positive full-site distance in the same
-working units as c. From any finite starting rate a>0, define
+working units as c. From $a=c_{\max}>0$, define
 
 $$
 b=\max\{a,\ 36/d_{\min}\},\qquad
@@ -290,9 +307,9 @@ progress is lost, return an explicit tail-calibration/resource error naming
 the distance range and required budget. Do not cap b silently, coarsen the
 grid, or switch to an undocumented dense-window fallback.
 
-For SCPC set a=cmax. Add every tail point and K(infinity), using the true
-co-location block covariance. The finite mesh is geometry/avc-dependent and
-MUST NOT depend on the tested response. Use this identical set for:
+Add every tail point and K(infinity), using the true co-location block
+covariance. The finite mesh depends only on geometry and $\rho_0$, and MUST NOT
+depend on the tested response. For SCPC, use this identical set for:
 
 1. Every q candidate's location-only objective.
 2. Every reported location and conditional critical value.
@@ -324,36 +341,23 @@ Promoting a different production mesh requires a new profile record.
 Use the SPUR unit-diameter geometry. If f>0.03 the specified null family is
 infeasible: return the error defined in spur.md. If f=0.03, the null consists
 only of K(infinity); evaluate that exact limit and do not construct a finite
-rate grid or tail. For f<0.03 define s=0.03-f and
+rate grid or tail.
 
-$$
-\delta_{\min}=\max\left\{10^{-12},
-\begin{cases}
-\min(0.0001-f,s),&f<0.0001,\\
-10^{-4}s,&f\ge0.0001.
-\end{cases}\right\}.
-$$
-
-When delta_min<s, generate 48 log-spaced offsets from delta_min through s,
-retaining offsets in [delta_min,s), then include the endpoint s. Thus the
-smallest offset is retained; it lies strictly inside (0,s). Add
-the 31 linear interior offsets s*i/32 for i=1,...,31 and the endpoint s.
-Convert to correlations by adding f, sort and deduplicate at absolute
-correlation tolerance 1e-13*0.03, and include rho=0.03 exactly. This is a
-nominal 48-plus-32 hybrid construction; the actual distinct count varies.
-Do not promise exactly 80 returned covariance points.
-
-Solve the decay rate for each retained correlation. Let a be the largest of
-these finite rates, i.e. the lowest attained correlation. Apply the shared
-tail construction in section 4.2, then include K(infinity). Thus 0.0001 is a
-correlation design target when attainable, not a universal decay rate.
-The bounded tail policy replaces the baseline's wide-plus-dense fallback.
+For f<0.03, construct the I(0) nuisance mesh with the **same §4 bounded decay
+mesh** at $\rho_0=0.03$: solve only $c_{0.03}$ and $c_{\max}$ (for
+$\rho(c_{\max})=f+\min\{(1-f)10^{-5},\ 0.1(0.03-f)\}$), generate the 1.05
+interior mesh (`<= 1,024` steps), append the 1.20 tail up to
+$b=\max(c_{\max},36/d_{\min})$ (`<= 256` steps), and include K(infinity).
+This unifies SCPC and I(0) on one two-solve decay-mesh implementation instead
+of maintaining a separate ~79-solve hybrid correlation grid and deduplication
+pass, while keeping interior rate ratios at most 1.05 and enforcing the same
+preflight budget errors. **[D]**
 
 The identical nuisance set MUST determine I(0) rank p-values and every
 reported cutoff. Tuning has its own fixed reference-null experiment as
 defined in spur.md; the reference tuning null must not be confused with this
-composite inference family. Report the actual correlations/rates, limit,
-maximizing points, and finite_grid status.
+composite inference family. Report the actual rates, achieved average
+correlations, limit, maximizing points, and finite_grid status.
 
 ## 6. Gaussian probabilities and SCPC critical values
 
@@ -443,8 +447,9 @@ probabilities. Common seeds across different host RNGs do not imply common
 draws.
 
 The ten-node geometry-dependent composite half-life quadrature and complete
-bounded search recipe are defined in half-life-and-transforms.md, including
-64 quadrature panels and 512 short-scale probe caps. That chapter owns their
+bounded search recipe are defined in half-life-and-transforms.md, governed by
+the single 64-panel (640-node) short-scale preflight cap (which also bounds
+generated short-scale search probes to at most 441). That chapter owns their
 constants. This profile retains them because independent convergence
 checks supported ten-node integration; it does not increase orders or rounds
 without evidence of a material remaining error.

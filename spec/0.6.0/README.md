@@ -312,7 +312,7 @@ do not dump matrices or suggest arbitrary jitter.
 | Valid nonzero response but no discrimination within the profile/tolerance | Conservative p=1, unbounded cutoffs/full half-life domain, and uninformative_within_profile status as defined by the method chapter |
 | Materially indefinite covariance or failed factorization | Numerical/model error; no diagonal jitter or uninformative substitution |
 | Unsatisfied integration/root accuracy at budget | Accuracy error or explicit incomplete diagnostic result without finalized inference |
-| Incomplete half-life search | Retain evaluated point diagnostics with incomplete status; do not label the result a completed confidence set |
+| Incomplete or interrupted half-life search | Fail with an actionable error, or optionally return an explicit `incomplete` diagnostic result without finalized components or hull; never label it a completed confidence set |
 | Infinite half-life outer bound with rejected exact infinity | Report the unresolved outer bracket and exact endpoint decision separately; an infinite numeric bound is not acceptance of a unit root |
 | Finite-mesh calibration / completed heuristic inversion | Return the specified approximation status and concise interpretation |
 | Large q or unattained reference power target | Return the diagnostic with the achieved quantity and interpretive limit |

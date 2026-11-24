@@ -18,9 +18,9 @@ traceability and rationale record.
 | D07 | Clear errors for invalid/undefined computations; explicit degenerate variance status; conservative uninformative outputs only for valid nonzero contrasts | [D] Avoids silent repairs and distinguishes absence of discrimination from numerical failure | [Error policy](README.md#6-error-warning-and-uninformative-result-policy) |
 | D08 | Retain location-only 5% expected-length q objective and complete blocks; explicitly label bounded candidate search a heuristic | [P, R, A, D] The 5% rule is paper-recommended; global q optimality is not promised | [SCPC](scpc.md) |
 | D09 | Retain inverse-root landmark extension, one Frobenius scale/sample and pooled leading subspace; full-site calibration; maintained unbiased landmark sampler instead of prescribed LCG | [D] Declares the actual approximation; the old bitstream has no mathematical authority | [Nyström](scpc.md), [sampler](numerics.md#23-scpc-candidate-expansion-and-landmark-sampler) |
-| D10 | Adopt finite-mesh calibration explicitly; retain 1.05 SCPC interior, add common bounded 1.2 finite-tail probes plus exact limit; preserve I(0) hybrid interior | [D] Addresses the observed omitted tail without pretending to certify a continuum | [Meshes](numerics.md#4-scpc-covariance-mesh), [I(0)](numerics.md#5-i0-covariance-mesh) |
+| D10 | Adopt one shared bounded decay mesh for both SCPC and I(0): 1.05 interior (<=1,024 steps), 1.20 tail (<=256 steps) and exact limit | [D] Unifies SCPC and I(0) on two boundary root solves instead of maintaining a second ~79-solve hybrid correlation grid; addresses omitted tails without claiming a continuum certificate | [Meshes](numerics.md#4-shared-covariance-mesh), [I(0)](numerics.md#5-i0-covariance-mesh) |
 | D11 | Separate accuracy criteria and units; no silent success at depth/iteration/resource caps; remove silently coarsened tail fallback | [D] Termination is not convergence; rare unsupported numerical ranges get actionable errors | [Numerical profile](numerics.md) |
-| D12 | Use unit-trace SPUR covariance shapes and a bounded alternative-strength parameter; retain paper/author normalization maps only as provenance | [D, I] Removes arbitrary covariance scales and unbounded multiplier bookkeeping without changing fixed-alternative test ordering | [SPUR](spur.md) |
+| D12 | Use unit-trace SPUR covariance shapes and a bounded alternative-strength parameter, anchoring I(1) decay by contrast scale c_ref=n/(2 tr(Omega_B)); retain paper/author normalization maps only as provenance | [D, I] Removes arbitrary covariance scales and unbounded multiplier bookkeeping while keeping multiscale/outlier-absorbed I(1) tuning inside (0,1) | [SPUR](spur.md) |
 | D13 | One bounded strength search with exact limits and shared rank-cutoff helper; report reference_tuning_power and explicit attainment/status | [R, D] Removes type-7 quantiles, separate 200-step searches, three correlation anchors and underflow-based stopping; no final composite power/global optimum claim | [SPUR](spur.md) |
 | D14 | Independent Gaussian tuning/inference blocks with independent counts; inclusive plus-one ranks; exact integer cutoffs; explicit seeded local RNG or supplied draws | [D, I] Drops implicit global-RNG compatibility; aligned bases/coloring are required for identical finite-draw comparisons | [SPUR](spur.md), [simulation profile](numerics.md#7-simulations-tuning-and-half-life-quadrature) |
 | D15 | Exact Brownian basis and endpoint laws; angular-density mixture uniform in half-life; full null domain; components and separately labelled hull | [P, D, I] Preserves the intended mathematical target instead of replication proxies | [Half-life](half-life-and-transforms.md) |
@@ -55,9 +55,11 @@ merely because they can change historical output.
 
 1. **One inference family.** There is no separate undocumented IID floor,
    conditional-p-value shortcut, or legacy critical-value mode.
-2. **One bounded tail generator.** SCPC and I(0) share a log-spaced finite tail
-   and its error semantics. Extreme ranges fail clearly instead of activating
-   a second wide/dense/coarsened algorithm.
+2. **One bounded decay-mesh generator.** SCPC and I(0) share one two-solve
+   1.05-interior (`<=1,024` steps) + 1.20-tail (`<=256` steps) + exact-limit
+   mesh generator and its preflight error semantics. Extreme ranges fail
+   clearly instead of activating a second ~79-solve hybrid grid or coarsened
+   fallback.
 3. **One current specification.** Readers need not resolve old version fragments.
 4. **Per-call reuse.** Geometry, decay limits, factors and point evaluations are
    reused without requiring a persistent caching framework.
@@ -120,13 +122,15 @@ these revisions change the unimplemented target, not an already released
 
 | Review item | Assessment and resolution |
 | --- | --- |
-| Very short half-life work and intermediate decay overflow | Real numerical/resource gap, chiefly an extreme-range case. Bound mixture preparation to 64 panels and short-scale probes to 512; evaluate finite h directly, since overflow of log(2)/h need not invalidate exp(-log(2)d/h). |
+| Very short half-life work and intermediate decay overflow | Real numerical/resource gap, chiefly an extreme-range case. Use one 64-panel (640-node) preflight cap (which also bounds generated short-scale probes to <=441, avoiding a redundant shadowed cap); evaluate finite h directly, since overflow of log(2)/h need not invalidate exp(-log(2)d/h). |
 | SCPC infinite cutoff | Real conditional-calibration degeneracy. Positive numerator with zero denominator variance implies cutoff infinity. Return a specific coefficient error before root finding; no retry loop or q reselection. |
 | Infinite outer half-life bound | Real interpretation issue. Separate exact infinity acceptance from an unresolved outer enclosure, including a bracket ending at exactly rejected t=1. Apply the same principle to zero. |
-| I(0) lowest log-grid offset | Wording defect: include delta_min explicitly in [delta_min,s), with s once. |
+| Incomplete half-life search contract | Simplify host implementation: fail with an actionable error by default on interruption or budget/accuracy failure; optional `incomplete` partial diagnostics remain allowed (`MAY`) without resumable search state. |
+| SCPC `avc` domain alignment & shared I(0) mesh | Align `scpc.md` with `numerics.md` (`f<avc<1`), cap interior mesh steps at 1,024, and unify I(0) onto the same two-solve §4 decay-mesh generator instead of a separate ~79-solve hybrid correlation grid. |
+| I(1) multiscale/outlier compact decay | Anchor $c(w)=c_{\mathrm{ref}}\,w/(1-w)$ with $c_{\mathrm{ref}}=n/(2\operatorname{tr}(\Omega_B))$ so residual outlier-absorbed and multiscale geometries stay inside the 20-candidate search budget instead of stalling at $c\le 2^{20}-1$. |
 | R unseeded RNG behavior | Deliberate support decision: reject implicit seed=NULL and use explicit integer seeds or supplied draws. Do not preserve global-state consumption merely for compatibility. |
 | I(1) underflow-based tuning stop | Removed with the bounded strength search and exact limiting covariance; no dependency on flush-to-zero behavior. |
-| Singleton sign, local Nyström block scale and notation | Clarified locally and in the common notation contract. |
+| Singleton sign, local Nyström block scale, per-covariance Cholesky coupling and notation | Clarified locally and in the common notation contract. |
 
 Two corrections to the review's four-site SCPC example matter for reproducible
 verification. With coordinates (0,0,1,1), the off-diagonal co-location fraction
@@ -138,9 +142,13 @@ the exact fitted-response fixture.
 The extra nearest-neighbor defect is independently algebraic. For locations
 (0,1,17/8), the point at 1 has distances 1 and 9/8. Adding exactly representable
 10^15 to every coordinate leaves those distances unchanged but raises the old
-coordinate-ULP allowance to about 1/4, admitting the farther neighbor. A
-distance-relative 16 epsilon rule preserves the declared geometry. V09 retains
-this regression case.
+coordinate-ULP allowance to about 1/4, admitting the farther neighbor. A pure
+distance-relative `1e-11` rule eliminates coordinate-origin ULP dependence while
+still preserving ties on standard 0.1-degree and 0.01-degree decimal geographic
+grids (whose binary64 degree-difference noise is ~1.4e-13 to 1.4e-12 relative
+to step size, larger than 16 epsilon). Large-origin rotated Euclidean grids
+losing >11 digits of coordinate precision are intentionally not reconstructed.
+V09 retains both the translation and decimal-grid regression cases.
 
 The revised SPUR normalization is an algebraic reparameterization at a fixed
 alternative. Changing the bounded tuning search can select a different

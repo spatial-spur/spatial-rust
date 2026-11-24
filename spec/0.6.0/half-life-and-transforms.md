@@ -38,9 +38,9 @@ $$
 
 Let $R_q$ have unit-norm orthogonal columns spanning the leading eligible
 positive eigenspaces of $B$, and let $z=R_q^\top M y$. Eligibility, complete
-eigenvalue blocks, orientation, and numerical rank follow [SPUR](spur.md) and
-[numerics](numerics.md). The exact centered Brownian covariance implements the
-published target; the author replication's high-correlation exponential proxy
+eigenvalue blocks, basis conventions, and numerical rank follow [SPUR](spur.md)
+and [numerics](numerics.md). The exact centered Brownian covariance implements
+the published target; the author replication's high-correlation exponential proxy
 is not part of this definition. [P, I, D]
 
 The supported half-life operation requires an integer $2\le q<n$, sufficient
@@ -299,10 +299,12 @@ Construct and sort the union of the following points. [D]
    $i=1,\ldots,255$.
 2. Short-scale points: initialize $h=1/255$; while
    $h>\max(d_{\min}/32,\nu)$, replace $h$ by $2^{-1/8}h$ and
-   insert $h/(1+h)$. There are eight probes per doubling in half-life,
-   with at most **512 generated short-scale probes**. Preflight the count
-   before simulation; a larger requirement is a resource/geometry error,
-   not permission to stop the tail early and report a completed search.
+   insert $h/(1+h)$. There are eight probes per doubling in half-life.
+   Because the §4 preflight cap of 64 quadrature panels already requires
+   $r\ge2^{-63}$ ($d_{\min}\ge2^{-58}$), every geometry passing quadrature
+   preflight generates at most **441 short-scale probes**; no separate
+   secondary short-probe cap is needed, and excess short-scale work fails
+   at §4 preflight before simulation.
 3. Long-scale points: define
    $$
    h_{\max}=\min\{10^8,\max\{1024,1/(10^{-4}d_{\min})\}\}.
@@ -393,7 +395,7 @@ rejected: display an open zero endpoint and preserve that rejected endpoint
 test. An infinite numeric bound or a zero outer bound alone never determines
 endpoint-test membership. [I, D]
 
-The quadrature and short-probe caps, long-tail cap, deduplication tolerance, three
+The quadrature panel cap, long-tail cap, deduplication tolerance, three
 midpoint rounds, and transition precision define this profile's finite search
 budget. There is no additional universal evaluation-count cutoff in the
 method definition. Implementations may reject an operation at resource
@@ -403,13 +405,14 @@ must not be returned as an ordinary finalized confidence set. [D]
 
 Completing all prescribed evaluations yields status `heuristic_complete`,
 meaning completion **under this profile**, not completeness of the continuous
-set. If the search is interrupted or cannot finish, valid completed point-null
-results may be returned as partial diagnostics with status `incomplete` and a
-reason. Final confidence components, hull endpoints, and a claim of nominal
-confidence-set completion must be absent in that case. Partial brackets may
-be exposed only as unresolved diagnostics. A caller may continue the same
-prepared operation with the same draws; it may not silently change draws or
-the score while retaining earlier results. [D]
+set. If the search is interrupted, hits a resource limit, or fails an accuracy
+or bracket check, fail with an actionable error by default. A host MAY
+optionally return completed point-null evaluations as partial diagnostics with
+status `incomplete` and a reason, in which case final confidence components,
+hull endpoints, and any claim of nominal confidence-set completion must be
+absent (and partial brackets may be exposed only as unresolved diagnostics).
+No resumable search state is required; callers may always inspect specific
+values with the stateless point-null operation and explicit draws. [D]
 
 ## 6. Half-life result and reuse contract
 
@@ -519,21 +522,23 @@ equal observation weight; do not silently replace them by a single equally
 weighted location. Fewer than two distinct locations is an eligibility error.
 These co-location and tie choices are package decisions. [P, D]
 
-For binary64 precision $\epsilon$, a distinct location $j$ is included
-in the numerical tie set when
+A distinct location $j$ is included in the numerical tie set when
 
 $$
  D_{ij}-\delta_i
- \le16\epsilon\delta_i.
+ \le10^{-11}\delta_i.
 $$
 
 Evaluate the comparison without avoidable overflow or loss of a positive
-distance. This small distance-relative allowance covers final metric-rounding
-ties. Supplied coordinates define the geometry; their absolute magnitudes do
-not define an additional measurement-error radius. Thus translating a
-Euclidean sample must not expand its neighbor tie tolerance. Intended ties
-lost when source coordinates were rounded are a data-resolution question and
-are not reconstructed silently. [D]
+distance. This pure distance-relative tolerance is invariant under exact
+Euclidean coordinate translations (and requires no coordinate-origin ULP
+calculation), while remaining wide enough to preserve ties on ordinary decimal
+geographic grids (such as $0.1^\circ$ and $0.01^\circ$ rasters whose binary64
+degree differences vary by $\sim 10^{-13}$–$10^{-12}$ relative to the grid
+step) and narrow enough to separate distinct near-neighbors. Supplied
+coordinates define the geometry; intended ties lost when source coordinates
+suffered larger precision loss (for example, rotating unit-spaced coordinates
+around an origin of magnitude $10^6$) are not reconstructed silently. [D]
 
 Apply this tolerance only to the nearest-distance comparison. It must not
 merge distinct coordinates into co-location groups or change the strict ISO

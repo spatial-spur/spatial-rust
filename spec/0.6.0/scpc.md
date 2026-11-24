@@ -67,7 +67,7 @@ K(c)_{gh}=\exp(-cD_{gh}),\qquad
 \bar\rho(c)=\frac{1}{m(m-1)}\sum_{g\ne h}K(c)_{gh}.
 $$
 
-The correlation bound is $\mathrm{avc}$, and $c_0$ solves $\bar\rho(c_0)=\mathrm{avc}$. The default and supported numerical interval are fixed in [numerics.md](numerics.md). They are software-domain choices, distinct from the mathematical attainability condition below. The exponential benchmark and calibration by average pairwise correlation follow [Müller and Watson (2022), §2 and Remark 2.3](https://www.princeton.edu/~mwatson/papers/ECTA19465.pdf).
+The correlation bound is $\mathrm{avc}$, and $c_0$ solves $\bar\rho(c_0)=\mathrm{avc}$. The default (`0.03`) and calibration rules are fixed in [numerics.md](numerics.md). The public domain is the mathematical attainability interval below; there is no separate historical `0.001`/`0.99` cutoff. The exponential benchmark and calibration by average pairwise correlation follow [Müller and Watson (2022), §2 and Remark 2.3](https://www.princeton.edu/~mwatson/papers/ECTA19465.pdf).
 
 **[I/D]** Define the co-location matrix $J$ and off-diagonal co-location fraction $f$ by
 
@@ -76,7 +76,7 @@ J_{gh}=\mathbf1\{D_{gh}=0\},\qquad
 f=\frac{1}{m(m-1)}\sum_{g\ne h}J_{gh}.
 $$
 
-For a geometry containing a positive distance, $\bar\rho(c)$ decreases strictly from $1$ to $f$. A finite positive $c_0$ requires $f<\mathrm{avc}<1$, in addition to the supported software interval. Wholly co-located data do not meet this condition. Equality at $f$, and unattainable or numerically unresolved decay targets, must produce the specified calibration error.
+For a geometry containing a positive distance, $\bar\rho(c)$ decreases strictly from $1$ to $f$. A finite positive $c_0$ requires $f<\mathrm{avc}<1$. Wholly co-located data do not meet this condition. Equality at $f$, and unattainable or numerically unresolved decay targets, must produce the specified calibration error.
 
 The exact infinite-decay limit is
 
@@ -275,7 +275,7 @@ This is proportional to expected interval length under a separate Gaussian IID s
 
 Using the 5% selection level and retaining the same $q$ for all reported confidence levels and p-values follows [Müller and Watson (2022), equation (6) and Remark 2.6](https://www.princeton.edu/~mwatson/papers/ECTA19465.pdf). Conditional calibration is performed after this choice. It must not reselect $q$ separately for whichever coefficient or null happens to produce a preferred result.
 
-**[A/D] Finite candidate search.** The initial working prefix is 10 for $\mathrm{avc}\ge0.05$, 20 for $0.01\le\mathrm{avc}<0.05$, 60 for $0.005\le\mathrm{avc}<0.01$, and 120 below 0.005 within the supported domain. Cap this by the available geometry/landmark dimension. Extend a working prefix when it splits a positive eigenvalue block, or when its largest available candidate wins and more positive directions are available. The exact expansion and tie rules are in [numerics.md](numerics.md). A single Nyström sample does not disable expansion.
+**[A/D] Finite candidate search.** The initial working prefix is 10 for $\mathrm{avc}\ge0.05$, 20 for $0.01\le\mathrm{avc}<0.05$, 60 for $0.005\le\mathrm{avc}<0.01$, and 120 for $f<\mathrm{avc}<0.005$. Cap this by the available geometry/landmark dimension. Extend a working prefix when it splits a positive eigenvalue block, or when its largest available candidate wins and more positive directions are available. The exact expansion and tie rules are in [numerics.md](numerics.md). A single Nyström sample does not disable expansion.
 
 Stopping at an interior winner is an inherited computational heuristic, not proof of the global minimum over every positive dimension. A nonoptimal $q$ affects efficiency; calibration must still use the actual chosen weights and common covariance family. This specification does not require an exhaustive search merely to preserve an unwarranted optimality claim.
 

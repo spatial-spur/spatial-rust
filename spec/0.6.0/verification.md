@@ -27,14 +27,13 @@ the implemented-method identifier.
 | Area | Required change relative to the reviewed baseline | Completion evidence |
 | --- | --- | --- |
 | SCPC Student floor and degenerate benchmark | Permit downward bracketing; no undeclared IID addition; detect identically zero benchmark denominator before finite-root search | V01, V02 |
-| SCPC finite tail | Add every prescribed finite-tail point, use common mesh for q/CV/p, expose actual rates/status | V03 |
-| I(0) extreme tail | Replace silently coarsened wide/dense fallback with the declared budget error | V04 |
+| Shared decay mesh (SCPC & I(0)) | Use one two-solve 1.05-interior (<=1,024 steps) + 1.20-tail (<=256 steps) + K(inf) mesh generator for both SCPC and I(0); replace I(0) 79-solve hybrid grid and coarsened tail fallback with declared preflight budget errors | V03, V04 |
 | Probability convergence | Separate depth/iteration exhaustion from satisfied accuracy; error-aware bracket checks | V02, V05 |
 | Decay/root and numerical metadata | Report attained criterion/bracket; no silent looser fallback | V05 |
 | Fitted-state support | Reject unsupported estimator subclasses and missing/misaligned fitted state | V10 |
-| SPUR diagnostics | Unit-trace statistics, bounded alternative strength/search, shared tuning/inference rank cutoff, separate draw counts and reference_tuning_power | V06 |
+| SPUR diagnostics | Unit-trace statistics, contrast-scaled I(1) and mixture I(0) bounded strength search, shared tuning/inference rank cutoff, separate draw counts and reference_tuning_power | V06 |
 | Uninformative cases | Conservative p=1/full-domain outputs for valid nonzero contrasts under the profile; no substitution for failure | V07 |
-| Half-life output and preparation | Direct finite-h kernels; bounded short-scale work; all actual evaluations/counts; endpoint membership separate from outer brackets; heuristic versus incomplete status | V08 |
+| Half-life output and preparation | Direct finite-h kernels; single 64-panel short-scale preflight cap; all actual evaluations/counts; endpoint membership separate from outer brackets; error-by-default failure / optional incomplete diagnostics | V08 |
 | Randomness and basis conventions | Maintained unbiased landmark sampler; seeded local RNG or explicit draws; projector invariance without bespoke eigenvector anchoring | V06, V09, V10 |
 | Nearest neighbors | Replace absolute-coordinate-ULP tie allowances with the distance-relative rule | V09 |
 | Efficiency | Reuse geometry/decay limits through q expansion and geometry/factors/point evaluations within half-life | V11 |
@@ -119,21 +118,21 @@ not transform a finite mesh into a continuum certificate. Do not relabel
 an off-mesh diagnostic as a formal uniform bound. Lower-leverage controls
 help distinguish a targeted fixture from a claim about common default behavior.
 
-### V04. Correlation-floor and tail-budget cases
+### V04. Correlation-floor and mesh-budget cases
 
 Check the mathematical avc domain f<avc<1, including admissible requests
 below 0.001 and above 0.99. Actual precision/rank/resource limitations may
 produce their specific errors; no historical domain cutoff remains.
-For I(0), verify f<0.03, exact
-f=0.03 limit-only inference, and f>0.03 infeasibility. Exercise the .001
-reference-correlation fallback and the .0001 hybrid-grid target fallback.
+For I(0), verify f<0.03, exact f=0.03 limit-only inference, and f>0.03
+infeasibility. Exercise the .001 reference-correlation fallback to K(infinity).
 
-Verify delta_min is included when delta_min<s, including the attainable
-0.0001 target, and s is included once. Check actual distinct mesh counts and endpoint inclusion, not a literal
-"80" count. Check log-domain generation when a direct rate ratio overflows.
-When more than 256 tail intervals or an unrepresentable tail endpoint is
-required, assert the documented error. There must be no silent truncation,
-coarsening, jitter or hidden fallback.
+Verify that both SCPC (at avc) and I(0) (at 0.03) construct the identical
+two-solve §4 decay mesh: endpoints c0 and cmax included once, interior 1.05
+steps, 1.20 tail up to max(cmax,36/d_min), and K(infinity). Check log-domain
+generation when a direct rate ratio overflows. When more than 1,024 interior
+steps, more than 256 tail intervals, or an unrepresentable endpoint is
+required, assert the documented preflight error. There must be no silent
+truncation, coarsening, jitter or hidden fallback.
 
 ### V05. Accuracy and numerical failure
 
@@ -171,8 +170,13 @@ not be confused with the reference cutoff.
 The tuning cutoff uses the same rank helper as inference. Exercise unequal
 B_tune and B, B_tune=19, smaller invalid tuning blocks, exact limiting shapes,
 the bounded search and selected-candidate tie rule. Zero strength is only a
-weak bracket anchor, never a selected nontrivial alternative. Check that a
-missed target is reported without a false convergence or global-power claim.
+weak bracket anchor, never a selected nontrivial alternative. Include the
+outlier-absorbed residual I(1) regression fixture (59 points in [0,1e-6]^2 plus
+1 outlier at (1,0) absorbed by an indicator regressor, q=15) to verify that
+the contrast-scale anchor c_ref=n/(2 tr(Omega_B)) reaches the 50% power target
+cleanly within the 20-interior-candidate budget (rather than stalling at
+c<=2^20-1), and verify uniform site-duplication invariance of c_ref. Check that
+a missed target is reported without a false convergence or global-power claim.
 Compare achieved reference power and workload on ordinary, clustered and
 Chetty geometries before release; numerical order/validity does not by itself
 establish equal power to the older search.
@@ -233,9 +237,10 @@ Include the transition bracket [t_acc,1] with accepted finite endpoint and
 rejected exact infinity: its infinite outer enclosure must not display an
 accepted unit root. Check the analogous rejected zero case and requested-unit
 overflow. Verify exact_inf_accepted independently of upper_bound_is_inf.
-Exercise 64-panel/640-node and 512 short-probe preparation limits; excess work
-must give the declared error before costly simulation, never silently clip
-the supported scale range.
+Exercise the single 64-panel/640-node short-scale preparation cap (triggering
+at d_min<=2^-59, which also bounds generated short-scale probes to <=441);
+excess work must give the declared error before costly simulation, never
+silently clip the supported scale range.
 
 Synthetic narrow gaps/islands may test search mechanics, but must not be cited
 as a proof of actual-likelihood completeness. Check that all component results
@@ -266,11 +271,17 @@ the inherited strict whitening threshold, nearest positive distance and tied
 neighbors, strict ISO boundaries/isolated rows, and cluster demeaning.
 Geographic tests must distinguish arc from chordal distance and verify units.
 
-For the nearest-neighbor regression, use coordinates (0,1,17/8) and
-y=(0,1,4). Adding exactly representable 10^15 to all coordinates preserves
-the query point's distances 1 and 9/8 and its unique nearest neighbor. Its
-transformed value must remain 1. The previous origin-dependent allowance
-would include both neighbors and change it to -1.
+For the nearest-neighbor regressions under the distance-relative 1e-11 rule:
+(a) use coordinates (0,1,17/8) and y=(0,1,4); adding exactly representable
+10^15 to all coordinates preserves the query point's distances 1 and 9/8 and
+its unique nearest neighbor, so its transformed value must remain 1 (the old
+origin-dependent allowance included both neighbors and changed it to -1);
+(b) verify that standard 0.1-degree and 0.01-degree geographic longitude grids
+(e.g., lat=0, lon=-120.0,-119.9,-119.8,-119.7) preserve exact two-sided ties,
+while distinct pairs differing by 1e-6 or 1e-2 remain separated. Large-origin
+rotated Euclidean grids losing >11 digits of coordinate precision (such as the
+archived 0.5.0 UTM 4.5e6 unit-square fixture) are intentionally not
+reconstructed.
 
 ### V10. Host/sample contract and Chetty comparison
 

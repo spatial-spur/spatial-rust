@@ -165,15 +165,24 @@ preserve the invariances and arithmetic safeguards in [the numerical profile](nu
 ## 3. I(1) statistic and parameterization
 
 **[D, I]** Parameterize alternative strength by $w\in[0,1]$. In the
-unit-diameter geometry, for $0<w<1$ define
+unit-diameter geometry, define the contrast-scale reference decay directly from
+the already-constructed projected Brownian matrix $\Omega_B=R^\top B_X R$:
 
 $$
-c(w)=\frac{w}{1-w},\qquad H_{1,a}(w)=H_K(c(w)).
+c_{\mathrm{ref}}=\frac{n}{2\operatorname{tr}(\Omega_B)},
+\qquad
+c(w)=c_{\mathrm{ref}}\,\frac{w}{1-w}\quad(0<w<1),
+\qquad
+H_{1,a}(w)=H_K(c(w)).
 $$
 
-This is a direct compact parameterization of every positive finite decay.
-It requires no average-correlation root solve at each tuning candidate.
-Define the exact endpoints $H_{1,a}(0)=H_B$ and
+This is a direct compact parameterization of every positive finite decay,
+requiring no average-correlation root solve at any tuning candidate. Because
+$\operatorname{tr}(\Omega_B)/n$ is invariant under orthogonal basis changes and
+uniform site duplication, and scales linearly with contrast-subspace distance
+(including residual geometries where $X$ absorbs distant outliers), $c_{\mathrm{ref}}$
+keeps the 50%-power decay well inside the interior of $(0,1)$ across arbitrary
+spatial scales. Define the exact endpoints $H_{1,a}(0)=H_B$ and
 $H_{1,a}(1)=H_K(\infty)$. The weak endpoint is the projected exponential
 shape limit as $c\downarrow0$; it is not the zero contrast covariance
 $M\mathbf1\mathbf1^\top M$. The strong endpoint uses the exact co-location
@@ -213,9 +222,9 @@ stand on their own; no finite-rate conversion is asserted at $c=\infty$.
 There is no separate legacy-normalization production mode.
 
 **[D]** Report the selected `alternative_strength` $w_a$ with meaning
-`compact_decay`, its achieved average correlation, and $c_a$ with its units,
-using an exact-limit marker when $w_a=1$. A finite $c_a$ multiplies
-diameter-normalized distance;
+`scaled_compact_decay`, its contrast-scale anchor $c_{\mathrm{ref}}$, its
+achieved average correlation, and $c_a$ with its units, using an exact-limit
+marker when $w_a=1$. A finite $c_a$ multiplies diameter-normalized distance;
 for absolute diameter $L$, its decay per absolute distance unit is $c_a/L$.
 These are statistic-tuning parameters, not estimates of the observed response's
 persistence. Selection depends on geometry, the eligible design and tuning
@@ -291,13 +300,12 @@ p_0(z)=\sup_{c\in\mathcal C_0}
  P_c\{T_0(Z)\ge T_0(z)\}.
 $$
 
-**[D]** Version 0.6.0's default computation uses the finite nuisance mesh in
-[the numerical profile](numerics.md): the specified hybrid correlation mesh,
-its exact infinite-decay limit, and the specified finite decay-tail probes.
-The value `0.0001` in that construction is an average-correlation reference,
-not a numerical decay rate. Its rate is solved from the current geometry.
-The tail resource limit is a limit on supported computation; exceeding it
-produces an explicit error rather than silently coarsening the mesh.
+**[D]** Version 0.6.0's default computation uses the shared bounded decay mesh
+in [the numerical profile](numerics.md) at $\rho_0=0.03$: the 1.05 interior
+decay mesh from $c_{0.03}$ to $c_{\max}$, its 1.20 finite decay-tail probes up
+to $\max(c_{\max},36/d_{\min})$, and the exact infinite-decay limit $K(\infty)$.
+Exceeding the declared interior or tail budget produces an explicit preflight
+error rather than silently coarsening the mesh.
 
 For the evaluated mesh $\mathcal G_0$, return
 
@@ -635,9 +643,9 @@ counts and reproducibility metadata.
 For I(0), expose the actual evaluated nuisance mesh with its decay parameters,
 achieved average correlations and exact-limit markers, together with the
 point-null p-values and cutoffs. Average correlations alone are insufficient
-to identify tail evaluations that round to the co-location floor. Do not claim
-a fixed returned count of 80 when endpoints, deduplication and tail probes
-change the mesh size. Shared execution and accuracy fields follow
+to identify tail evaluations that round to the co-location floor. The returned
+mesh size varies with geometry and co-location floor; do not claim a fixed
+point count. Shared execution and accuracy fields follow
 [the numerical profile](numerics.md).
 
 ### 9.2 Deterministic quadratic-form evaluation
