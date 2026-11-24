@@ -180,7 +180,44 @@ def test_spur_booleans_nullable_formulas_self_col_and_summaries():
         s_res = spur("y ~ x", d, q=4, nrep=80, **opts)
     assert any("unattainable" in str(w.message) for w in caught)
     assert any("few spatial contrasts" in str(w.message) for w in caught)
-    assert t_res.cvalue_mat.shape == (31, 3)
+    assert t_res.cvalue_mat.shape == (len(t_res.null_grid), 3) and len(t_res.null_grid) >= 75
     assert "P-value:" in t_res.summary() and repr(t_res).startswith("TestResult(")
-    assert "half-life confidence set" in hl_res.summary() and repr(hl_res).startswith("HalfLifeResult(")
+    assert (
+        "half-life confidence set" in hl_res.summary()
+        and repr(hl_res).startswith("HalfLifeResult(")
+    )
     assert "SPUR diagnostic p-values" in s_res.summary()
+    assert s_res.transformed.table.index.tolist() == ["x"]
+
+
+def test_spur_rejects_zero_draws_reports_25_draw_power_and_is_row_permutation_invariant():
+    from spatial_spur import spurtest_i1
+
+    d = pd.DataFrame(
+        {
+            "s": np.linspace(0.0, 1.0, 24),
+            "y": np.sin(np.linspace(0.2, 2.7, 24)),
+        }
+    )
+    opts = dict(coords_euclidean=["s"], q=4, nthreads=1)
+    zeros = np.zeros((4, 25))
+    valid = np.random.default_rng(11).standard_normal((4, 25))
+    for fn in (spurtest_i0, spurtest_i1):
+        with pytest.raises(ValueError, match="positive column norms"):
+            fn("y", d, draws=zeros, tuning_draws=valid, **opts)
+        with pytest.raises(ValueError, match="positive column norms"):
+            fn("y", d, draws=valid, tuning_draws=zeros, **opts)
+
+    tuned = spurtest_i0("y", d, nrep=25, seed=9, **opts)
+    assert tuned.best_tuning_power is not None and np.isfinite(tuned.best_tuning_power)
+
+    rng = np.random.default_rng(31)
+    draws = rng.standard_normal((4, 80))
+    tuning = rng.standard_normal((4, 80))
+    d_rev = d.iloc[::-1].reset_index(drop=True)
+    for fn in (spurtest_i0, spurtest_i1):
+        a = fn("y", d, draws=draws, tuning_draws=tuning, **opts)
+        b = fn("y", d_rev, draws=draws, tuning_draws=tuning, **opts)
+        assert np.isclose(a.lr, b.lr, rtol=0, atol=1e-11)
+        assert np.isclose(a.pvalue, b.pvalue, rtol=0, atol=1e-12)
+        assert np.isclose(a.ha_param, b.ha_param, rtol=0, atol=1e-11)

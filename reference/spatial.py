@@ -53,9 +53,9 @@ def distance_kernels(d, avc):
         return brentq(f, 0, end, xtol=1e-13)
 
     c0 = decay(avc)
-    cmax = decay(floor + 1e-5 * (1 - floor))
-    steps = max(2, int(np.ceil(np.log(cmax / c0) / np.log(1.2))))
-    scales = np.unique(np.r_[c0 * 1.2 ** np.arange(steps), cmax])
+    cmax = decay(floor + min(1e-5 * (1 - floor), 0.1 * (avc - floor)))
+    steps = max(2, int(np.ceil(np.log(cmax / c0) / np.log(1.05))))
+    scales = np.unique(np.r_[c0 * 1.05 ** np.arange(steps), cmax])
     return [np.exp(-rate * d) for rate in scales] + [np.asarray(d == 0, dtype=float)]
 
 

@@ -305,30 +305,28 @@ def align_frame(
     else:
         if fit.host != "pyfixest" or stored is None:
             raise ValueError(
-                "Fitted model has no row labels; supply coords=... in fitted order or fit from a DataFrame"
+                "Fitted model has no row labels; "
+                "supply coords=... in fitted order or fit from a DataFrame"
             )
         if not common:
             raise ValueError("PyFixest needs shared fitted columns or a stable row_id column")
-        if len(data) == len(stored) and _same_rows(stored[common], data[common]):
-            positions = np.arange(len(stored), dtype=np.intp)
-            labels = data.index.copy()
-        else:
-            stored_keys = pd.Index(pd.util.hash_pandas_object(stored[common], index=False))
-            supplied_keys = pd.Index(pd.util.hash_pandas_object(data[common], index=False))
-            if not stored_keys.is_unique:
-                raise ValueError(
-                    "Shared PyFixest rows are not unique; supply row_id=... to match observations"
-                )
-            counts = supplied_keys.value_counts()
-            matched_counts = counts.reindex(stored_keys, fill_value=0)
-            if (matched_counts != 1).any():
-                raise ValueError(
-                    "Shared PyFixest rows do not uniquely match fitted observations; supply row_id=..."
-                )
-            positions = supplied_keys.get_indexer(stored_keys)
-            labels = data.index.take(positions)
-            if not labels.is_unique:
-                labels = pd.RangeIndex(len(positions))
+        stored_keys = pd.Index(pd.util.hash_pandas_object(stored[common], index=False))
+        supplied_keys = pd.Index(pd.util.hash_pandas_object(data[common], index=False))
+        if not stored_keys.is_unique:
+            raise ValueError(
+                "Shared PyFixest rows are not unique; supply row_id=... to match observations"
+            )
+        counts = supplied_keys.value_counts()
+        matched_counts = counts.reindex(stored_keys, fill_value=0)
+        if (matched_counts != 1).any():
+            raise ValueError(
+                "Shared PyFixest rows do not uniquely match fitted observations; "
+                "supply row_id=..."
+            )
+        positions = supplied_keys.get_indexer(stored_keys)
+        labels = data.index.take(positions)
+        if not labels.is_unique:
+            raise ValueError("Supply unique data index labels or row_id for the fitted rows")
     sample = data.iloc[positions]
     if common and stored is not None and not _same_rows(stored[common], sample[common]):
         raise ValueError("Supplied data values disagree with the fitted observations")

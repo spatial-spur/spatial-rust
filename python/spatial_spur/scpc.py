@@ -168,7 +168,9 @@ class SCPCResult:
             values = self.scpcstats[idx, 4:6]
         else:
             if self.scpccvs is None or level not in CV_LEVELS:
-                raise ValueError(f"Confidence level {level} is not available (pass cvs=True for 68%/90%/99%)")
+                raise ValueError(
+                    f"Confidence level {level} is not available (pass cvs=True for 68%/90%/99%)"
+                )
             cv_vals = self.scpccvs[idx, CV_LEVELS[level]]
             coef_vals = self.scpcstats[idx, 0]
             se_vals = self.scpcstats[idx, 1]
@@ -189,7 +191,8 @@ class SCPCResult:
         ]
         if self.method == "nystrom":
             details.append(
-                f"seed={self.large_n_seed}, landmarks={self.landmarks}, samples={self.landmark_samples}"
+                f"seed={self.large_n_seed}, landmarks={self.landmarks}, "
+                f"samples={self.landmark_samples}"
             )
         lines = [", ".join(details), table.to_string()]
         if self.scpccvs is not None:
@@ -197,6 +200,14 @@ class SCPCResult:
             lines.extend(["", "Two-sided critical values:", cvs.to_string()])
         if self.tied:
             lines.extend(["", "Note: Leading spatial eigenvalues exhibited a numerical tie."])
+        if self.inference == "conditional_2sls":
+            lines.extend(
+                [
+                    "",
+                    "Note: Conditional 2SLS intervals rely on strong identification; "
+                    "for weak IV, use scalar Anderson-Rubin testing.",
+                ]
+            )
         return "\n".join(lines)
 
     def __str__(self) -> str:

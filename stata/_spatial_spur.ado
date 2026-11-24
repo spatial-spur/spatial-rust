@@ -28,9 +28,9 @@ program _spatial_spur, rclass
                 exit 199
             }
         }
-        capture plugin call _spatial_spur_plugin, require_spec 0.4.0
+        capture plugin call _spatial_spur_plugin, require_spec 0.5.0
         if _rc {
-            di as error "The installed spatial_spur.plugin does not match specification 0.4.0"
+            di as error "The installed spatial_spur.plugin does not match specification 0.5.0"
             exit 199
         }
         quietly plugin call _spatial_spur_plugin, result_metadata
@@ -100,14 +100,15 @@ program _spatial_spur, rclass
         local seed_str = trim(string(`seed', "%15.0f"))
         local rngstate `"`c(rngstate)'"'
         capture erase `"`file'"'
-        mata: _sp_fd = -1
+        tempname m_fd m_fmt m_draws
+        mata: `m_fd' = -1
         capture noisily {
             quietly set seed `seed_str'
-            mata: _sp_draws = rnormal(`q', `nrep', 0, 1); _sp_fmt = bufio(); bufbyteorder(_sp_fmt, 2); _sp_fd = fopen(st_local("file"), "w"); fbufput(_sp_fmt, _sp_fd, "%8z", rowshape(_sp_draws, 1)); fclose(_sp_fd); _sp_fd = -1; _sp_draws = .
+            mata: `m_draws' = rnormal(`q', `nrep', 0, 1); `m_fmt' = bufio(); bufbyteorder(`m_fmt', 2); `m_fd' = fopen(st_local("file"), "w"); fbufput(`m_fmt', `m_fd', "%8z", rowshape(`m_draws', 1)); fclose(`m_fd'); `m_fd' = -1; `m_draws' = .
         }
         local rc = _rc
-        capture mata: if (_sp_fd >= 0) fclose(_sp_fd)
-        capture mata: mata drop _sp_fd _sp_fmt _sp_draws
+        capture mata: if (`m_fd' >= 0) fclose(`m_fd')
+        capture mata: mata drop `m_fd' `m_fmt' `m_draws'
         quietly set rngstate `rngstate'
         if `rc' exit `rc'
         exit

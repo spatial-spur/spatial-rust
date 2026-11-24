@@ -15,7 +15,7 @@ mod probability;
 use probability::ProbabilityWorkspace;
 
 const MIN_AVC: f64 = 0.00001;
-const CGRID_FAC: f64 = 1.2;
+const CGRID_FAC: f64 = 1.05;
 const EXTRA_CV_LEVELS: [f64; 3] = [0.32, 0.10, 0.01];
 const SCALE_REL_TOL: f64 = 1e-12;
 
@@ -845,7 +845,8 @@ pub fn run_exact_scpc_with_projection(
                     "Target correlation avc={} must exceed the co-located-pair fraction {floor:.6} ({sites} distinct locations).", req.avc
                 )));
                 }
-                let min_avc_eff = floor + (1.0 - floor) * MIN_AVC;
+                let min_avc_eff =
+                    floor + ((1.0 - floor) * MIN_AVC).min(0.1 * (req.avc - floor));
                 let c0 = solve_c0_from_avc(&dist_vec, req.avc)?;
                 let cmax = solve_c0_from_avc(&dist_vec, min_avc_eff)?;
                 (c0, cmax)

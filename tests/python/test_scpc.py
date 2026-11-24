@@ -244,7 +244,10 @@ def test_pyfixest_weighted_and_residualizer_exception_preservation():
     def raise_custom(_matrix):
         raise CustomResidualizerError("boom from callback")
 
-    for err_cls, fn in ((KeyboardInterrupt, raise_interrupt), (CustomResidualizerError, raise_custom)):
+    for err_cls, fn in (
+        (KeyboardInterrupt, raise_interrupt),
+        (CustomResidualizerError, raise_custom),
+    ):
         with pytest.raises(err_cls):
             _native.run_model_scpc(
                 coords,
@@ -276,3 +279,37 @@ def test_native_build_info_matches_package_version():
 
     assert isinstance(sm, object)
     assert _native.build_info()["package_version"] == __version__
+
+
+def test_pyfixest_constant_shared_column_rejected_on_external_frame():
+    pf = pytest.importorskip("pyfixest")
+    d = fixture(36).assign(k=1)
+    m = pf.feols("y ~ x", d)
+    external = d[["a", "b", "k"]].iloc[::-1].reset_index(drop=True)
+    with pytest.raises(ValueError, match="row_id"):
+        scpc(m, external, coords_euclidean=["a", "b"], nthreads=1)
+
+
+def test_nystrom_single_sample_does_not_stop_at_initial_limit():
+    rng = np.random.default_rng(123)
+    d = pd.DataFrame(
+        {
+            "a": rng.uniform(0, 10, 48),
+            "b": rng.uniform(0, 10, 48),
+            "x": rng.normal(size=48),
+        }
+    )
+    d["y"] = 1.0 + 0.5 * d["x"] + rng.normal(scale=0.3, size=48)
+    m = smf.ols("y ~ x", d).fit()
+    out = scpc(
+        m,
+        d,
+        coords_euclidean=["a", "b"],
+        avc=0.005,
+        method="nystrom",
+        landmarks=27,
+        landmark_samples=1,
+        large_n_seed=1,
+        nthreads=1,
+    )
+    assert out.q > 10

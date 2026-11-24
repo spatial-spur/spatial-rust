@@ -10,7 +10,7 @@ use crate::{linalg, CoreError};
 use rayon::prelude::*;
 
 pub(super) const MAX_HALFLIFE_TILE_BYTES: usize = 4 * 1024 * 1024;
-const HALF_LIFE_SEARCH_STEPS: usize = 128;
+const HALF_LIFE_SEARCH_STEPS: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SpurHalfLifeRequest<'a> {
@@ -190,21 +190,31 @@ pub(super) fn accepts_halflife_null(exceedances: usize, nrep: usize, level: f64)
     (nrep - exceedances) as f64 / ((nrep + 1) as f64) < level
 }
 
-/// Composite five-point Gauss--Legendre quadrature for a uniform half-life on [0, 1].
+/// Composite ten-point Gauss--Legendre quadrature for a uniform half-life on [0, 1].
 pub(super) fn half_life_mixture(min_distance: f64) -> (Vec<f64>, Vec<f64>) {
-    let nodes = [
-        -0.906179845938664,
-        -0.5384693101056831,
-        0.0,
-        0.5384693101056831,
-        0.906179845938664,
+    const NODES: [f64; 10] = [
+        -0.9739065285171717,
+        -0.8650633666889844,
+        -0.6794095682990244,
+        -0.4333953941292472,
+        -0.1488743389816312,
+        0.1488743389816312,
+        0.4333953941292472,
+        0.6794095682990244,
+        0.8650633666889844,
+        0.9739065285171717,
     ];
-    let weights = [
-        0.2369268850561891,
-        0.4786286704993665,
-        128.0 / 225.0,
-        0.4786286704993665,
-        0.2369268850561891,
+    const WEIGHTS: [f64; 10] = [
+        0.06667134430868787,
+        0.14945134915058075,
+        0.2190863625159821,
+        0.2692667193099964,
+        0.295524224714753,
+        0.295524224714753,
+        0.2692667193099964,
+        0.2190863625159821,
+        0.14945134915058075,
+        0.06667134430868787,
     ];
     // Below min_distance/32 every positive-distance correlation is at most 2^-32.
     // Use dyadic panels from that scale through one sample diameter.
@@ -218,9 +228,9 @@ pub(super) fn half_life_mixture(min_distance: f64) -> (Vec<f64>, Vec<f64>) {
     let mut left = 0.0;
     while right <= 1.0 {
         let half_width = (right - left) / 2.0;
-        for j in 0..5 {
-            half_lives.push(left + half_width * (1.0 + nodes[j]));
-            masses.push(half_width * weights[j]);
+        for j in 0..10 {
+            half_lives.push(left + half_width * (1.0 + NODES[j]));
+            masses.push(half_width * WEIGHTS[j]);
         }
         left = right;
         right *= 2.0;
@@ -229,17 +239,34 @@ pub(super) fn half_life_mixture(min_distance: f64) -> (Vec<f64>, Vec<f64>) {
 }
 
 pub(super) fn half_life_search_grid(min_distance: f64) -> Vec<f64> {
-    let mut grid = Vec::new();
+    let mut raw = Vec::with_capacity(HALF_LIFE_SEARCH_STEPS + 256);
+    raw.push(0.0);
     let near_zero = (min_distance / 32.0).max(f64::MIN_POSITIVE);
     let mut h = 1.0 / (HALF_LIFE_SEARCH_STEPS - 1) as f64;
-    // Probe four times per doubling of h below the first regular probe.
+    // Probe eight times per doubling of h below the first regular probe (2^(-1/8)).
     while h > near_zero {
-        h *= 0.8408964152537145;
-        grid.push(h / (1.0 + h));
+        h *= 0.9170040432046712;
+        raw.push(h / (1.0 + h));
     }
-    grid.push(0.0);
-    grid.reverse();
-    grid.extend((1..=HALF_LIFE_SEARCH_STEPS).map(|i| i as f64 / HALF_LIFE_SEARCH_STEPS as f64));
+    raw.extend((1..HALF_LIFE_SEARCH_STEPS).map(|i| i as f64 / HALF_LIFE_SEARCH_STEPS as f64));
+    // Probe geometrically toward h -> infinity to capture narrow upper gaps.
+    let h_max = (1.0 / (min_distance.max(f64::MIN_POSITIVE) * 1e-4)).clamp(1024.0, 1e8);
+    let mut h_hi = (HALF_LIFE_SEARCH_STEPS - 1) as f64 * 1.189207115002721;
+    while h_hi < h_max {
+        raw.push(h_hi / (1.0 + h_hi));
+        h_hi *= 1.189207115002721;
+    }
+    raw.push(1.0);
+    raw.sort_by(f64::total_cmp);
+    let mut grid: Vec<f64> = Vec::with_capacity(raw.len());
+    for point in raw {
+        if grid.last().is_none_or(|&prev| point - prev > 1e-13) {
+            grid.push(point);
+        }
+    }
+    if let Some(last) = grid.last_mut() {
+        *last = 1.0;
+    }
     grid
 }
 
@@ -332,6 +359,78 @@ pub(super) fn invert_half_life(
         components.push([from_compact_half_life(start), f64::INFINITY]);
     }
     Ok(components)
+}
+
+pub(super) fn invert_half_life_adaptive(
+    grid: &[f64],
+    initial_counts: &[usize],
+    nrep: usize,
+    level: f64,
+    evaluate_counts: impl Fn(&[f64]) -> Result<Vec<usize>, CoreError>,
+) -> Result<Vec<[f64; 2]>, CoreError> {
+    let mut pts = grid.to_vec();
+    let mut cts = initial_counts.to_vec();
+    let alpha = 1.0 - level;
+    for _round in 0..3 {
+        let pvals: Vec<f64> = cts
+            .iter()
+            .map(|&c| (c + 1) as f64 / (nrep + 1) as f64)
+            .collect();
+        let acc: Vec<bool> = cts
+            .iter()
+            .map(|&c| accepts_halflife_null(c, nrep, level))
+            .collect();
+        let mut midpoints = Vec::new();
+        for i in 0..pts.len().saturating_sub(1) {
+            if pts[i + 1] - pts[i] <= 1e-4 || acc[i] != acc[i + 1] {
+                continue;
+            }
+            let refine = if acc[i] {
+                pvals[i].min(pvals[i + 1]) <= (alpha * 6.0).max(alpha + 0.05)
+                    || (i > 0
+                        && i + 2 < pts.len()
+                        && pvals[i] < pvals[i - 1]
+                        && pvals[i + 1] < pvals[i + 2])
+            } else {
+                pvals[i].max(pvals[i + 1]) >= 0.2 * alpha
+                    || (i > 0
+                        && i + 2 < pts.len()
+                        && pvals[i] > pvals[i - 1]
+                        && pvals[i + 1] > pvals[i + 2])
+            };
+            if refine {
+                midpoints.push(0.5 * (pts[i] + pts[i + 1]));
+            }
+        }
+        if midpoints.is_empty() {
+            break;
+        }
+        let new_counts = evaluate_counts(&midpoints)?;
+        let mut combined: Vec<(f64, usize)> = pts
+            .into_iter()
+            .zip(cts)
+            .chain(midpoints.into_iter().zip(new_counts))
+            .collect();
+        combined.sort_by(|a, b| a.0.total_cmp(&b.0));
+        pts = Vec::with_capacity(combined.len());
+        cts = Vec::with_capacity(combined.len());
+        for (p, c) in combined {
+            if pts.last().is_none_or(|&prev| p - prev > 1e-13) {
+                pts.push(p);
+                cts.push(c);
+            }
+        }
+    }
+    let accepted: Vec<bool> = cts
+        .iter()
+        .map(|&c| accepts_halflife_null(c, nrep, level))
+        .collect();
+    invert_half_life(&pts, &accepted, |points| {
+        Ok(evaluate_counts(points)?
+            .into_iter()
+            .map(|c| accepts_halflife_null(c, nrep, level))
+            .collect())
+    })
 }
 
 pub fn run_spur_halflife(req: &SpurHalfLifeRequest<'_>) -> Result<SpurHalfLifeOutput, CoreError> {
@@ -659,16 +758,9 @@ pub fn run_spur_halflife(req: &SpurHalfLifeRequest<'_>) -> Result<SpurHalfLifeOu
             }
         };
         let counts = evaluate(&om_ho)?;
-        let accepted: Vec<_> = counts
-            .iter()
-            .map(|&count| accepts_halflife_null(count, nrep, req.level))
-            .collect();
-        let components = invert_half_life(&grid, &accepted, |points| {
+        let components = invert_half_life_adaptive(&grid, &counts, nrep, req.level, |points| {
             let omegas = half_life_covariances(&geom, &mr, q, points)?;
-            Ok(evaluate(&omegas)?
-                .into_iter()
-                .map(|count| accepts_halflife_null(count, nrep, req.level))
-                .collect())
+            evaluate(&omegas)
         })?;
         let ci_lower = components.first().map_or(f64::NAN, |interval| interval[0]);
         let ci_upper = components.last().map_or(f64::NAN, |interval| interval[1]);

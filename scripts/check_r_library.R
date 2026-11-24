@@ -37,4 +37,18 @@ for (pkg in packages) {
          "). First symbols: ", paste(head(actual, 10L), collapse = ", "))
   }
   message(pkg, " exports only ", expected)
+  os <- Sys.info()[["sysname"]]
+  if (os %in% c("Darwin", "Linux")) {
+    flags <- if (os == "Darwin") "-u" else c("-D", "-u")
+    undef <- system2("nm", c(flags, shQuote(path)), stdout = TRUE)
+    if (!is.null(attr(undef, "status"))) stop("Could not inspect undefined symbols of ", path)
+    if (os == "Darwin") undef <- sub("^_", "", trimws(undef))
+    else undef <- trimws(sub("^[[:space:]]*U[[:space:]]+", "", grep("^[[:space:]]*U[[:space:]]+", undef, value = TRUE)))
+    banned <- c("BODY", "CLOENV", "ENCLOS", "FORMALS", "R_BaseNamespace", "R_GetCurrentEnv", "R_MakeUnwindCont")
+    found <- intersect(banned, undef)
+    if (length(found)) {
+      stop(path, " imports non-API R symbols: ", paste(found, collapse = ", "))
+    }
+    message(pkg, " imports zero forbidden R non-API symbols")
+  }
 }

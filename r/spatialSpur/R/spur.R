@@ -220,26 +220,60 @@ print.spatial_spur_halflife <- function(x, ...) {
   invisible(x)
 }
 
-.transform_columns <- function(formula, data) {
-  if (!inherits(formula, "formula")) {
-    return(formula)
-  }
-  if (.has_offset(formula, data)) {
-    stop("SPUR transformation does not support offsets", call. = FALSE)
-  }
-  lhs_cols <- character()
-  if (length(formula) == 3L) {
-    lhs <- formula[[2L]]
-    if (!is.symbol(lhs)) {
-      stop("spurtransform accepts plain variable names in data", call. = FALSE)
+.transform_inputs <- function(formula, data) {
+  if (inherits(formula, "formula") ||
+      (is.character(formula) && length(formula) == 1L && grepl("~", formula, fixed = TRUE))) {
+    f <- tryCatch(stats::as.formula(formula), error = function(e) {
+      stop("Invalid SPUR transformation formula: ", conditionMessage(e), call. = FALSE)
+    })
+    if (.has_offset(f, data)) {
+      stop("SPUR transformation does not support offsets", call. = FALSE)
     }
-    lhs_cols <- as.character(lhs)
+    tt <- stats::terms(f, data = data)
+    mf <- stats::model.frame(tt, data = data, na.action = stats::na.pass)
+    columns <- character()
+    cols <- list()
+    if (attr(tt, "response") == 1L) {
+      lhs_name <- paste(deparse(f[[2L]]), collapse = "")
+      columns <- c(columns, lhs_name)
+      cols[[lhs_name]] <- mf[[1L]]
+    }
+    for (lbl in attr(tt, "term.labels")) {
+      columns <- c(columns, lbl)
+      cols[[lbl]] <- mf[[lbl]]
+    }
+    if (length(columns) == 0L) {
+      stop("Supply at least one response variable to transform", call. = FALSE)
+    }
+    if (anyDuplicated(columns)) {
+      stop("Supply distinct response columns", call. = FALSE)
+    }
+    values <- lapply(columns, function(name) {
+      v <- cols[[name]]
+      if (!is.numeric(v) || !is.null(dim(v))) {
+        stop("Response '", name, "' must be numeric", call. = FALSE)
+      }
+      as.double(v)
+    })
+    y <- do.call(cbind, values)
+    colnames(y) <- columns
+    return(list(columns = columns, y = y))
   }
-  rhs_terms <- attr(stats::terms(formula, data = data), "term.labels")
-  if (any(!rhs_terms %in% names(data)) || any(!lhs_cols %in% names(data))) {
-    stop("spurtransform accepts plain variable names in data", call. = FALSE)
+  columns <- formula
+  if (!is.character(columns) || length(columns) == 0L || anyNA(columns) ||
+      any(!nzchar(columns)) || anyDuplicated(columns)) {
+    stop("Supply distinct response columns", call. = FALSE)
   }
-  c(lhs_cols, rhs_terms)
+  values <- lapply(columns, function(name) {
+    v <- data[[name]]
+    if (!is.numeric(v) || !is.null(dim(v))) {
+      stop("Response '", name, "' must name a numeric column", call. = FALSE)
+    }
+    as.double(v)
+  })
+  y <- do.call(cbind, values)
+  colnames(y) <- columns
+  list(columns = columns, y = y)
 }
 
 spurtransform <- function(formula, data, lon = NULL, lat = NULL, coords_euclidean = NULL,
@@ -248,10 +282,10 @@ spurtransform <- function(formula, data, lon = NULL, lat = NULL, coords_euclidea
   .require_data_frame(data)
   replace <- .scalar_logical(replace, "replace")
   execution <- .execution(backend, nthreads)
-  columns <- .transform_columns(formula, data)
-  if (!is.character(columns) || length(columns) == 0L || anyNA(columns) ||
-      any(!nzchar(columns)) || anyDuplicated(columns) ||
-      !is.character(prefix) || length(prefix) != 1L || is.na(prefix) || !nzchar(prefix)) {
+  parsed <- .transform_inputs(formula, data)
+  columns <- parsed$columns
+  y_all <- parsed$y
+  if (!is.character(prefix) || length(prefix) != 1L || is.na(prefix) || !nzchar(prefix)) {
     stop("Supply distinct response columns and a nonempty output prefix", call. = FALSE)
   }
   outputs <- paste0(prefix, columns)
@@ -274,22 +308,45 @@ spurtransform <- function(formula, data, lon = NULL, lat = NULL, coords_euclidea
     }
   }
   if (!is.null(radius)) radius <- .scalar_double(radius, "radius", gt = 0)
-  y <- do.call(cbind, lapply(columns, function(column) .response(data, column)))
+  complete <- apply(is.finite(y_all), 1L, all)
   coords <- groups <- NULL
   geographic <- !is.null(lon) && is.null(clustvar)
   if (is.null(clustvar)) {
-    coords <- .spur_coords(data, lon, lat, coords_euclidean)
+    coord_cols <- .coordinate_columns(lon, lat, coords_euclidean)
+    coord_vecs <- lapply(coord_cols, function(name) {
+      col <- data[[name]]
+      if (!is.numeric(col) || !is.null(dim(col))) {
+        stop("Coordinate column '", name, "' must be numeric", call. = FALSE)
+      }
+      as.double(col)
+    })
+    for (v in coord_vecs) complete <- complete & is.finite(v)
+    if (sum(complete) < 2L) {
+      stop("SPUR transformation requires at least 2 complete observations", call. = FALSE)
+    }
+    coords <- .canonical_coordinates(
+      do.call(cbind, lapply(coord_vecs, function(v) v[complete])),
+      geographic
+    )
   } else {
     labels <- data[[clustvar]]
-    if (is.null(labels) || anyNA(labels)) {
-      stop("clustvar must name a column of nonmissing site labels", call. = FALSE)
+    if (is.null(labels)) {
+      stop("clustvar must name a column of site labels", call. = FALSE)
     }
-    groups <- match(labels, unique(labels)) - 1L
+    complete <- complete & !is.na(labels)
+    if (sum(complete) < 1L) {
+      stop("Cluster transformation requires at least 1 complete observation", call. = FALSE)
+    }
+    kept_labels <- labels[complete]
+    groups <- match(kept_labels, unique(kept_labels)) - 1L
   }
+  y <- y_all[complete, , drop = FALSE]
   if (!is.null(radius)) radius <- radius / if (geographic) execution$earth_circumference_m else 1
-  transformed <- .handle_native_result(.Call(wrap__rust_run_spur_transform, transformation, nrow(data),
+  transformed <- .handle_native_result(.Call(wrap__rust_run_spur_transform, transformation, sum(complete),
     y, coords, geographic, radius, groups, execution$nthreads_requested))$transformed
-  data[outputs] <- as.data.frame(transformed)
+  out_mat <- matrix(NA_real_, nrow = nrow(data), ncol = length(columns))
+  out_mat[complete, ] <- transformed
+  data[outputs] <- as.data.frame(out_mat)
   data
 }
 
@@ -316,11 +373,11 @@ spur <- function(formula, data, lon = NULL, lat = NULL, coords_euclidean = NULL,
     .diagnostic(out[[type]], type, rownames(fit$sample), sim$simulation, geographic, execution)
   }), c("i0", "i1", "i0resid", "i1resid"))
   .warn_spur_inference(q, sim$simulation$inference_draws, diagnostics)
-  transformed <- fit$x
-  transformed[, -intercept] <- out$transformed_vars[, -1L, drop = FALSE]
-  transformed_fit <- stats::lm.fit(transformed, out$transformed_vars[, 1L])
-  transformed_fit$x <- transformed
-  transformed_fit$terms <- fit$model$terms
+  transformed_x <- out$transformed_vars[, -1L, drop = FALSE]
+  colnames(transformed_x) <- colnames(fit$x)[-intercept]
+  rownames(transformed_x) <- rownames(fit$sample)
+  transformed_fit <- stats::lm.fit(transformed_x, out$transformed_vars[, 1L])
+  transformed_fit$x <- transformed_x
   class(transformed_fit) <- "lm"
   levels <- scpc(fit$model, coords = coords, geographic = geographic, avc = avc,
     uncond = uncond, cvs = cvs, backend = backend, nthreads = nthreads,

@@ -10,5 +10,4 @@ name = "spatial_r"
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-extendr-api = { version = "0.7", features = ["result_condition"] }
 spatial-core = { path = "../spatial-core" }

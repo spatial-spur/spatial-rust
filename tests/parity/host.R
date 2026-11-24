@@ -21,10 +21,13 @@ fit_rows <- function(fit, phase, case) {
 }
 cl <- read.csv("clustered.csv")
 cl_fit <- do.call(scpc, c(list(lm(y ~ x, cl), cl, cluster = "cl"), geo))
+ny_fit <- do.call(scpc, c(list(lm(y ~ x + x2, d), d, method = "nystrom",
+                               landmarks = 40L, landmark_samples = 4L, large_n_seed = 7L), geo))
 fits <- list(
   fit_rows(p$levels, "levels", "common"),
   fit_rows(p$transformed, "adjusted", "common"),
-  fit_rows(cl_fit, "levels", "clustered")
+  fit_rows(cl_fit, "levels", "clustered"),
+  fit_rows(ny_fit, "levels", "nystrom_geo")
 )
 cv_rows <- function(fit, phase) {
   m <- fit$scpccvs

@@ -99,6 +99,7 @@ pub fn run_scpc(args: &[&str]) -> Result<(), String> {
     )
     .map_err(format_core_error)?;
     let estimates = read_matrix(estimates, 1, p)?;
+    verify_normal_equations(&scores, &residuals, &design.x, &estimates, n_obs, p)?;
     let output = run_fitted_scpc(
         ScpcPreparation {
             n_sites,
@@ -163,4 +164,35 @@ fn write_f64(path: &str, values: &[f64]) -> std::io::Result<()> {
         writer.write_all(&value.to_le_bytes())?;
     }
     writer.flush()
+}
+
+/// Confirm the supplied observations still satisfy `direction' * u == 0`.
+pub(crate) fn verify_normal_equations(
+    scores: &[f64],
+    residuals: &[f64],
+    design_x: &[f64],
+    estimates: &[f64],
+    n_obs: usize,
+    p: usize,
+) -> Result<(), String> {
+    let y_hat_max = (0..n_obs)
+        .map(|i| {
+            (0..p)
+                .map(|j| design_x[i * p + j] * estimates[j])
+                .sum::<f64>()
+                .abs()
+        })
+        .fold(0.0_f64, f64::max);
+    let u_max = residuals.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    if u_max <= 1e-11 * y_hat_max.max(1.0) {
+        return Ok(());
+    }
+    for j in 0..p {
+        let sum = (0..n_obs).map(|i| scores[i * p + j]).sum::<f64>();
+        let l1 = (0..n_obs).map(|i| scores[i * p + j].abs()).sum::<f64>();
+        if l1 > 0.0 && sum.abs() > 1e-6 * l1 {
+            return Err("current observations no longer satisfy the fitted normal equations".into());
+        }
+    }
+    Ok(())
 }

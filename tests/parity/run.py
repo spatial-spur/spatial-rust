@@ -42,7 +42,15 @@ def common_inputs(directory, full_chetty):
     half_normals = rng.standard_normal((6, 400)).astype("<f8")
     normals.tofile(directory / "diagnostics.bin")
     half_normals.tofile(directory / "halflife.bin")
-    p = spur("y ~ x + x2", common, q=6, draws=normals[:6], tuning_draws=normals[6:], cvs=True, **GEO)
+    p = spur(
+        "y ~ x + x2",
+        common,
+        q=6,
+        draws=normals[:6],
+        tuning_draws=normals[6:],
+        cvs=True,
+        **GEO,
+    )
     half = spurhalflife("y", common, q=6, draws=half_normals, normdist=True, **GEO)
     half_raw = spurhalflife("y", common, q=6, draws=half_normals, normdist=False, **GEO)
     diagnostic = pd.DataFrame(
@@ -53,10 +61,16 @@ def common_inputs(directory, full_chetty):
         [
             pd.DataFrame(
                 p.levels.scpccvs, columns=["cv32", "cv10", "cv05", "cv01"]
-            ).assign(stage="levels", term=[("_cons" if n == "Intercept" else n) for n in p.levels.coef_names]),
+            ).assign(
+                stage="levels",
+                term=[("_cons" if n == "Intercept" else n) for n in p.levels.coef_names],
+            ),
             pd.DataFrame(
                 p.transformed.scpccvs, columns=["cv32", "cv10", "cv05", "cv01"]
-            ).assign(stage="adjusted", term=[("_cons" if n == "Intercept" else n) for n in p.levels.coef_names]),
+            ).assign(
+                stage="adjusted",
+                term=[("_cons" if n == "Intercept" else n) for n in p.transformed.coef_names],
+            ),
         ],
         ignore_index=True,
     )
@@ -79,14 +93,33 @@ def common_inputs(directory, full_chetty):
     cl_summary = summary(cl_fit, "clustered", "levels")
     cl_summary["term"] = ["_cons" if t == "const" else t for t in cl_summary["term"]]
 
+    ny_fit = scpc(
+        sm.OLS(common.y, sm.add_constant(common[["x", "x2"]])).fit(),
+        common,
+        method="nystrom",
+        landmarks=40,
+        landmark_samples=4,
+        large_n_seed=7,
+        **GEO,
+    )
+    ny_summary = summary(ny_fit, "nystrom_geo", "levels")
+    ny_summary["term"] = ["_cons" if t == "const" else t for t in ny_summary["term"]]
+
     nn_tr = spurtransform("y", common, transformation="nn", **GEO)["h_y"].to_numpy()
-    iso_tr = spurtransform("y", common, transformation="iso", radius=500000.0, **GEO)["h_y"].to_numpy()
+    iso_tr = spurtransform("y", common, transformation="iso", radius=500000.0, **GEO)[
+        "h_y"
+    ].to_numpy()
     cl_tr = spurtransform(
         "y", clustered, transformation="cluster", clustvar="cl", nthreads=1, backend="rust"
     )["h_y"].to_numpy()
     transforms = (nn_tr, iso_tr, cl_tr)
 
-    fits = [summary(p.levels, "common", "levels"), summary(p.transformed, "common", "adjusted"), cl_summary]
+    fits = [
+        summary(p.levels, "common", "levels"),
+        summary(p.transformed, "common", "adjusted"),
+        cl_summary,
+        ny_summary,
+    ]
     if full_chetty:
         cases = []
         for name in TERMS:
@@ -119,9 +152,10 @@ def historical(fits, path):
     archive = json.loads(path.read_text())
     previous = json.loads((ARCHIVES / "chetty_0_3_9.json").read_text())
     historical = {}
+    chetty_cases = [name.lower() for name in archive["reg_names"]]
     for stage, name in (("levels", "ols"), ("adjusted", "fgls")):
-        actual = fits.loc[(fits.stage == stage) & (fits.case != "common")].set_index("case")
-        actual = actual.loc[[name.lower() for name in archive["reg_names"]]]
+        actual = fits.loc[(fits.stage == stage) & (fits.case.isin(chetty_cases))].set_index("case")
+        actual = actual.loc[chetty_cases]
         original = archive[name]
         np.testing.assert_allclose(actual.coef, original["beta"], atol=2e-10)
         np.testing.assert_array_equal(actual.q, original["q"])
@@ -217,7 +251,9 @@ def main():
             matrix[:, 1] = np.nan_to_num(matrix[:, 1], nan=np.inf, posinf=np.inf)
             matrix_raw[:, 1] = np.nan_to_num(matrix_raw[:, 1], nan=np.inf, posinf=np.inf)
         np.testing.assert_allclose(half, matrix, rtol=2e-9, atol=1e-10, err_msg=lang)
-        np.testing.assert_allclose(half_raw, matrix_raw, rtol=2e-9, atol=1e-10, err_msg=f"{lang}-raw")
+        np.testing.assert_allclose(
+            half_raw, matrix_raw, rtol=2e-9, atol=1e-10, err_msg=f"{lang}-raw"
+        )
         nn_other = read(work / f"tr_nn_{lang}.{extension}")["h_y"].to_numpy()
         iso_other = read(work / f"tr_iso_{lang}.{extension}")["h_y"].to_numpy()
         cl_other = read(work / f"tr_cl_{lang}.{extension}")["h_y"].to_numpy()

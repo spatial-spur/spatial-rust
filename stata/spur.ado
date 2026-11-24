@@ -66,21 +66,20 @@ program spur, rclass sortpreserve
     matrix `cv_levels' = e(critical_95)
     if "`cvs'" != "" matrix `extra_levels' = e(scpccvs)
     local levels_q = e(q)
-    quietly regress `source' if `touse'
+    quietly regress `source' if `touse', nocons
     quietly scpc, `scpc_opts'
     matrix `adjusted' = e(scpcstats)
     matrix `cv_adjusted' = e(critical_95)
     if "`cvs'" != "" matrix `extra_adjusted' = e(scpccvs)
     local transformed_q = e(q)
-    local levels_names : rownames `levels'
-    if rowsof(`adjusted') != `: word count `levels_names'' {
+    if rowsof(`adjusted') != `: word count `x'' {
         _estimates unhold `prior'
         di as error "Transformed regressors became collinear after spatial transformation"
         exit 198
     }
-    matrix rownames `adjusted' = `levels_names'
-    matrix rownames `cv_adjusted' = `levels_names'
-    if "`cvs'" != "" matrix rownames `extra_adjusted' = `levels_names'
+    matrix rownames `adjusted' = `x'
+    matrix rownames `cv_adjusted' = `x'
+    if "`cvs'" != "" matrix rownames `extra_adjusted' = `x'
 
     matrix rownames `diagnostics' = i0 i1 i0resid i1resid
     matrix colnames `diagnostics' = statistic p ha_param
@@ -104,7 +103,7 @@ program spur, rclass sortpreserve
         return scalar `test'_teststat = `diagnostics'[`row',1]
         return scalar `test'_ha_param = `diagnostics'[`row',3]
     }
-    di as text "Note: LBM-GLS transformed variables are weighted-centered rather than untransformed."
+    di as text "Note: LBM-GLS transformed variables are weighted-centered, so transformed SCPC is fitted without an intercept."
     return matrix diagnostics = `diagnostics'
     return matrix diagnostic_info = `info'
     return matrix diagnostic_cutoffs = `cuts'

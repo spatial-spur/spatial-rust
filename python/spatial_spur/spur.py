@@ -223,7 +223,8 @@ def _warn_spur_inference(
     if q >= 40 or all_directions:
         scope = " uses all positive directions and" if all_directions else ""
         notes.append(
-            f"q={q}{scope} retains higher spatial frequencies. Results can be sensitive to local noise."
+            f"q={q}{scope} retains higher spatial frequencies. "
+            "Results can be sensitive to local noise."
         )
     if level is None:
         unattainable = [f"{alpha}%" for alpha in (1, 5, 10) if nrep + 1 < 100 // alpha]
@@ -642,12 +643,11 @@ def spur(
     }
     _warn_spur_inference(sim.q, sim.inference_draws, list(tests.values()))
     raw = out["transformed_vars"]
-    transformed_design = x.copy()
-    transformed_design[:, regressors] = raw[:, 1:]
     column_names = design.columns
+    slope_names = [column_names[i] for i in regressors]
     transformed_fit = sm.OLS(
         pd.Series(raw[:, 0], index=sample.index),
-        pd.DataFrame(transformed_design, index=sample.index, columns=column_names),
+        pd.DataFrame(raw[:, 1:], index=sample.index, columns=slope_names),
     ).fit()
     options = dict(
         coords=coords,
@@ -662,7 +662,7 @@ def spur(
     )
     levels = scpc(sm.OLS(response, design).fit(), **options)
     transformed = scpc(transformed_fit, **options)
-    names = [response.name, *(column_names[i] for i in regressors)]
+    names = [response.name, *slope_names]
     transformed_data = sample.copy()
     for name, values in zip(names, raw.T, strict=True):
         column = f"h_{name}"

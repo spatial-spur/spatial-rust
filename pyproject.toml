@@ -36,7 +36,7 @@ license-files = ["LICENSE", "crates/spatial-py/THIRD_PARTY_NOTICES.txt", "python
 Repository = "https://github.com/spatial-spur/spatial-rust"
 
 [project.optional-dependencies]
-pyfixest = ["pyfixest>=0.50.1,<0.51", "formulaic>=1.2.1,<2"]
+pyfixest = ["pyfixest>=0.50.1,<0.51", "formulaic>=1.2.1,<1.2.2"]
 test = ["pytest>=8", "ruff>=0.13", "scipy>=1.13"]
 
 [tool.maturin]

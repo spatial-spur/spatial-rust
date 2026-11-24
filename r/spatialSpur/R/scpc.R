@@ -22,12 +22,16 @@
 spatial_build_info <- function() .Call(wrap__rust_build_info)
 
 .handle_native_result <- function(result) {
-  if (inherits(result, "extendr_error")) {
-    detail <- result$value
+  if (inherits(result, "spatial_native_error") || inherits(result, "extendr_error")) {
+    detail <- if (inherits(result, "extendr_error")) result$value else result
     if (inherits(detail, "condition")) stop(detail)
     if (is.list(detail) && !is.null(detail$message)) {
-      stop(structure(list(message = detail$message, call = NULL),
-                     class = c(detail$class, "error", "condition")))
+      cls <- detail$class
+      if (!is.null(cls) && nzchar(cls)) {
+        stop(structure(list(message = detail$message, call = NULL),
+                       class = c(cls, "error", "condition")))
+      }
+      stop(detail$message, call. = FALSE)
     }
     stop(as.character(detail), call. = FALSE)
   }
@@ -167,6 +171,10 @@ print.scpc <- function(x, ...) {
   if (isTRUE(x$diagnostics$tied_eigenvalues)) {
     cat("\nNote: Leading spatial eigenvalues exhibited a numerical tie.\n")
   }
+  if (identical(x$inference, "conditional_2sls")) {
+    cat("\nNote: Conditional 2SLS intervals rely on strong identification; ",
+        "for weak IV, use scalar Anderson-Rubin testing.\n", sep = "")
+  }
   invisible(x)
 }
 
@@ -224,6 +232,10 @@ print.summary.scpc <- function(x, ...) {
   }
   if (isTRUE(obj$diagnostics$tied_eigenvalues)) {
     cat("\nNote: Leading spatial eigenvalues exhibited a numerical tie.\n")
+  }
+  if (identical(obj$inference, "conditional_2sls")) {
+    cat("\nNote: Conditional 2SLS intervals rely on strong identification; ",
+        "for weak IV, use scalar Anderson-Rubin testing.\n", sep = "")
   }
   invisible(x)
 }

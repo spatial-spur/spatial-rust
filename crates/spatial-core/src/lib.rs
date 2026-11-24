@@ -29,7 +29,7 @@ pub use spur_op::{
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const SPEC_VERSION: &str = "0.4.0";
+pub const SPEC_VERSION: &str = "0.5.0";
 pub const SCPC_API_VERSION: usize = 8;
 pub const SPUR_API_VERSION: usize = 6;
 pub const EARTH_CIRCUMFERENCE_M: f64 = 2.0 * std::f64::consts::PI * 6_371_008.8;

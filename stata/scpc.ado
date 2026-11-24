@@ -253,23 +253,24 @@ program scpc, eclass sortpreserve
             di as error "weights matrix dimensions (`w_n' x `w_q') exceed max_matsize (`c(max_matsize)')"
             exit 198
         }
-        mata: _sp_fd = -1
+        tempname m_fd m_fmt m_rows m_ids m_rep m_i
+        mata: `m_fd' = -1
         capture noisily {
-            mata: _sp_rows = selectindex(st_data(., "`esample'"))
+            mata: `m_rows' = selectindex(st_data(., "`esample'"))
             if "`groups'" == "" {
-                mata: _sp_rep = _sp_rows'
+                mata: `m_rep' = `m_rows''
             }
             else {
-                mata: _sp_ids = st_data(_sp_rows, "`groups'")
-                mata: _sp_rep = J(1, `w_n', .)
-                mata: for (_sp_i = 1; _sp_i <= rows(_sp_rows); _sp_i++) if (missing(_sp_rep[_sp_ids[_sp_i]])) _sp_rep[_sp_ids[_sp_i]] = _sp_rows[_sp_i]
+                mata: `m_ids' = st_data(`m_rows', "`groups'")
+                mata: `m_rep' = J(1, `w_n', .)
+                mata: for (`m_i' = 1; `m_i' <= rows(`m_rows'); `m_i'++) if (missing(`m_rep'[`m_ids'[`m_i']])) `m_rep'[`m_ids'[`m_i']] = `m_rows'[`m_i']
             }
-            mata: _sp_fd = fopen(st_local("weights_path"), "r"); _sp_fmt = bufio(); bufbyteorder(_sp_fmt, 2); st_matrix("`w'", rowshape(fbufget(_sp_fmt, _sp_fd, "%8z", 1, `w_n' * `w_q'), `w_n')); fclose(_sp_fd); _sp_fd = -1
-            mata: st_matrix("`site_rows'", _sp_rep)
+            mata: `m_fd' = fopen(st_local("weights_path"), "r"); `m_fmt' = bufio(); bufbyteorder(`m_fmt', 2); st_matrix("`w'", rowshape(fbufget(`m_fmt', `m_fd', "%8z", 1, `w_n' * `w_q'), `w_n')); fclose(`m_fd'); `m_fd' = -1
+            mata: st_matrix("`site_rows'", `m_rep')
         }
         local rc = _rc
-        capture mata: if (_sp_fd >= 0) fclose(_sp_fd)
-        capture mata: mata drop _sp_fd _sp_fmt _sp_rows _sp_ids _sp_rep _sp_i
+        capture mata: if (`m_fd' >= 0) fclose(`m_fd')
+        capture mata: mata drop `m_fd' `m_fmt' `m_rows' `m_ids' `m_rep' `m_i'
         if `rc' exit `rc'
         ereturn matrix W = `w'
         ereturn matrix site_rows = `site_rows'
@@ -291,6 +292,9 @@ program scpc, eclass sortpreserve
     }
     if `meta'[1,5] == 1 {
         di as text "Note: Spatial correlation matrix had tied boundary eigenvalues; critical values reflect a randomized eigenspace basis."
+    }
+    if "`inference'" == "conditional_2sls" {
+        di as text "Note: Conditional 2SLS SCPC inference assumes strong first-stage identification; under weak instruments use Anderson-Rubin inference on reduced-form projections."
     }
     matlist `crit', title("SCPC 95% critical values")
     if `cv' {

@@ -86,6 +86,7 @@ stopifnot(distances$distance_units == "meters", relative$normdist,
           any(grepl("sample diameters", capture.output(print(relative)))))
 p <- do.call(spur, c(list(y ~ x, d), opts))
 stopifnot(p$levels$n_obs == p$transformed$n_obs, p$levels$backend == "rust",
+          identical(rownames(p$transformed$scpcstats), "x"),
           identical(caller, .Random.seed))
 
 regular <- data.frame(y = 0:16, lon = -120 + (0:16)/4, lat = 0)
@@ -112,6 +113,20 @@ if (requireNamespace("fixest", quietly = TRUE)) {
   sub_fit <- fixest::feols(y ~ x, d, subset = d$g > 0, demeaned = TRUE, data.save = TRUE, notes = FALSE)
   sub_scpc <- scpc(sub_fit, d, lon = "lon", lat = "lat", nthreads = 1L)
   stopifnot(identical(sub_scpc$observations, rownames(d)[fixest::obs(sub_fit)]))
+  split_fits <- fixest::feols(y ~ x, d, subset = d$h <= 4L, split = ~g, demeaned = TRUE, data.save = TRUE, notes = FALSE)
+  for (sf in split_fits) {
+    sf_scpc <- scpc(sf, d, lon = "lon", lat = "lat", nthreads = 1L)
+    stopifnot(identical(sf_scpc$observations, rownames(d)[fixest::obs(sf)]))
+  }
+  d_sing <- d
+  d_sing$g_sing <- d_sing$g
+  keep_idx <- which(d_sing$g_sing == 1L & !is.na(d_sing$y))[1L]
+  d_sing$g_sing[d_sing$g_sing == 1L & seq_len(nrow(d_sing)) != keep_idx] <- 2L
+  sing_fits <- fixest::feols(y ~ x | g_sing, d_sing, subset = d_sing$h <= 4L, split = ~h,
+                             fixef.rm = "singleton", demeaned = TRUE, data.save = TRUE, notes = FALSE)
+  sing_one <- sing_fits[[1L]]
+  sing_scpc <- scpc(sing_one, d_sing, lon = "lon", lat = "lat", nthreads = 1L)
+  stopifnot(identical(sing_scpc$observations, rownames(d_sing)[fixest::obs(sing_one)]))
   glm_fit <- fixest::feglm(I(y > 0) ~ x, d, family = "binomial", notes = FALSE)
   assert_error(scpc(glm_fit, d, lon = "lon", lat = "lat"), "feols")
   slope_fit <- fixest::feols(y ~ 1 | g[x], d, demeaned = TRUE, data.save = TRUE, notes = FALSE)
@@ -123,16 +138,45 @@ before_null <- .Random.seed
 invisible(do.call(spurtest_i0, c(list("x", d), within(opts, { seed <- NULL }))))
 stopifnot(!identical(before_null, .Random.seed))
 
-assert_error(spurtransform(log(y) ~ I(x^2), d, lon = "lon", lat = "lat"), "plain variable")
+tr_expr <- spurtransform(log(abs(y) + 1) ~ I(x^2), d, lon = "lon", lat = "lat", nthreads = 1L)
+d_manual <- transform(d, logy = log(abs(y) + 1), x2 = x^2)
+tr_manual <- spurtransform(logy ~ x2, d_manual, lon = "lon", lat = "lat", nthreads = 1L)
+expr_cols <- c("h_log(abs(y) + 1)", "h_I(x^2)")
+stopifnot(all(expr_cols %in% colnames(tr_expr)),
+          all(is.na(tr_expr[is.na(d$y), expr_cols[1L]])),
+          isTRUE(all.equal(unname(as.matrix(tr_expr[expr_cols])),
+                           unname(as.matrix(tr_manual[c("h_logy", "h_x2")])), tolerance = 1e-12)))
+assert_error(spurtransform(y ~ x + offset(w), d, lon = "lon", lat = "lat"), "offset")
+
+d1d <- data.frame(s = seq(0, 1, length.out = 24L), y = sin(seq(0.2, 2.7, length.out = 24L)))
+d1d_rev <- d1d[rev(seq_len(nrow(d1d))), ]
+set.seed(81)
+z4 <- matrix(rnorm(4L * 25L), nrow = 4L)
+t4 <- matrix(rnorm(4L * 80L), nrow = 4L)
+d4 <- matrix(rnorm(4L * 80L), nrow = 4L)
+zeros4 <- matrix(0, nrow = 4L, ncol = 25L)
+for (fn in list(spurtest_i0, spurtest_i1)) {
+  assert_error(fn("y", d1d, coords_euclidean = "s", q = 4L, draws = zeros4, tuning_draws = z4, nthreads = 1L),
+               "positive column norms")
+  assert_error(fn("y", d1d, coords_euclidean = "s", q = 4L, draws = z4, tuning_draws = zeros4, nthreads = 1L),
+               "positive column norms")
+  a_perm <- fn("y", d1d, coords_euclidean = "s", q = 4L, draws = d4, tuning_draws = t4, nthreads = 1L)
+  b_perm <- fn("y", d1d_rev, coords_euclidean = "s", q = 4L, draws = d4, tuning_draws = t4, nthreads = 1L)
+  stopifnot(abs(a_perm$lr - b_perm$lr) < 1e-11,
+            abs(a_perm$pvalue - b_perm$pvalue) < 1e-12,
+            abs(a_perm$ha_parm - b_perm$ha_parm) < 1e-11)
+}
 stopifnot(!is.null(colnames(p$transformed_vars)), !is.null(rownames(p$transformed_vars)))
 w_out <- list()
-withCallingHandlers(
-  spurtest_i0("x", d, lon = "lon", lat = "lat", q = 4L, nrep = 50L, nthreads = 1L),
+tuned_25 <- withCallingHandlers(
+  spurtest_i0("x", d, lon = "lon", lat = "lat", q = 4L, nrep = 25L, nthreads = 1L),
   warning = function(w) {
     w_out[[length(w_out) + 1L]] <<- conditionMessage(w)
     invokeRestart("muffleWarning")
   }
 )
-stopifnot(any(grepl("unattainable", w_out)))
+stopifnot(any(grepl("unattainable", w_out)),
+          is.numeric(tuned_25$best_tuning_power),
+          is.finite(tuned_25$best_tuning_power))
 
 cat("R installed integration checks passed\n")

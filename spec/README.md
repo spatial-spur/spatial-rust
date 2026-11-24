@@ -1,10 +1,11 @@
 # SCPC and SPUR methods specification
 
-[Version 0.4.0](0.4.0/README.md) is the current method and supported-use specification.
+[Version 0.5.0](0.5.0/README.md) is the current method and supported-use specification.
 The earlier editions record historical algorithms and verification references.
 
 | Document | Contents |
 | --- | --- |
+| [Version 0.5.0](0.5.0/README.md) | Finer SCPC/I(0) grids, 10-point GL & adaptive half-life search, full-site Nyström decay, aligned formulas, no adjusted intercept, R C-API & Stata normal-equation guards. |
 | [Version 0.4.0](0.4.0/README.md) | Unified fitted-state, geometry, calibration, results, and execution contracts. |
 | [Version 0.3.9](0.3.9/README.md) | ISO neighborhoods, centered LBM-GLS, conditional IV, and SPUR dimensions and tuning. |
 | [Version 0.3.8 conventions](0.3.8/README.md) | Multiscale half-life inversion, response projection, attainable SPUR calibration, and fitted SCPC designs. |

@@ -93,9 +93,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           wheel=$(find "$GITHUB_WORKSPACE/dist" -name '*.whl' -print -quit)
-          python -m pip install --force-reinstall "$wheel[test]" "statsmodels==0.14.4"
+          python -m venv "$RUNNER_TEMP/floor-venv"
+          "$RUNNER_TEMP/floor-venv/bin/python" -m pip install \
+            "$wheel[test]" "statsmodels==0.14.4" "pandas>=2.2,<3" "numpy<2.3"
           cd "$RUNNER_TEMP"
-          python -m pytest -q "$GITHUB_WORKSPACE/tests/python"
+          "$RUNNER_TEMP/floor-venv/bin/python" -m pytest -q "$GITHUB_WORKSPACE/tests/python"
       - uses: actions/setup-python@v6
         with:
           python-version: '3.14'
@@ -125,7 +127,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-vendor-filterer
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-vendor-filterer
       - uses: r-lib/actions/setup-r@v2
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
@@ -165,7 +169,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-vendor-filterer
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-vendor-filterer
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'

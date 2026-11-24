@@ -401,7 +401,7 @@ fn spur_cbar_and_diagnostics_are_deterministic_and_thread_invariant() {
     assert_eq!(pipe_1.transformed_vars, transform_ind);
 
     // Check I(0) grid maxima invariant
-    assert_eq!(pipe_1.i0.rho_grid.len(), 31);
+    assert!(pipe_1.i0.rho_grid.len() >= 75);
     let max_p = pipe_1.i0.pvalue_mat.iter().copied().fold(0.0_f64, f64::max);
     assert!((pipe_1.i0.pvalue[0] - max_p).abs() < 1e-15);
 
@@ -1222,5 +1222,189 @@ fn half_life_mixture_resolves_the_close_pair_contrast() {
         })
         .sum();
     // Independent adaptive integration of the angular Gaussian density in h.
-    assert!((mixture / 3.632914971239679e-9 - 1.0).abs() < 1e-5);
+    assert!((mixture / 3.632914971239679e-9 - 1.0).abs() < 1e-10);
+}
+
+#[test]
+fn spur_rejects_zero_draws_reports_tuning_power_and_is_row_permutation_invariant() {
+    let n = 24;
+    // Symmetric 1D points (-1.0, ..., 1.0) so simple eigenvectors can flip signs under permutation
+    // if eigenvectors are not anchored by canonical coordinate order.
+    let coords: Vec<f64> = (0..n)
+        .map(|i| -1.0 + 2.0 * (i as f64) / ((n - 1) as f64))
+        .collect();
+    let y: Vec<f64> = coords
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| s + 0.1 * ((i as f64 * 0.7).sin()))
+        .collect();
+    let q = 4;
+    let nrep = 25;
+
+    let zero_draws = vec![0.0_f64; 2 * q * nrep];
+    for err in [
+        run_spur_i0(&SpurTestRequest {
+            coords: &coords,
+            n,
+            d: 1,
+            metric: Metric::Euclidean,
+            y: &y,
+            n_y: 1,
+            x_in: None,
+            k_x: 0,
+            emat: &zero_draws,
+            q,
+            nrep,
+            nthreads: Some(1),
+        })
+        .unwrap_err(),
+        run_spur_i1(&SpurTestRequest {
+            coords: &coords,
+            n,
+            d: 1,
+            metric: Metric::Euclidean,
+            y: &y,
+            n_y: 1,
+            x_in: None,
+            k_x: 0,
+            emat: &zero_draws,
+            q,
+            nrep,
+            nthreads: Some(1),
+        })
+        .unwrap_err(),
+        run_spur_halflife(&SpurHalfLifeRequest {
+            coords: &coords,
+            n,
+            d: 1,
+            metric: Metric::Euclidean,
+            y: &y,
+            emat: &zero_draws[..q * nrep],
+            q,
+            nrep,
+            level: 0.95,
+            nthreads: Some(1),
+        })
+        .unwrap_err(),
+    ] {
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.message().contains("positive column norms"));
+    }
+
+    let emat: Vec<f64> = (0..2 * q * nrep)
+        .map(|k| (((k * 37 + 11) % 89) as f64 - 44.0) / 20.0)
+        .collect();
+    let out_orig_i0 = run_spur_i0(&SpurTestRequest {
+        coords: &coords,
+        n,
+        d: 1,
+        metric: Metric::Euclidean,
+        y: &y,
+        n_y: 1,
+        x_in: None,
+        k_x: 0,
+        emat: &emat,
+        q,
+        nrep,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    let out_orig_i1 = run_spur_i1(&SpurTestRequest {
+        coords: &coords,
+        n,
+        d: 1,
+        metric: Metric::Euclidean,
+        y: &y,
+        n_y: 1,
+        x_in: None,
+        k_x: 0,
+        emat: &emat,
+        q,
+        nrep,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    assert!(out_orig_i0.best_tuning_power.is_some());
+    assert!(out_orig_i1.best_tuning_power.is_some());
+
+    // Reverse row order and verify fixed-draw diagnostics remain identical.
+    let coords_rev: Vec<f64> = coords.iter().copied().rev().collect();
+    let y_rev: Vec<f64> = y.iter().copied().rev().collect();
+    let out_rev_i0 = run_spur_i0(&SpurTestRequest {
+        coords: &coords_rev,
+        n,
+        d: 1,
+        metric: Metric::Euclidean,
+        y: &y_rev,
+        n_y: 1,
+        x_in: None,
+        k_x: 0,
+        emat: &emat,
+        q,
+        nrep,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    let out_rev_i1 = run_spur_i1(&SpurTestRequest {
+        coords: &coords_rev,
+        n,
+        d: 1,
+        metric: Metric::Euclidean,
+        y: &y_rev,
+        n_y: 1,
+        x_in: None,
+        k_x: 0,
+        emat: &emat,
+        q,
+        nrep,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    assert!((out_orig_i0.lr[0] - out_rev_i0.lr[0]).abs() < 1e-11);
+    assert_eq!(out_orig_i0.pvalue, out_rev_i0.pvalue);
+    assert!((out_orig_i0.ha_param - out_rev_i0.ha_param).abs() < 1e-11);
+    assert!((out_orig_i1.lr[0] - out_rev_i1.lr[0]).abs() < 1e-11);
+    assert_eq!(out_orig_i1.pvalue, out_rev_i1.pvalue);
+    assert!((out_orig_i1.ha_param - out_rev_i1.ha_param).abs() < 1e-11);
+}
+
+#[test]
+fn adaptive_halflife_search_catches_narrow_99_gap_and_island() {
+    let coarse = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
+    let nrep = 999usize;
+    let level = 0.99; // alpha = 0.01 (accepted iff (nrep - count)/(nrep + 1) < 0.99, i.e., p > 0.01)
+    // Dip centered at t = 0.50 with width ~0.06 so coarse points [0.4, 0.6] both have p > 0.03!
+    let count_for_gap = |t: f64| -> usize {
+        let p = 0.002 + 0.25 * ((t - 0.5) / 0.1).powi(2).min(1.0);
+        ((p * (nrep + 1) as f64).floor() as usize).saturating_sub(1)
+    };
+    let initial: Vec<usize> = coarse.iter().map(|&t| count_for_gap(t)).collect();
+    let components = halflife::invert_half_life_adaptive(&coarse, &initial, nrep, level, |pts| {
+        Ok(pts.iter().map(|&t| count_for_gap(t)).collect())
+    })
+    .unwrap();
+    assert_eq!(
+        components.len(),
+        2,
+        "99% rejection gap must split into 2 components, got: {components:?}"
+    );
+    assert_eq!(components[0][0], 0.0);
+    assert_eq!(components[1][1], f64::INFINITY);
+
+    // Narrow accepted island centered at t = 0.50 between coarse rejections at 0.4 and 0.6.
+    let count_for_island = |t: f64| -> usize {
+        let p = if (t - 0.5).abs() < 0.04 { 0.08 } else { 0.003 + 0.02 * (-(t - 0.5).abs() * 15.0).exp() };
+        ((p * (nrep + 1) as f64).floor() as usize).saturating_sub(1)
+    };
+    let initial_island: Vec<usize> = coarse.iter().map(|&t| count_for_island(t)).collect();
+    let island = halflife::invert_half_life_adaptive(&coarse, &initial_island, nrep, level, |pts| {
+        Ok(pts.iter().map(|&t| count_for_island(t)).collect())
+    })
+    .unwrap();
+    assert_eq!(
+        island.len(),
+        1,
+        "narrow accepted island must be recovered, got: {island:?}"
+    );
+    assert!(island[0][0] > 0.5 && island[0][1] < 2.0);
 }

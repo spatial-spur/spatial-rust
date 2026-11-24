@@ -57,7 +57,7 @@
 It takes the immediately preceding unweighted {cmd:regress}, one-way {cmd:areg} (with {cmd:uncond}), or ordinary {cmd:ivregress 2sls} fit in memory, reads spatial coordinates from consecutive numeric variables {cmd:s_1}, {cmd:s_2}, ..., and reports SCPC standard errors, t-statistics, p-values, and confidence intervals while preserving the caller's regression results in {cmd:e(b)}, {cmd:e(V)}, and {cmd:e(sample)}.
 
 {pstd}
-{bf:Conditional 2SLS qualification:} For {cmd:ivregress 2sls}, valid t-test and confidence interval coverage relies on strong first-stage identification. Under endogeneity, the finite-sample conditional Gaussian argument is heuristic, although SCPC takes the maximum over unconditional and conditional critical values.
+{bf:Conditional 2SLS qualification:} For {cmd:ivregress 2sls}, valid t-test and confidence interval coverage relies on strong first-stage identification. Under weak instruments, use Anderson-Rubin inference on reduced-form projections. Under endogeneity, the finite-sample conditional Gaussian argument is heuristic, although SCPC takes the maximum over unconditional and conditional critical values.
 
 
 {marker options}{...}
@@ -136,7 +136,7 @@ It takes the immediately preceding unweighted {cmd:regress}, one-way {cmd:areg} 
 {synopt:{cmd:e(inference)}}{cmd:conditional_ols}, {cmd:conditional_2sls}, or {cmd:unconditional}{p_end}
 {synopt:{cmd:e(method)}}{cmd:exact} or {cmd:nystrom}{p_end}
 {synopt:{cmd:e(backend)}}{cmd:rust}{p_end}
-{synopt:{cmd:e(specification)}}native specification version ({cmd:0.4.0}){p_end}
+{synopt:{cmd:e(specification)}}native specification version ({cmd:0.5.0}){p_end}
 {synopt:{cmd:e(provider)}}linear algebra provider reported by the Rust core{p_end}
 {synopt:{cmd:e(spatial_cluster)}}clustering variable name if clustered{p_end}
 {synopt:{cmd:e(coordinate_units)}}coordinate distance units{p_end}

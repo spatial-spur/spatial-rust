@@ -1008,4 +1008,40 @@ mod tests {
             assert!((a - b).abs() < 1e-12);
         }
     }
+
+    #[test]
+    fn normal_equation_check_rejects_stale_outcome_even_when_rss_matches() {
+        let n = 6usize;
+        let p = 2usize;
+        let x_raw: Vec<f64> = (0..n).map(|i| i as f64 - 2.5).collect();
+        let u: Vec<f64> = vec![0.4, -0.4, -0.4, 0.4, 0.2, -0.2];
+        // Orthogonal to both 1 and x when symmetric/antisymmetric? Make u exact orthogonal to 1 & x:
+        // sum(u) = 0; sum(x*u) = (-2.5)(0.4) + (-1.5)(-0.4) + (-0.5)(-0.4) + (0.5)(0.4) + (1.5)(0.2) + (2.5)(-0.2)
+        // = -1.0 + 0.6 + 0.2 + 0.2 + 0.3 - 0.5 = -0.2 -> adjust linearly!
+        let mut x_sq = 0.0;
+        let mut xu = 0.0;
+        let mut su = 0.0;
+        for i in 0..n {
+            x_sq += x_raw[i] * x_raw[i];
+            xu += x_raw[i] * u[i];
+            su += u[i];
+        }
+        let u_orth: Vec<f64> = (0..n)
+            .map(|i| u[i] - su / n as f64 - (xu / x_sq) * x_raw[i])
+            .collect();
+        let b = [1.5, 1.0];
+        let design = StataDesign::from_columns(n, p, true, 0, 0, &x_raw, &[]).unwrap();
+        let (scores, _) =
+            spatial_core::preparation::regression_scores(&design.x, &u_orth, p, None).unwrap();
+        assert!(fitted::verify_normal_equations(&scores, &u_orth, &design.x, &b, n, p).is_ok());
+
+        // Swapping two elements preserves RSS = sum(u_orth^2) identically while breaking X'u = 0.
+        let mut u_stale = u_orth.clone();
+        u_stale.swap(0, 1);
+        let (stale_scores, _) =
+            spatial_core::preparation::regression_scores(&design.x, &u_stale, p, None).unwrap();
+        let err = fitted::verify_normal_equations(&stale_scores, &u_stale, &design.x, &b, n, p)
+            .unwrap_err();
+        assert!(err.contains("normal equations"), "unexpected err: {err}");
+    }
 }

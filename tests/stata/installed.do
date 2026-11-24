@@ -68,6 +68,8 @@ spur y x, q(4) nrep(200) replace cvs nthreads(1)
 assert "`e(cmd)'" == "regress"
 assert "`r(backend)'" == "rust"
 assert colsof(r(levels_scpcstats)) == 6
+assert rowsof(r(levels_scpcstats)) == 2
+assert rowsof(r(transformed_scpcstats)) == 1
 assert !missing(h_x)
 assert h_yy == 7
 assert `"`c(rngstate)'"' == `"`state'"'
@@ -77,6 +79,15 @@ preserve
 quietly replace y = y + 1
 capture quietly scpc
 assert _rc == 198
+restore
+
+quietly regress y x
+preserve
+tempvar u_orig
+quietly predict double `u_orig', residuals
+quietly replace y = _b[_cons] + _b[x] * x + `u_orig'[cond(mod(_n,2)==1, _n+1, _n-1)]
+capture quietly scpc
+assert _rc != 0
 restore
 
 quietly areg y x, absorb(g)
@@ -136,7 +147,7 @@ assert h_y == 0
 restore
 
 scpc, capabilities
-assert "`r(specification)'" == "0.4.0"
+assert "`r(specification)'" == "0.5.0"
 assert "`r(backend)'" == "rust"
 
 spurhalflife y, q(4) nrep(200) normdist backend(rust) nthreads(1)
@@ -150,10 +161,13 @@ matrix comp_scaled = comp_norm * `max_d'
 assert mreldif(comp_raw, comp_scaled) < 1e-12
 
 mata: mata clear
+mata: _sp_fd = 12345
 spurtest i0 y, q(4) nrep(200) backend(rust) nthreads(1)
 spurhalflife y, q(4) nrep(200) backend(rust) nthreads(1)
 quietly regress y x
 scpc, cvs method(nystrom) landmarks(52) samples(4) seed(7) weights nthreads(1)
+mata: assert(_sp_fd == 12345)
+mata: mata drop _sp_fd
 assert colsof(e(scpccvs)) == 4
 assert e(seed) == 7
 scpc, method(exact) nthreads(1)

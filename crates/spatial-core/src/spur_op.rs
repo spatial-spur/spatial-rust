@@ -19,7 +19,8 @@ const SIZE_DENOMINATORS: [usize; 3] = [100, 20, 10];
 const RHO_I0_ALT: f64 = 0.001;
 const RHO_GRID_MIN: f64 = 0.0001;
 const RHO_GRID_MAX: f64 = 0.03;
-const RHO_GRID_LEN: usize = 30;
+const RHO_GRID_LOG_LEN: usize = 48;
+const RHO_GRID_LIN_LEN: usize = 32;
 const MAX_HA_BRACKET_STEPS: usize = 200;
 
 const PAIR_CACHE_LIMIT: usize = 4096;
@@ -802,30 +803,23 @@ fn select_leading_subspace(
         );
     }
     let mut r = crate::zeroed(&[n, q], "SPUR directions")?;
-    let order = blocks.tied.then(|| geom.distances.coordinate_order());
+    let order = geom.distances.coordinate_order();
     let mut start = 0;
     for end in blocks.ends {
         let width = end - start;
         let block = &vectors[start * n..end * n];
         if width == 1 {
             let max = block.iter().map(|v| v.abs()).fold(0.0, f64::max);
-            let anchor = block
+            let anchor = order
                 .iter()
+                .map(|&i| block[i])
                 .find(|v| max - v.abs() <= 1e-12 * max)
                 .expect("an eigenvector has a largest-magnitude entry");
             for (row, &v) in r.chunks_exact_mut(q).zip(block) {
                 row[start] = v * anchor.signum();
             }
         } else {
-            orient_block(
-                block,
-                n,
-                width,
-                order.as_deref().expect("tied block order"),
-                &mut r,
-                q,
-                start,
-            )?;
+            orient_block(block, n, width, &order, &mut r, q, start)?;
         }
         start = end;
     }
@@ -1066,6 +1060,19 @@ fn validate_emat(
     if emat.iter().any(|v| !v.is_finite()) {
         return Err(CoreError::invalid_input("emat entries must be finite"));
     }
+    for b in 0..blocks {
+        let block = &emat[b * q * nrep..(b + 1) * q * nrep];
+        for c in 0..nrep {
+            let max_abs = (0..q)
+                .map(|r| block[r * nrep + c].abs())
+                .fold(0.0_f64, f64::max);
+            if !max_abs.is_finite() || max_abs == 0.0 {
+                return Err(CoreError::invalid_input(
+                    "simulation draws must have finite positive column norms",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1096,7 +1103,7 @@ fn calibrate_ha_i0(
         }
     }
     if pow == 0.5 {
-        return Ok((g, None));
+        return Ok((g, Some(pow)));
     }
     let mut g1 = g;
 
@@ -1136,7 +1143,7 @@ fn calibrate_ha_i0(
             break;
         }
     }
-    Ok((g, None))
+    Ok((g, Some(pow)))
 }
 
 fn calibrate_ha_i1(
@@ -1167,7 +1174,7 @@ fn calibrate_ha_i1(
         }
     }
     if pow == 0.5 {
-        return Ok((c, None));
+        return Ok((c, Some(pow)));
     }
     let mut c1 = c;
 
@@ -1206,7 +1213,7 @@ fn calibrate_ha_i1(
             break;
         }
     }
-    Ok((c, None))
+    Ok((c, Some(pow)))
 }
 
 fn eval_sim_lr_ratio(
@@ -1287,19 +1294,46 @@ fn eval_observed_lr(
 }
 
 fn build_rho_grid(floor: f64) -> Vec<f64> {
-    if floor == RHO_GRID_MAX {
+    if floor >= RHO_GRID_MAX {
         return Vec::new();
     }
-    let start = if floor < RHO_GRID_MIN {
-        RHO_GRID_MIN
+    let span = RHO_GRID_MAX - floor;
+    let delta_min = if floor < RHO_GRID_MIN {
+        (RHO_GRID_MIN - floor).min(span)
     } else {
-        floor + (RHO_GRID_MAX - floor) / RHO_GRID_LEN as f64
-    };
-    let mut grid: Vec<_> = (0..RHO_GRID_LEN - 1)
-        .map(|i| start + (RHO_GRID_MAX - start) * (i as f64) / ((RHO_GRID_LEN - 1) as f64))
-        .filter(|&rho| rho > floor)
-        .collect();
-    grid.push(RHO_GRID_MAX);
+        1e-4 * span
+    }
+    .max(1e-12);
+    let mut raw = Vec::with_capacity(RHO_GRID_LOG_LEN + RHO_GRID_LIN_LEN + 1);
+    if RHO_GRID_LOG_LEN > 1 && delta_min < span {
+        let ratio = span / delta_min;
+        for i in 0..RHO_GRID_LOG_LEN {
+            let rho = floor + delta_min * ratio.powf(i as f64 / (RHO_GRID_LOG_LEN - 1) as f64);
+            if rho > floor && rho < RHO_GRID_MAX {
+                raw.push(rho);
+            }
+        }
+    }
+    for i in 1..RHO_GRID_LIN_LEN {
+        let rho = floor + span * (i as f64) / (RHO_GRID_LIN_LEN as f64);
+        if rho > floor && rho < RHO_GRID_MAX {
+            raw.push(rho);
+        }
+    }
+    raw.push(RHO_GRID_MAX);
+    raw.sort_by(f64::total_cmp);
+    let mut grid: Vec<f64> = Vec::with_capacity(raw.len());
+    for rho in raw {
+        if grid
+            .last()
+            .is_none_or(|&prev| (rho - prev).abs() > 1e-13 * RHO_GRID_MAX)
+        {
+            grid.push(rho);
+        }
+    }
+    if let Some(last) = grid.last_mut() {
+        *last = RHO_GRID_MAX;
+    }
     grid
 }
 

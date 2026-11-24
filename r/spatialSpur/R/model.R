@@ -75,7 +75,8 @@
     stop("SCPC supports single-response unweighted lm fits", call. = FALSE)
   }
   if (!is.null(model$weights)) stop("SCPC requires an unweighted fit", call. = FALSE)
-  if (!is.null(model$offset) || .has_offset(stats::formula(model), model$model)) {
+  if (!is.null(model$offset) ||
+      (!is.null(model$terms) && .has_offset(stats::formula(model), model$model))) {
     stop("SCPC does not support regression offsets", call. = FALSE)
   }
   if (is.null(model$model) && is.null(model[["x"]])) {
@@ -160,13 +161,14 @@
   } else {
     residualize <- NULL
   }
-  obs_removed <- model$obs_selection$obsRemoved
-  source <- if (is.null(model$data)) {
-    NULL
-  } else if (is.null(obs_removed)) {
-    model$data
-  } else {
-    model$data[obs_removed, , drop = FALSE]
+  source <- model$data
+  if (!is.null(source) && !is.null(model$obs_selection)) {
+    sel <- model$obs_selection
+    nms <- names(sel)
+    for (i in seq_along(sel)) {
+      if (!is.null(nms) && identical(nms[i], "subset")) next
+      source <- source[sel[[i]], , drop = FALSE]
+    }
   }
   if (!is.null(source) && nrow(source) != nrow(x)) {
     stop("Stored fixest estimation rows do not match the fitted design", call. = FALSE)

@@ -218,8 +218,11 @@ fn scpc_reports_unrepresentable_standard_errors_and_t_statistics() {
 
 #[test]
 fn scpc_scale_grid_includes_the_finite_endpoint_when_needed() {
-    assert_eq!(build_scale_grid(1.0, 1.3), [1.0, 1.2, 1.3]);
-    assert_eq!(build_scale_grid(1.0, 0.8), [1.0, 1.2]);
+    assert_eq!(
+        build_scale_grid(1.0, 1.3),
+        [1.0, 1.05, 1.1025, 1.1576250000000001, 1.2155062500000002, 1.2762815625000004, 1.3]
+    );
+    assert_eq!(build_scale_grid(1.0, 0.8), [1.0, 1.05]);
 }
 
 #[test]
@@ -1839,4 +1842,110 @@ fn probability_workspace_handles_equicorrelated_zero_cv_and_extreme_scales() {
     // 5. build_scale_grid must not panic when cmax / c0 > f64::MAX.
     let grid = build_scale_grid(1e-200, 1e200);
     assert!(grid.len() > 2 && grid.iter().all(|&v| v.is_finite()));
+}
+
+#[test]
+fn near_colocation_keeps_cmax_above_c0_and_six_site_offgrid_size_holds() {
+    // 1. Floor within 5e-6 of avc: cmax must still strictly exceed c0.
+    // 45 sites total -> 990 pairs; put 955 pairs at distance 0? Even simpler:
+    // Use n=100 -> 4950 pairs. 495 pairs have floor = 0.1; let's use exact cluster floor:
+    // If n=20 (190 pairs), floor = 1/190 = 0.005263157894736842. Choose avc = floor + 5e-6.
+    let mut coords_near = vec![0.0_f64; 4]; // 2 colocated at (0,0) -> 1/190 pairs
+    for i in 2..20 {
+        coords_near.extend_from_slice(&[i as f64, (i % 5) as f64]);
+    }
+    let floor = 1.0 / 190.0;
+    let avc = floor + 5e-6;
+    let beta = [1.0, 0.5];
+    let wj: Vec<f64> = (0..20)
+        .flat_map(|i| {
+            let resid = (i as f64 * 0.7 + 0.2).cos();
+            [resid, (i as f64 * 0.3).sin() * resid]
+        })
+        .collect();
+    let out = run_exact_scpc(&ExactScpcRequest {
+        coords: &coords_near,
+        n: 20,
+        d: 2,
+        metric: Metric::Euclidean,
+        avc,
+        uncond: true,
+        cvs: false,
+        coef: &beta,
+        wj: &wj,
+        cluster_id: None,
+        fe_id: None,
+        xj: None,
+        xjs: None,
+        proj_u: None,
+        proj_v: None,
+        proj_rank: 0,
+        cv_tolerance: 1e-4,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    assert!(
+        out.cmax > out.c0,
+        "expected cmax > c0, got c0={}, cmax={}",
+        out.c0,
+        out.cmax
+    );
+
+    // 2. 6-site stress check: off-grid worst-case rejection stays within 0.05 + 1e-3.
+    let sites = [0.0, 0.0, 0.01, 0.0, 0.2, 0.0, 0.5, 0.0, 0.85, 0.0, 1.0, 0.0];
+    let x6: Vec<f64> = (0..6).flat_map(|i| [1.0, (i as f64) * 0.4 - 1.0]).collect();
+    let mut xtx = [0.0_f64; 4];
+    for i in 0..6 {
+        xtx[0] += x6[2 * i] * x6[2 * i];
+        xtx[1] += x6[2 * i] * x6[2 * i + 1];
+        xtx[2] = xtx[1];
+        xtx[3] += x6[2 * i + 1] * x6[2 * i + 1];
+    }
+    let det = xtx[0] * xtx[3] - xtx[1] * xtx[2];
+    let inv = [
+        xtx[3] / det,
+        -xtx[1] / det,
+        -xtx[2] / det,
+        xtx[0] / det,
+    ];
+    let resid = [0.5, -0.4, 0.1, 0.2, -0.3, -0.1];
+    let mut wj6 = vec![0.0; 12];
+    for i in 0..6 {
+        for j in 0..2 {
+            wj6[2 * i + j] =
+                6.0 * (inv[2 * j] * x6[2 * i] + inv[2 * j + 1] * x6[2 * i + 1]) * resid[i];
+        }
+    }
+    let out6 = run_exact_scpc(&ExactScpcRequest {
+        coords: &sites,
+        n: 6,
+        d: 2,
+        metric: Metric::Euclidean,
+        avc: 0.03,
+        uncond: true,
+        cvs: false,
+        coef: &[0.0, 0.0],
+        wj: &wj6,
+        cluster_id: None,
+        fe_id: None,
+        xj: None,
+        xjs: None,
+        proj_u: None,
+        proj_v: None,
+        proj_rank: 0,
+        cv_tolerance: 1e-4,
+        nthreads: Some(1),
+    })
+    .unwrap();
+    let dm = crate::distance::distance_matrix(&sites, 6, 2, Metric::Euclidean).unwrap();
+    let locs = Distances::new(&sites, 6, 2, Metric::Euclidean).unwrap().locations();
+    let dense_steps = build_scale_grid(out6.c0, out6.cmax);
+    let mut ws = ProbabilityWorkspace::new(out6.q);
+    let omega_grid = covariance_grids(&dm, 6, &[&out6.wfin], &[out6.q + 1], &dense_steps, &locs)
+        .unwrap()
+        .remove(0);
+    let (max_p, _) = ws
+        .maximum(&omega_grid, out6.q + 1, out6.cvfin / (out6.q as f64).sqrt(), None)
+        .unwrap();
+    assert!(max_p <= 0.051, "6-site grid size exceeded bound: {max_p}");
 }

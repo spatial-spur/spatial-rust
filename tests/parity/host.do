@@ -28,13 +28,26 @@ forvalues j = 1/3 {
     post `stats' ("common") ("levels") ("`term'") (`n_common') (`q_levels') ///
        (`levels'[`j',1]) (`levels'[`j',2]) (`levels'[`j',3]) (`levels'[`j',4]) ///
        (`levels'[`j',5]) (`levels'[`j',6]) (`cvlevels'[`j',1])
+    post `handles' ("levels") ("`term'") ///
+       (`cvs_levels'[`j',1]) (`cvs_levels'[`j',2]) (`cvs_levels'[`j',3]) (`cvs_levels'[`j',4])
+}
+forvalues j = 1/2 {
+    local term : word `j' of x x2
     post `stats' ("common") ("adjusted") ("`term'") (`n_common') (`q_adjusted') ///
        (`adjusted'[`j',1]) (`adjusted'[`j',2]) (`adjusted'[`j',3]) (`adjusted'[`j',4]) ///
        (`adjusted'[`j',5]) (`adjusted'[`j',6]) (`cvadjusted'[`j',1])
-    post `handles' ("levels") ("`term'") ///
-       (`cvs_levels'[`j',1]) (`cvs_levels'[`j',2]) (`cvs_levels'[`j',3]) (`cvs_levels'[`j',4])
     post `handles' ("adjusted") ("`term'") ///
        (`cvs_adjusted'[`j',1]) (`cvs_adjusted'[`j',2]) (`cvs_adjusted'[`j',3]) (`cvs_adjusted'[`j',4])
+}
+quietly regress y x x2
+quietly scpc, method(nystrom) landmarks(40) samples(4) seed(7) latlong backend(rust) nthreads(1)
+matrix `levels' = e(scpcstats)
+matrix `cvlevels' = e(critical_95)
+forvalues j = 1/3 {
+    local term : word `j' of x x2 _cons
+    post `stats' ("nystrom_geo") ("levels") ("`term'") (e(n_obs)) (e(q)) ///
+       (`levels'[`j',1]) (`levels'[`j',2]) (`levels'[`j',3]) (`levels'[`j',4]) ///
+       (`levels'[`j',5]) (`levels'[`j',6]) (`cvlevels'[`j',1])
 }
 postclose `handles'
 postfile `handles' str8 test double(statistic p ha cv01 cv05 cv10) using diagnostics-stata.dta

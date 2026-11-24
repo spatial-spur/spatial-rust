@@ -50,7 +50,7 @@
 Given coordinates in {cmd:s_1}, {cmd:s_2}, ..., {cmd:spur}: (1) runs the four SPUR diagnostics ({cmd:i0}, {cmd:i1}, {cmd:i0resid}, {cmd:i1resid}), (2) creates LBM-GLS spatially demeaned/transformed variables prefixed with {opt prefix()}, and (3) estimates SCPC inference for both the levels regression and the LBM-GLS transformed regression.
 
 {pstd}
-Note that LBM-GLS transformed variables are weighted-centered rather than untransformed, and {opt q()} must satisfy {cmd:2 <= q <= n - p - 1}.
+Note that LBM-GLS transformed variables are weighted-centered rather than untransformed (so transformed SCPC is fitted without an intercept), and {opt q()} must satisfy {cmd:2 <= q <= n - p - 1}.
 
 
 {marker examples}{...}

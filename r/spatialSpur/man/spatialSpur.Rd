@@ -117,10 +117,15 @@ standard Gaussian drivers for inference and tuning. Half-life uses one draw matr
 }
 \value{
 \code{scpc} returns coefficient estimates, uncertainty, effective critical values
-and a spatial basis in the reported site order. Diagnostics return likelihood
-ratios, simulation cutoffs, and p-values. Half-life returns a matrix of confidence
-components with units and normalization. The pipeline returns diagnostics and
-both regressions. The transform and data loader return data frames.
+and a spatial basis in the reported site order. Valid conditional 2SLS t intervals
+assume strong identification (for weak IV, scalar Anderson--Rubin testing is
+recommended). Diagnostics return likelihood
+ratios, p-values, critical values, and tuned alternatives; \code{spur} runs the
+SPUR diagnostics and returns both the levels SCPC fit and the no-intercept
+LBM-GLS transformed SCPC fit; \code{spurtransform} evaluates formula terms or
+variable names on complete cases and returns the augmented data frame; and
+\code{spurhalflife} returns half-life confidence intervals and matrices of confidence
+components with units and normalization using spec 0.5.0; and
 \code{spatial_build_info} returns the compiled methods version and provider.
 }
 \examples{

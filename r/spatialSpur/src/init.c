@@ -88,6 +88,12 @@ static const R_CallMethodDef CallEntries[] = {
     {"wrap__rust_run_spur_pipeline", (DL_FUNC) &wrap__rust_run_spur_pipeline, 7},
     {NULL, NULL, 0}
 };
+
+SEXP sp_r_nil(void) { return R_NilValue; }
+SEXP sp_r_names_sym(void) { return R_NamesSymbol; }
+SEXP sp_r_class_sym(void) { return R_ClassSymbol; }
+SEXP sp_r_global_env(void) { return R_GlobalEnv; }
+
 /* Some macOS R builds leave attribute_visible empty even under Clang. */
 #if defined(__GNUC__) && !defined(_WIN32) && !defined(HAVE_VISIBILITY_ATTRIBUTE)
 __attribute__((visibility("default")))
