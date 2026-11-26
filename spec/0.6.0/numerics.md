@@ -77,12 +77,13 @@ that adjustment must be available in diagnostics. Larger negativity is an
 error. **[D]**
 
 SCPC admits valid singular Gaussian covariance laws when their ratio statistic
-is defined; see scpc.md for atom/tie behavior. SPUR/half-life angular densities,
-symmetric square-root draw coloring $\Omega^{1/2}$, and quadratic-form solves
-require positive definiteness on the retained contrast space.
-Do not add jitter, a ridge, or silently remove requested contrasts to obtain
-a factorization. Zero/failed response projections and unsupported singular
-angular laws require a clear error.
+is defined; see scpc.md for atom/tie behavior. While a unique symmetric
+positive-semidefinite square root $\Omega^{1/2}$ exists mathematically for
+singular PSD matrices as well, the adopted SPUR and half-life angular-density
+and inverse-covariance quadratic-form experiment requires positive definiteness
+on the retained contrast space. Do not add jitter, a ridge, or silently remove
+requested contrasts to obtain a factorization. Zero/failed response projections
+and unsupported singular angular laws require a clear error.
 
 ### 2.1 Rank and eigenvalue blocks
 
@@ -101,8 +102,7 @@ $$
 | Quantity | Rule |
 | --- | --- |
 | Fitted-design estimability | Scale columns safely, use a rank-revealing decomposition, and compare singular values relative to the leading singular value at 1e-10 |
-| Leading spatial eigenvalue eligibility | Require $\lambda_{\max}>\tau_{\mathrm{floor}}$ using the operator's own size $m_{\mathrm{op}}$ |
-| Spatial positive eigenvalues | Retain $\lambda>\max(\tau_{\mathrm{floor}},\ 10^{-12}\lambda_{\max})$ |
+| Spatial positive eigenvalues | Retain $\lambda>\max(\tau_{\mathrm{floor}},\ 10^{-12}\lambda_{\max})$, using the operator's own size $m_{\mathrm{op}}$ and leading value $\lambda_{\max}$ (reporting $\lambda_{\max}$ and $\tau_{\mathrm{floor}}$ if no eligible complete block exists) |
 | Spatial eigenvalue-block gap | A block ends only at a gap $\lambda_k-\lambda_{k+1}>\max(\tau_{\mathrm{floor}},\ 10^{-11}\lambda_{\max})$, using each operator's own $m_{\mathrm{op}}$ and $\lambda_{\max}$ |
 | Brownian whitening rank | Strict lambda > 1e-10 at unit diameter; defined further in half-life-and-transforms.md |
 | Covariance shape equivalence | Frobenius norm of the difference of trace-normalized matrices <=1e-12, after finite positive traces and valid factors are established |
@@ -191,8 +191,11 @@ simultaneously for **every** covariance $\Omega$. Consequently, both single-cova
 and multi-covariance operations (I(1), the I(0) composite maximum, multi-candidate
 tuning, and the jointly searched half-life confidence set) have exact joint
 finite-$B$ distributional invariance under orthogonal basis rotations without
-any $\Omega$-dependent draw transformation. Cholesky or triangular solves MAY still
-be used for invariant quadratic forms and log-determinants. **[I, D]**
+any $\Omega$-dependent draw transformation. Implementations MAY reuse the same
+symmetric eigendecomposition $\Omega=V\Lambda V^\top$ already needed for
+$\Omega^{1/2}$ to evaluate quadratic forms $\|\Lambda^{-1/2}V^\top z\|^2$ and
+$\log|\Omega|=\sum_i\log\lambda_i$, or use Cholesky/triangular solves,
+provided accuracy checks on ill-conditioned covariances pass. **[I, D]**
 
 Repeated indistinguishable coordinate rows do not create an intrinsic order
 among themselves. Do not invent persistent row identifiers, report an error
@@ -222,14 +225,20 @@ legacy-bitstream inference mode. Record generator, sampler, version and seed;
 use default seed 1. A fixed implementation must reproduce its subsets. **[D]**
 
 Use the canonical site order and retain each selected subset throughout q
-expansion. Subsets may overlap across samples; an unusable subset is reported,
-not silently replaced by an outcome-dependent sample. Reconstructing the same
+expansion. Subsets may overlap across samples; any unusable subset (zero
+positive rank or zero/nonfinite embedded norm) MUST fail clearly with a
+recommendation to increase landmarks or use exact geometry, rather than
+skipping subsets or resampling subsets automatically. Reconstructing the same
 subsets must not consume a different stream. When ell=m use the complete-sample
-shortcut in scpc.md. Cross-implementation approximation comparisons must align
-the actual subsets, not merely assume equal seeds imply equal samples.
+shortcut in scpc.md. Cross-implementation approximation comparisons align
+subsets by sharing the same compiled core RNG and seed, or by explicitly
+supplying/comparing the actual landmark indices.
 
 ## 3. Common decay calibration
 
+Covariance methods normalize pairwise distances internally by the positive
+sample diameter $\Delta$ ($d_{ij}=D_{ij}/\Delta\in[0,1]$, $d_{\max}=1$) and
+convert reported decay rates at the API boundary via $c_{\mathrm{physical}}=c/\Delta$.
 For m declared sites define
 
 $$
@@ -243,17 +252,31 @@ resource checks determine whether a particular mathematically admissible
 request can be computed. **[D]** An all-co-located geometry or unattainable
 target is a support error, not a reason to change the requested correlation bound.
 
-Evaluate the positive-pair contribution separately near f, and use stable
-exponential differences near correlation one. A safeguarded monotone
-bracket/Newton/bisection solver is the reference profile:
+Because $0<d_{\min}\le d_{ij}\le d_{\max}\le1$ on positive-distance pairs,
+defining
 
-- At most 1,024 bracket expansions in either direction and 128 root iterations.
+$$
+a=\frac{\rho_{\mathrm{target}}-f}{1-f},\qquad
+L=-\log a=-\operatorname{log1p}\!\left(\frac{\rho_{\mathrm{target}}-1}{1-f}\right)
+$$
+
+gives the exact analytic bracket $L/d_{\max}\le c_0\le L/d_{\min}$ (which under
+unit-diameter normalization $d_{\max}=1$ is simply $L\le c_0\le L/d_{\min}$).
+If $d_{\min}=d_{\max}$, $c_0=L/d_{\max}$ holds in closed form. Otherwise validate
+that both bracket endpoints are finite and representable, check the residual
+criterion at the endpoints (in case floating-point roundoff places the root on
+an endpoint), and run one safeguarded Newton/Brent/bisection scalar solver
+inside that bracket using the following reference profile:
+
+- No exploratory upward/downward bracket-expansion loop is required; at most 128
+  scalar solver iterations inside $[L/d_{\max},L/d_{\min}]$.
 - Preferred correlation residual <=1e-12 times
   max(min(rho_target-f,1-rho_target),1e-15).
 - A certified sign bracket of relative width <=1e-12 is also an acceptable
   stopping criterion; return which criterion was satisfied and the bracket.
-- If neither criterion is satisfied, return a calibration accuracy error.
-  A looser residual fallback MUST NOT be silently labelled converged.
+- If neither criterion is satisfied or bracket endpoints cannot be represented,
+  return a calibration accuracy error. A looser residual fallback MUST NOT be
+  silently labelled converged.
 
 The bracket is a bound for the numerically evaluated monotone function. It is
 not an independent theorem about exact real-arithmetic evaluation. Detect
@@ -386,7 +409,9 @@ Critical-value tolerance is 0.001 in ordinary t units by default. A caller may
 request a smaller positive tolerance within supported precision. Bracket the
 smallest cutoff satisfying the required evaluated-family tail criterion:
 
-- A Student-t value may be an initial guess, never a lower bound.
+- Initialize from a simple positive starting value or previously computed
+  cutoff, never imposing a Student-$t$ lower floor (no Student-$t$ quantile
+  routine is required).
 - Search downward as well as upward when needed.
 - Preserve a rejecting lower and non-rejecting upper bracket, including
   separately handled atom boundaries.
@@ -437,16 +462,17 @@ over a composite family or the completeness of a confidence-set search.
 Rank/tie and cutoff definitions are in spur.md
 and half-life-and-transforms.md. Finite-simulation inference is a numerical
 profile in its own right; do not label its p-values exact deterministic Gaussian
-probabilities. Common seeds across different host RNGs do not imply common
-draws.
+probabilities. Ordinary seeded draws are generated inside the shared core via one
+maintained RNG, so hosts sharing the same compiled core binary and seed produce
+identical generated blocks; cross-version or custom-generator comparisons use
+explicitly supplied draws.
 
 The ten-node geometry-dependent composite half-life quadrature and bounded
-uniform log-h search recipe (at most 667 initial points under the single
-64-panel preflight cap $d_{\min}\ge2^{-58}$, plus 20-step bracket bisection) are
-defined in half-life-and-transforms.md. That chapter owns their constants. This
-profile retains ten-node quadrature because independent convergence checks
-supported it; it does not increase integration orders without evidence of a
-material remaining error.
+uniform log-h search recipe (including their panel cap, initial grid, and
+bisection rules) are defined normatively in half-life-and-transforms.md, which
+serves as their single normative home. This profile retains ten-node quadrature
+because independent convergence checks supported it; it does not increase
+integration orders without evidence of a material remaining error.
 
 The bounded reference-tuning search is fully defined in spur.md. It uses
 unit-trace covariance shapes, a strength parameter in [0,1], exact endpoint

@@ -256,7 +256,7 @@ $$
 \;\widehat\beta_j+k_{j,q,\alpha}SE_j].
 $$
 
-**[D] No inherited Student floor.** A Student-$t_q$ quantile may initialize a search, but must not impose an extra lower bound. Bracketing must be allowed downward when required. With distinct site coordinates the IID location benchmark is already $K(\infty)$. With duplicate coordinates it is not an additional member of the adopted family. Neither critical values nor p-values may silently add IID, a nugget, or a historical compatibility floor.
+**[D] No inherited Student floor.** Initialize bracketing from a simple positive starting guess or previously evaluated cutoff, and never impose a Student-$t_q$ lower floor; no Student-$t$ quantile implementation is required. Bracketing must be allowed downward when required. With distinct site coordinates the IID location benchmark is already $K(\infty)$. With duplicate coordinates it is not an additional member of the adopted family. Neither critical values nor p-values may silently add IID, a nugget, or a historical compatibility floor.
 
 Every point in the single finite-rate mesh and exact endpoint required by [numerics.md](numerics.md) enters both the cutoff and p-value calculations. Conditional intervals use the larger cutoff required by the two families; conditional p-values use their common worst-case tail definition. Reporting a location-only p-value beside a conditional interval is not this method.
 
@@ -271,11 +271,11 @@ L(q)=k_{{\rm loc},q,0.05}
 \frac{\Gamma((q+1)/2)}{\sqrt q\,\Gamma(q/2)}.
 $$
 
-This is proportional to expected interval length under a separate Gaussian IID site-score experiment, because the columns of $R_q$ are orthonormal. That reference experiment is an efficiency criterion; it does **not** add IID to the calibration family when coordinates coincide. Minimize $L(q)$ over the evaluated eligible candidates, breaking exact objective ties toward smaller $q$.
+For integer $q\ge1$, $r_q=\Gamma((q+1)/2)/\Gamma(q/2)$ satisfies the exact two-step recurrence $r_1=1/\sqrt{\pi}$, $r_2=\sqrt{\pi}/2$, $r_{q+2}=\frac{q+1}{q}r_q$, requiring no general log-gamma routine. This objective is proportional to expected interval length under a separate Gaussian IID site-score experiment, because the columns of $R_q$ are orthonormal. That reference experiment is an efficiency criterion; it does **not** add IID to the calibration family when coordinates coincide. Minimize $L(q)$ over the evaluated eligible candidates, breaking exact objective ties toward smaller $q$.
 
 Using the 5% selection level and retaining the same $q$ for all reported confidence levels and p-values follows [Müller and Watson (2022), equation (6) and Remark 2.6](https://www.princeton.edu/~mwatson/papers/ECTA19465.pdf). Conditional calibration is performed after this choice. It must not reselect $q$ separately for whichever coefficient or null happens to produce a preferred result.
 
-**[A/D] Finite candidate search.** Start with initial working prefix $k=\min(\mathrm{limit},20)$, where $\mathrm{limit}$ is the available geometry or landmark dimension. Extend by doubling $k\leftarrow\min(\mathrm{limit},2k)$ whenever a prefix splits a positive eigenvalue block, or whenever its largest available candidate wins and more positive directions remain available. The exact expansion and tie rules are in [numerics.md](numerics.md). A single Nyström sample does not disable expansion.
+**[A/D] Finite candidate search.** The finite candidate-prefix rule, expansion by doubling, and complete-block stopping rule are governed normatively by [numerics.md](numerics.md#23-scpc-candidate-expansion-and-landmark-sampler) (starting at $\min(\mathrm{limit},20)$ and doubling $k\leftarrow\min(\mathrm{limit},2k)$). A single Nyström sample does not disable expansion.
 
 Stopping at an interior winner is an inherited computational heuristic, not proof of the global minimum over every positive dimension. A nonoptimal $q$ affects efficiency; calibration must still use the actual chosen weights and common covariance family. This specification does not require an exhaustive search merely to preserve an unwarranted optimality claim.
 
@@ -289,19 +289,19 @@ Defaults are 1,000 landmark sites, 20 samples, and landmark seed 1. Use $\ell=\m
 
 Canonical geographic order uses latitude then longitude after the common coordinate canonicalization; Euclidean order is lexicographic. Numerical translation/common scaling may condition Euclidean coordinates without changing distance ratios. Restore weight rows to reported site order. If $\ell=m$, use a single complete sample and return the exact working subspace, allowing an exact-algorithm shortcut.
 
-The complete full-site geometry determines $c_0$, the finite mesh limits, and $\mathcal C$. Landmark-pair averages do not replace those calculations. A zero-positive-rank landmark subset is skipped and reported if the full geometry is otherwise eligible; if no usable subset remains, report a clear approximation/degeneracy error. Do not alter the global correlation target to rescue a subset.
+The complete full-site geometry determines $c_0$, the finite mesh limits, and $\mathcal C$. Landmark-pair averages do not replace those calculations. Every selected landmark subset must yield positive rank and finite nonzero embedded weights; if any landmark subset has zero positive rank or no usable embedded norm, fail clearly with an actionable error instructing the caller to increase the landmark count or use exact geometry—do not skip unusable subsets, silently continue with survivors, resample subsets automatically, or alter the global correlation target.
 
 ### 7.2 Embedded and pooled operator
 
-**[D/I]** For subset $S_r$ of size $\ell$, obtain complete leading positive blocks $U_r$ of its centered covariance $C_\ell K_{S_r,S_r}(c_0)C_\ell$ at the common $c_0$, where $C_\ell=I_\ell-\mathbf1_\ell\mathbf1_\ell^\top/\ell$. Apply the unified spatial rank and block-gap rule in [numerics.md](numerics.md#21-rank-and-eigenvalue-blocks) using operator size $\ell$ and this local matrix's own $\lambda_{\max}$; the pooled operator below uses operator size $m$ and its own $\lambda_{\max}$, so the two scales are not interchanged. Let $\bar\Lambda_r$ replace the eigenvalues in each numerical tie block by their block mean. Define
+**[D/I]** For subset $S_r$ of size $\ell$, obtain complete leading positive blocks $U_r$ of its centered covariance $H_r=C_\ell K_{S_r,S_r}(c_0)C_\ell$ at the common $c_0$, where $C_\ell=I_\ell-\mathbf1_\ell\mathbf1_\ell^\top/\ell$. Apply the unified spatial rank and block-gap rule in [numerics.md](numerics.md#21-rank-and-eigenvalue-blocks) using operator size $\ell$ and this local matrix's own $\lambda_{\max}$; the pooled operator below uses operator size $m$ and its own $\lambda_{\max}$, so the two scales are not interchanged. With $A_r=U_r^\top H_r U_r$ (which equals the diagonal eigenvalue matrix $\Lambda_r$ in an eigenbasis, using actual retained eigenvalues without block-mean averaging), define
 
 $$
-E_r=C_mK_{:,S_r}(c_0)U_r\bar\Lambda_r^{-1/2},
+E_r=C_mK_{:,S_r}(c_0)U_rA_r^{-1/2},
 \qquad
 \widetilde E_r=E_r/\|E_r\|_F.
 $$
 
-Use one Frobenius scale for the whole embedded sample. Per-column normalization is not substituted: it changes the relative weighting after rotations of a retained local block. Every retained block uses its common eigenvalue scale. A sample with no usable finite positive embedded norm is reported as unusable under the numerical profile.
+Under any orthogonal rotation $U_r\mapsto U_rO$ of complete retained blocks, $A_r^{-1/2}\mapsto O^\top A_r^{-1/2}O$ so $E_r\mapsto E_rO$ and $E_rE_r^\top$ is invariant without artificial eigenvalue averaging. Use one Frobenius scale for the whole embedded sample; per-column normalization is not substituted because it breaks rotation invariance within a tied local block. Any sample with zero or nonfinite embedded norm produces the clear failure in §7.1.
 
 Concatenate the retained sample blocks,
 
@@ -319,7 +319,7 @@ Dimension expansion may change the local retained blocks and hence the pooled op
 
 Full-pair geometry/calibration still requires quadratic pair work in $m$. Streaming decay calculations in $O(m)$ auxiliary memory does not make the complete operation linear-time or describe all of its allocations. Landmark decompositions, the embedded $m$-by-total-directions array, pooled Gram work, and covariance projections have their own costs. Reuse geometry-only limits across $q$ expansion; no persistent global cache is required.
 
-The current automatic policy selects Nyström at 4,500 sites and exact below that threshold. This is a package memory/runtime tradeoff, not a theorem or a universal speed crossover. A forced exact or Nyström request remains explicit. A result records the realized method, requested/effective landmark counts, requested/usable sample counts, seed/sampler identity, and approximation status. Sensitivity to landmark settings can be examined without changing the stated statistical family.
+The current automatic policy selects Nyström at 4,500 sites and exact below that threshold. This is a package memory/runtime tradeoff, not a theorem or a universal speed crossover. A forced exact or Nyström request remains explicit. A result records the realized method, sample count and landmark count, seed/sampler identity, and approximation status. Sensitivity to landmark settings can be examined without changing the stated statistical family.
 
 ## 8. Degeneracy, units, and result contract
 
@@ -327,7 +327,7 @@ The current automatic policy selects Nyström at 4,500 sites and exact below tha
 
 Singular positive semidefinite projected covariances are not automatically errors; their Gaussian quadratic-form events are evaluated with the specified boundary convention. The proven no-finite-cutoff case in section 5 receives its specific calibration-degeneracy error before root finding. A materially indefinite covariance, an unbracketed otherwise finite cutoff, or unmet required numerical checks must produce the profile's explicit error/status, rather than an apparently successful finite interval. Reaching a computational cap does not prove that a mathematical finite cutoff does not exist.
 
-Decay rates must have recorded units. If Euclidean conditioning uses $D_{\rm work}=D_{\rm input}/s$, then $c_{\rm input}=c_{\rm work}/s$. The returned scale and distance convention must make this conversion unambiguous. Geographic SCPC rates are inverse fractions of the stated Earth circumference. In either case $K(c)$ and inference are invariant to a common positive change of distance units when rates are transformed consistently.
+Decay rates must have recorded units. Internally, covariance calculations normalize distances by the positive sample diameter $\Delta$ ($d=D/\Delta$), and convert public decay rates via $c_{\mathrm{physical}}=c_{\mathrm{normalized}}/\Delta$. Geographic SCPC decay rates are reported in inverse meters (`1/m`, using the great-circle arc metric on radius 6,371,008.8 meters), consistent with geographic half-life (meters) and ISO radius (meters); Euclidean SCPC rates are reported in inverse input coordinate units. In either case $K(c)$ and inference are invariant to a common positive change of distance units when rates are transformed consistently.
 
 The primary result contains coefficient identity and estimate, $SE_j$, zero-null $T_j$, the combined two-sided p-value, the 95% marginal interval, and its effective coefficient-specific critical value. Optional critical values correspond to two-sided sizes 32%, 10%, 5%, and 1% (coverages 68%, 90%, 95%, and 99%) using the same selected $q$. A separately exposed location-only cutoff must be labeled as such and must not replace the coefficient-specific cutoff in conditional intervals.
 

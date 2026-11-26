@@ -11,21 +11,21 @@ traceability and rationale record.
 | --- | --- | --- | --- |
 | D01 | One complete versioned specification with an explicit incorporated chapter set; no implicit inheritance from historical versions | [D] Makes the current method independently implementable | [Authority](README.md#1-authority-and-document-map) |
 | D02 | State separate Gaussian, asymptotic, empirical and numerical interpretations for each workflow | [P, R, D] A supported estimator or full rank does not establish scientific assumptions | [Scope](README.md#3-supported-calculations-and-scientific-assumptions) |
-| D03 | Exact declared-site semantics; great-circle arc metric; explicit units/scales; true co-location endpoints; no automatic merging, jitter or nugget | [P, A, D, I] The chosen kernel determines its endpoint law | [Geometry](README.md#5-spatial-sites-and-distance-geometry) |
-| D04 | Support actual unweighted OLS/ordinary 2SLS only as listed; reject penalized/weighted/offset and unsupported fits; use the mathematical SCPC domain f<avc<1 | [D] Actual precision/rank/resource checks replace arbitrary historical avc bounds | [Support](README.md#31-host-support), [decay domain](numerics.md#3-common-decay-calibration) |
+| D03 | Exact declared-site semantics; great-circle arc metric; unit-diameter internal covariance normalization with physical-unit boundary conversions (inverse meters for geographic SCPC decay); true co-location endpoints; no automatic merging, jitter or nugget | [P, A, D, I] Unifies covariance scaling across SCPC/SPUR/half-life while keeping NN/ISO local in physical units | [Geometry](README.md#5-spatial-sites-and-distance-geometry) |
+| D04 | Support actual unweighted OLS/ordinary 2SLS only as listed; reject penalized/weighted/offset and unsupported fits; use the mathematical SCPC domain f<avc<1 with exact analytic decay bracket [L/d_max,L/d_min] | [D] Actual precision/rank/resource checks and exact analytic bounds replace arbitrary avc bounds and 1,024-step exploratory bracketing | [Support](README.md#31-host-support), [decay domain](numerics.md#3-common-decay-calibration) |
 | D05 | Restore coefficient bread, influence, SE scaling, OLS/IV transpose, FE projection and site aggregation formulas | [P, I] Required algebra, not an optional compatibility convention | [SCPC](scpc.md) |
-| D06 | Remove Student-t lower floor; use one declared family for p and cutoffs; inclusive observed tails at atoms and strict cutoff/closed-CI boundary | [D, I] Prevents the reproduced duplicate-site inconsistency without adding an undeclared IID benchmark | [SCPC](scpc.md), [critical solver](numerics.md#6-gaussian-probabilities-and-scpc-critical-values) |
+| D06 | Remove Student-t lower floor and custom Student-t/incomplete-beta quantile start machinery (computing r_q via exact two-step recurrence); use one declared family for p and cutoffs; inclusive observed tails at atoms and strict cutoff/closed-CI boundary | [D, I] Removes unnecessary special-function code and prevents the reproduced duplicate-site inconsistency without adding an undeclared IID benchmark | [SCPC](scpc.md), [critical solver](numerics.md#6-gaussian-probabilities-and-scpc-critical-values) |
 | D07 | Clear errors for invalid/undefined computations; explicit degenerate variance status; conservative uninformative outputs only for valid nonzero contrasts | [D] Avoids silent repairs and distinguishes absence of discrimination from numerical failure | [Error policy](README.md#6-error-warning-and-uninformative-result-policy) |
-| D08 | Retain location-only 5% expected-length q objective and complete blocks (under the unified 64 eps m_op rank/gap rule); simplify candidate search to initial prefix 20 and doubling 2k | [P, R, A, D] The 5% rule is paper-recommended; removing the 4-branch lookup preserves default behavior while simplifying growth; global q optimality is not promised | [SCPC](scpc.md), [blocks](numerics.md#21-rank-and-eigenvalue-blocks) |
-| D09 | Retain inverse-root landmark extension, one Frobenius scale/sample and pooled leading subspace; full-site calibration; maintained unbiased landmark sampler instead of prescribed LCG | [D] Declares the actual approximation; the old bitstream has no mathematical authority | [Nyström](scpc.md), [sampler](numerics.md#23-scpc-candidate-expansion-and-landmark-sampler) |
-| D10 | Adopt one single-solve uniform log-rate mesh for both SCPC and I(0): step ratio at most 1.10 from c0 to max(c0,36/d_min) (N<=512) plus exact K(infinity) | [D] Eliminates cmax, the second root solve, and the two-zone seam; unifies SCPC and I(0) on one simple grid gated by full I(0) validation checks | [Meshes](numerics.md#4-shared-covariance-mesh), [I(0)](numerics.md#5-i0-covariance-mesh) |
+| D08 | Retain location-only 5% expected-length q objective and complete blocks (under the unified 64 eps m_op rank/gap rule); simplify candidate search to initial prefix 20 and doubling 2k | [P, R, A, D] The 5% rule is paper-recommended; preserves the default initial prefix of 20 while simplifying expansion to doubling (2k); global q optimality is not promised | [SCPC](scpc.md), [blocks](numerics.md#21-rank-and-eigenvalue-blocks) |
+| D09 | Retain inverse-root landmark extension with actual A_r^{-1/2} (removing tie-block mean substitution), one Frobenius scale/sample, pooled leading subspace, and full-site calibration; generate subsets via shared core RNG and fail clearly on any unusable subset | [D] Declares the actual approximation; preserves rotation invariance cleanly without artificial eigenvalue averaging or survivor-skipping complexity | [Nyström](scpc.md), [sampler](numerics.md#23-scpc-candidate-expansion-and-landmark-sampler) |
+| D10 | Adopt one single-solve uniform log-rate mesh for both SCPC and I(0): step ratio at most 1.10 from c0 to max(c0,36/d_min) (N<=512) plus exact K(infinity) | [D] Eliminates cmax, the second root solve, and the two-zone seam; unifies SCPC and I(0) on one simple grid gated by SCPC and I(0) validation checks | [Meshes](numerics.md#4-shared-covariance-mesh), [I(0)](numerics.md#5-i0-covariance-mesh) |
 | D11 | Separate accuracy criteria and units; no silent success at depth/iteration/resource caps; remove silently coarsened tail fallback | [D] Termination is not convergence; rare unsupported numerical ranges get actionable errors | [Numerical profile](numerics.md) |
 | D12 | Use unit-trace SPUR covariance shapes and a bounded alternative-strength parameter, anchoring I(1) decay by contrast scale c_ref=n/(2 tr(Omega_B)) as a tuning heuristic; retain paper/author normalization maps only as provenance | [D, I] Removes arbitrary covariance scales and unbounded multiplier bookkeeping while scaling multiscale/outlier-absorbed I(1) tuning without claiming universal interval interiority | [SPUR](spur.md) |
 | D13 | One bounded strength search with exact limits and shared rank-cutoff helper; report reference_tuning_power and explicit attainment/status | [R, D] Removes type-7 quantiles, separate 200-step searches, three correlation anchors and underflow-based stopping; no final composite power/global optimum claim | [SPUR](spur.md) |
-| D14 | Independent Gaussian tuning/inference blocks; symmetric Omega^{1/2} draw coloring; inclusive plus-one ranks; exact integer cutoffs; explicit seeded local RNG or supplied draws | [D, I] Unique symmetric square roots make one base-draw rotation E_new=O' E_old exact across all covariances simultaneously, giving exact joint finite-B rotation invariance | [SPUR](spur.md), [simulation profile](numerics.md#7-simulations-tuning-and-half-life-quadrature) |
+| D14 | Independent Gaussian tuning/inference blocks generated in the shared core RNG (or explicitly supplied); symmetric Omega^{1/2} draw coloring; core-classified advisories and exact integer cutoffs; inclusive plus-one ranks | [D, I] Removes duplicated host RNG/advisory paths; unique symmetric square roots make one base-draw rotation E_new=O' E_old exact across all covariances simultaneously | [SPUR](spur.md), [simulation profile](numerics.md#7-simulations-tuning-and-half-life-quadrature) |
 | D15 | Exact Brownian basis and endpoint laws; angular-density mixture uniform in half-life; full null domain; components and separately labelled hull | [P, D, I] Preserves the intended mathematical target instead of replication proxies | [Half-life](half-life-and-transforms.md) |
-| D16 | Single uniform log-h initial half-life grid (d_min/32 to 10^6 at 8 probes/doubling, exact endpoints 0 and infinity) plus 20-step bisection in t; expose point-null API and every evaluation | [D] Replaces stitched 3-part initial grid, deduplication, 3-round midpoint refinement, and tau_t with a single grid bounded automatically by the 64-panel preflight cap | [Half-life](half-life-and-transforms.md) |
-| D17 | Return transition brackets in compactified and half-life units; separate exact endpoint membership from an infinite/zero outer bound | [D, I] An unresolved enclosure is not acceptance of the endpoint; Monte Carlo resolution differs from boundary digits | [Half-life](half-life-and-transforms.md) |
+| D16 | Single uniform log-h initial half-life grid (d_min/32 to 10^6 at 8 probes/doubling, exact endpoints 0 and infinity) plus 20-step bisection in t; optional algebraic structural_uninformative; expose point-null API and every evaluation | [D] Replaces stitched 3-part initial grid, deduplication, 3-round midpoint refinement, tau_t, and mandatory structural classifier with a single grid gated on actual likelihood comparisons | [Half-life](half-life-and-transforms.md) |
+| D17 | Return transition brackets in compactified and half-life units; separate exact endpoint membership from an infinite/zero outer bound; store canonical facts once and derive views | [D, I] An unresolved enclosure is not acceptance of the endpoint; mapped half-life bounds report achieved precision without duplicated storage | [Half-life](half-life-and-transforms.md) |
 | D18 | Explicit LBM pseudoinverse and inherited cutoff; positive-distance NN ties; strict ISO radius and zero isolated rows; no adjusted intercept | [P, A, D] Resolves transformation semantics and their provenance | [Transformations](half-life-and-transforms.md) |
 | D19 | One verified fitted/pipeline sample, actual formula evaluation, coefficient identity, conditional metadata, and projector/Omega^{1/2} invariance; no bespoke canonical eigenspace requirement | [D, I] Symmetric square-root coloring gives exact joint invariance across rotations without needing bespoke eigenspace anchors | [Samples](README.md#4-fitted-samples-formulas-and-coefficient-identity), [results](README.md#7-result-contract-and-reproducibility) |
 | D20 | Tag mathematical definitions, recommendations, author conventions and package choices; preserve archived fixtures without obsolete production modes | [D] Historical replication remains evidence, not a constraint on more faithful methods | [Sources](sources.md), [versioning](README.md#8-versioning-and-conformance) |
@@ -37,7 +37,7 @@ traceability and rationale record.
 | SCPC inference | Exponential benchmark, spatial PC statistic and nuisance supremum | Single uniform log-rate mesh, solver tolerances and diagnostics |
 | q objective | IID expected-length objective; recommendation to choose q at 5% | Initial prefix 20, doubling 2k, unified 64 eps m_op blocks and stopping rule |
 | Conditional inference | Actual residual operator and site/sign benchmark | Robust fitted-state extraction and explicit numerical degeneracy policy |
-| Nyström | Landmark approximation and pooling concept | Inverse-root weighting, Frobenius scales, global pooled truncation, full-site calibration and auto threshold |
+| Nyström | Landmark approximation and pooling concept | Actual $A_r^{-1/2}$ weighting, Frobenius scales, global pooled truncation, fail-on-unusable subset, full-site calibration and auto threshold |
 | I(0)/I(1) | Low-frequency benchmark tests | Draw blocks, Omega^{1/2} coloring, ranks, finite mesh, unit-trace reporting, bounded alternative strength and attained-power reporting |
 | I(0) tuning values | 0.03 bound, 0.001 reference, approximately 50% reference power are recommendations | Their exact finite computation, floor fallback and unattained-target handling |
 | Half-life | Uniform-in-half-life angular-density mixture and test inversion | Ten-node dyadic integration, single log-h grid, 20-step bisection, complete diagnostics and search qualification |
@@ -94,15 +94,21 @@ merely because they can change historical output.
 13. **One SPUR tuning calculation.** Shape normalization, a strength in [0,1],
     exact limiting covariances and the inference rank cutoff replace historical
     raw scales, type-7 quantiles and unbounded doubling/halving phases.
-14. **Ordinary randomness and linear algebra.** A maintained RNG, validated
-    eigenspaces, and symmetric $\Omega^{1/2}$ coloring replace a prescribed LCG
-    and bespoke orientation machinery. Cross-host exact comparisons align
-    actual subsets and retained bases (or apply $E_{\mathrm{new}}=O^\top E_{\mathrm{old}}$).
+14. **Centralized randomness, advisories, and linear algebra.** A single
+    maintained RNG, core advisory classification, validated eigenspaces, and
+    symmetric $\Omega^{1/2}$ coloring replace separate host RNG/advisory paths,
+    a prescribed LCG, and bespoke orientation machinery. Hosts sharing one core
+    and seed match directly; cross-version comparisons supply draws explicitly
+    and align retained bases (or apply $E_{\mathrm{new}}=O^\top E_{\mathrm{old}}$).
 15. **Geometry without invented measurement uncertainty.** Nearest-neighbor
     ties depend on computed distances, not on the coordinate origin's ULP.
-16. **One numerical implementation.** Hosts extract and present fitted state;
-    the core owns the mathematics. Logical preparation/evaluation boundaries
-    do not require a caching framework or a large public options surface.
+16. **One unit-diameter covariance scale and single normative homes.** SCPC,
+    SPUR, and half-life normalize internally by sample diameter and convert at
+    physical boundaries (using inverse meters for geographic SCPC decay), while
+    NN and ISO stay in physical units. Dropping Student-$t$ quantile start code,
+    exploratory decay bracketing, Nyström tie-block eigenvalue averaging,
+    unreachable clamps, and cross-chapter constant duplication eliminates the
+    remaining accidental complexity.
 
 ## 4. Choices retained pending measured evidence
 
@@ -110,10 +116,11 @@ The ten-node half-life mixture, 5% q reference, whitening cutoff, landmark
 counts/auto threshold and default Monte Carlo inference remain adopted. Changing
 a whitening cutoff merely because it is inherited is not an accuracy argument.
 Their provenance, scope and diagnostics remain explicit. The single SCPC/I(0)
-`1.10` log-grid (`N<=512`) and uniform log-$h$ half-life grid are gated on
-independent validation checks in [verification](verification.md), while the
-reference-alternative tuning search and landmark bitstream are deliberately
-revised as recorded above.
+`1.10` log-grid (`N<=512`), `20 -> 40 -> 80` SCPC expansion, uniform log-$h$
+half-life grid (8 probes/doubling), and dropping Nyström tie-block eigenvalue
+averaging are explicitly validation-gated in [verification](verification.md),
+while the reference-alternative tuning search and shared core RNG are
+deliberately revised as recorded above.
 
 The general deterministic quadratic-form SPUR solver is an optional follow-up
 experiment with a promotion gate, not an unimplemented mandatory branch of

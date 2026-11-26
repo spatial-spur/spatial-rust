@@ -26,15 +26,15 @@ the implemented-method identifier.
 
 | Area | Required change relative to the reviewed baseline | Completion evidence |
 | --- | --- | --- |
-| SCPC Student floor and degenerate benchmark | Permit downward bracketing; no undeclared IID addition; detect identically zero benchmark denominator before finite-root search | V01, V02 |
-| Shared decay mesh (SCPC & I(0)) | Use one single-solve uniform log-rate grid (ratio <=1.10 up to max(c0,36/d_min), N<=512) + K(inf) for both SCPC and I(0); remove cmax, the I(0) 79-solve hybrid grid, and coarsened tail fallback; validate full I(0) performance/accuracy | V03, V04, V11 |
+| SCPC Student floor and degenerate benchmark | Permit downward bracketing with simple positive start (no custom Student-t quantile/floor); no undeclared IID addition; detect identically zero benchmark denominator before finite-root search | V01, V02 |
+| Shared decay mesh (SCPC & I(0)) | Use one single-solve uniform log-rate grid (ratio <=1.10 up to max(c0,36/d_min), N<=512) + K(inf) for both SCPC and I(0); remove cmax, the I(0) 79-solve hybrid grid, and coarsened tail fallback; validate SCPC (including q expansion) and full I(0) performance/accuracy | V03, V04, V11 |
 | Probability convergence | Separate depth/iteration exhaustion from satisfied accuracy; error-aware bracket checks | V02, V05 |
-| Decay/root and numerical metadata | Report attained criterion/bracket and c0/c_end; no silent looser fallback | V05 |
+| Decay/root and numerical metadata | Analytic decay bracket [L/d_max,L/d_min] without 1,024-step expansion; report attained criterion/bracket and c0/c_end; no silent looser fallback | V05 |
 | Fitted-state support | Reject unsupported estimator subclasses and missing/misaligned fitted state | V10 |
-| SPUR diagnostics | Unit-trace statistics, symmetric Omega^{1/2} draw coloring, contrast-scaled I(1) and mixture I(0) bounded strength search, shared tuning/inference rank cutoff, separate draw counts and reference_tuning_power | V06 |
-| Uninformative cases | Conservative p=1/full-domain outputs for valid nonzero contrasts under the profile; no substitution for failure | V07 |
-| Half-life output and preparation | Direct finite-h kernels; single 64-panel preflight cap; single uniform log-h grid + 20-step t-bisection; all actual evaluations/counts; endpoint membership separate from outer brackets; error-by-default failure / optional incomplete diagnostics | V08 |
-| Randomness and basis conventions | Unified 64 eps m_op spatial rank/gap rule; maintained unbiased landmark sampler; seeded local RNG or explicit draws; exact joint rotation invariance via Omega^{1/2} without bespoke eigenvector anchoring | V06, V09, V10 |
+| SPUR diagnostics | Unit-trace statistics, symmetric Omega^{1/2} draw coloring, contrast-scaled I(1) and mixture I(0) bounded strength search, shared tuning/inference rank cutoff, separate draw counts, core advisories, and reference_tuning_power | V06 |
+| Uninformative cases | Conservative p=1/full-domain outputs for valid nonzero contrasts under the profile; optional structural_uninformative; no substitution for failure | V07 |
+| Half-life output and preparation | Direct finite-h kernels; single 64-panel preflight cap without unreachable nu clamp; single uniform log-h grid + 20-step t-bisection gated on actual-likelihood comparisons; all actual evaluations/counts; endpoint membership separate from outer brackets; error-by-default failure / optional incomplete diagnostics | V08 |
+| Randomness, geometry, and Nyström | Unified 64 eps m_op spatial rank/gap rule without redundant leading-eigenvalue row; shared core RNG; exact joint rotation invariance via Omega^{1/2}; unit-diameter covariance normalization (inverse meters for geographic SCPC); actual A_r^{-1/2} and fail on unusable Nyström sample | V06, V09, V10 |
 | Nearest neighbors | Replace absolute-coordinate-ULP tie allowances with the distance-relative rule | V09 |
 | Efficiency | Reuse geometry/decay limits through q expansion and geometry/factors/point evaluations within half-life | V11 |
 | Combined workflow | Require separable constant column; preserve one sample and identifiable transformed slopes | V10 |
@@ -133,10 +133,22 @@ generation when a direct rate ratio overflows. When N>512 or c_end is
 unrepresentable, assert the documented preflight error. There must be no silent
 truncation, coarsening, jitter or hidden fallback.
 
-Before locking the I(0) mesh constants, run a full I(0) validation gate at
-B=100,000 across ordinary, clustered, close-pair, and Chetty geometries,
-comparing point count, simulated p-values/cutoffs, denser-grid sensitivity
-(e.g., ratio 1.05), and runtime/memory against the baseline.
+Before locking the mesh and component-search constants, run focused validation
+gates for **both SCPC and I(0)**:
+
+- **SCPC grid and prefix gate:** Cover ordinary and concentrated-leverage
+  conditional OLS fits (such as n=80 with concentrated leverage) across
+  default `0.03` and representative nondefault `avc` values spanning the removed
+  lookup policy (`0.0001, 0.003, 0.008, 0.03, 0.1`); compare selected $q$ and
+  expected-length objective $L(q)$ against a larger feasible prefix, conditional
+  cutoff and p-value differences against the previous `1.05` and denser (e.g.,
+  `1.025`) grids, off-grid rejection probabilities near located interior maxima,
+  and runtime against a stated practical discrepancy criterion. Also check
+  unit-diameter internal normalization and inverse-meter geographic decay conversion.
+- **I(0) grid gate:** At default B=100,000 across ordinary, clustered,
+  close-pair, and Chetty geometries, compare point count, simulated
+  p-values/cutoffs, denser-grid sensitivity (e.g., ratio 1.05), and
+  runtime/memory against the baseline.
 
 ### V05. Accuracy and numerical failure
 
@@ -144,10 +156,15 @@ Compare Gaussian probabilities with an independent representation on realistic
 well-scaled and moderately ill-conditioned covariance examples, including
 co-location, mixed sign conditional weights and concentrated leverage. Record
 absolute/relative errors in the probability or complement being tested.
-Separate numerical integration error from a Monte Carlo discrepancy.
+Separate numerical integration error from a Monte Carlo discrepancy. Also check
+any spectral quadratic-form/log-det reuse on ill-conditioned covariances against
+a stable triangular/Cholesky solve.
 
-Force integration/root budget exhaustion in a controlled fixture and verify
-accuracy failure rather than successful status. Test scale-aware PSD checks,
+Verify the analytic decay bracket `[L/d_max, L/d_min]` (unit-diameter
+`[L, L/d_min]`), exact closed-form root when `d_min = d_max`, endpoint residual
+checks, and bounded solver convergence within 128 iterations. Force
+integration/root budget exhaustion in a controlled fixture and verify accuracy
+failure rather than successful status. Test scale-aware PSD checks,
 especially a materially indefinite small-variance block hidden beside a large
 variance. Test stable coordinate/response scaling and valid small positive
 distances without broadening the supported model.
@@ -166,13 +183,17 @@ into a finite-rate conversion. The new tuning search may choose a different
 alternative; that intentional profile change is separate from normalization.
 
 Use fixed supplied independent draw blocks with aligned bases to compare
-hosts, and verify exact joint finite-B invariance under orthogonal basis
-rotation R_new=R_old O using symmetric Omega^{1/2} coloring and one base-draw
-rotation E_new=O' E_old across I(1), I(0) composite max, tuning, and half-life.
-Verify inclusive plus-one p-values, strict cutoffs, exact integer order-statistic
-ranks and ties, including B too small to reject at a requested size. Check
-reference-tuning status and the meaning of achieved power; the final composite
-cutoff must not be confused with the reference cutoff.
+hosts, verify that hosts sharing the same compiled core binary and seed produce
+identical generated tuning/inference draws without altering caller RNG state,
+and verify exact joint finite-B invariance under orthogonal basis rotation
+R_new=R_old O using symmetric Omega^{1/2} coloring and one base-draw rotation
+E_new=O' E_old across I(1), I(0) composite max, tuning, and half-life. Verify
+that factual advisories and exact rational decision flags are classified by the
+core without hosts recomputing decisions from rounded p-values. Verify inclusive
+plus-one p-values, strict cutoffs, exact integer order-statistic ranks and ties,
+including B too small to reject at a requested size. Check reference-tuning
+status and the meaning of achieved power; the final composite cutoff must not be
+confused with the reference cutoff.
 
 The tuning cutoff uses the same rank helper as inference. Exercise unequal
 B_tune and B, B_tune=19, smaller invalid tuning blocks, exact limiting shapes,
@@ -248,9 +269,20 @@ rejected exact infinity: its infinite outer enclosure must not display an
 accepted unit root. Check the analogous rejected zero case and requested-unit
 overflow. Verify exact_inf_accepted independently of upper_bound_is_inf.
 Exercise the single 64-panel/640-node short-scale preparation cap (admitting
-d_min>=2^-58 with <=667 initial log-h points and rejecting d_min<2^-58 before
-simulation); excess work must give the declared error before costly
-simulation, never silently clip the supported scale range.
+d_min>=2^-58 with <=667 initial log-h points and a=d_min/32 directly without an
+unreachable nu clamp, and rejecting d_min<2^-58 before simulation); excess work
+must give the declared error before costly simulation, never silently clip the
+supported scale range.
+
+Before freezing the uniform log-h grid density, run an actual-likelihood
+comparison gate at default B=100,000 against the previous 0.5.0 search and a
+substantially denser independent search, using common draws and the same
+mixture statistic, across ordinary, clustered, close-pair, and Chetty geometries
+(including likelihood surfaces near acceptance boundaries). Report detected
+components, omitted accepted probes, missed rejection gaps, mapped boundary
+brackets, evaluation counts, and runtime. If 8 probes per doubling shows a
+material loss, measure a modestly denser single log-h grid before considering
+any multi-round refinement.
 
 Synthetic narrow gaps/islands (e.g., narrow gaps/islands of width ~0.06–0.08
 in t) may test uniform log-h probe detection and 20-step bisection mechanics,
@@ -263,21 +295,27 @@ masquerade as completed confidence sets.
 Verify unified 64 eps m_op spatial rank and complete-block behavior under
 simple and tied eigenvalues across SCPC, local Nyström, pooled Nyström, and
 SPUR Brownian operators, using projectors for orientation-independent
-comparisons. Test row permutations, translations and common unit changes
-within representable input precision. With symmetric Omega^{1/2} coloring,
-verify both aligned fixed-draw host parity and exact joint finite-B invariance
-across I(1), I(0), tuning, and half-life under orthogonal basis rotation
-R_new=R_old O with single base-draw rotation E_new=O' E_old. Verify rotation
-invariance of the Frobenius trace-shape criterion. Do not require custom
+comparisons (with zero eligible directions failing cleanly and reporting
+lambda_max and tau_floor). Test row permutations, translations and unit-diameter
+normalization across SCPC/SPUR/half-life (including inverse-meter geographic
+SCPC decay conversion), while confirming that standalone NN/ISO transforms stay
+in physical units without all-pairs diameter work. With symmetric Omega^{1/2}
+coloring, verify both aligned fixed-draw host parity and exact joint finite-B
+invariance across I(1), I(0), tuning, and half-life under orthogonal basis
+rotation R_new=R_old O with single base-draw rotation E_new=O' E_old. Verify
+rotation invariance of the Frobenius trace-shape criterion. Do not require custom
 canonical eigenspace anchors or an error on non-unique orientation.
 
 Check full-landmark/exact subspace agreement and recorded seed/subset reuse
-through q expansion. Verify pooled Frobenius weighting and post-Gram
-orthogonality, without demanding a full eigensolve solely for diagnostics.
-Local landmark blocks use the unified 64 eps l rule with their own l and
-lambda_max. Verify uniform without-replacement sampling with the chosen
-maintained sampler and record its version; cross-implementation fixtures align
-actual landmark indices.
+through q expansion. Verify pooled Frobenius weighting, actual A_r^{-1/2}
+local scaling (comparing projectors and L(q) against block-mean averaging before
+freezing), post-Gram orthogonality without demanding a full eigensolve solely for
+diagnostics, and clear failure (no survivor skipping or resampling) when any
+landmark subset is unusable. Local landmark blocks use the unified 64 eps l rule
+with their own l and lambda_max. Verify uniform without-replacement sampling
+with the shared core RNG and record its version; hosts sharing one core and seed
+reproduce identical subsets, while cross-version fixtures align actual landmark
+indices.
 
 For transformations check Brownian pseudoinverse and constant annihilation,
 the inherited strict whitening threshold, nearest positive distance and tied
@@ -308,7 +346,9 @@ and clear rejection of ambiguous frame matching or unsupported estimators.
 Check repeated explicit-seed calls and unchanged caller RNG state on every
 host. R seed=NULL must receive the actionable unsupported-mode error; caller-
 generated supplied blocks remain supported. Do not retain a hidden global-RNG
-compatibility path or require cross-host bitstream identity from a seed alone.
+compatibility path or separate host RNG draw generators; hosts sharing the same
+compiled core binary and seed reproduce identical draws, while cross-version
+comparisons supply explicit draws.
 
 The combined workflow must use one sample, actual evaluated design columns,
 a separable constant, and an identified transformed slope fit with no added

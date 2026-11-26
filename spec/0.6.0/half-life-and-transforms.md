@@ -182,14 +182,14 @@ the one applied to simulated observations. [I, D]
 
 ### 3.3 Uninformative experiments
 
-If the valid, nonzero projected experiment has covariance shapes that are
-structurally proportional for all half-lives, no angular statistic identifies
-half-life. Return $p(h_0)=1$ for every point-null request and the exact
-full-domain set $[0,\infty]$, with an explicit structural-uninformative
-status. Unsupported dimensions, such as $q=1$ in this profile, need not be
-accepted to implement this behavior. [I, D]
+Implementations MAY detect algebraically known proportional families (for
+example, $q=2$ regular equidistant symmetries across all half-lives) and return
+$p(h_0)=1$ and the full domain $[0,\infty]$ with status
+`structural_uninformative`; a general continuum-proportionality classifier is
+not required. Unsupported dimensions, such as $q=1$ in this profile, need not
+be accepted to implement this behavior. [I, D]
 
-The profile also permits a **conservative uninformative fallback** when its
+The profile requires a **conservative uninformative fallback** when its
 geometry-only shape-equivalence criterion in [numerics](numerics.md) is met
 over the required initial and mixture covariances. Return $p(h_0)=1$ and the
 full domain, labelled `uninformative_within_profile`. This is a deliberate
@@ -220,12 +220,12 @@ applies. [I, D]
 ## 4. Retained mixture quadrature profile
 
 Let $d_{\min}$ be the smallest strictly positive normalized inter-site
-distance and let $\nu$ be the smallest positive normal binary64 number.
-Set $a=\max(d_{\min}/32,\nu)$. Starting from $r=2^{-9}$, halve $r$
-until $r\le a$. The panels are $[0,r],[r,2r],[2r,4r],\ldots$, ending
-at 1. This profile supports **at most 64 panels**, or 640 mixture nodes.
+distance. Require the **at most 64 panels** (640 mixture nodes) preflight cap
+first (failing whenever $d_{\min}<2^{-58}$, as detailed below), then set
+$a=d_{\min}/32\ge2^{-63}$. Starting from $r=2^{-9}$, halve $r$ until $r\le a$.
+The panels are $[0,r],[r,2r],[2r,4r],\ldots$, ending at 1.
 Determine the required panel count from geometry before constructing factors
-or simulations. Exceeding the cap is a resource/geometry error reporting
+or simulations. Exceeding 64 panels is a resource/geometry error reporting
 $d_{\min}$, the sample diameter, the required count and the limit; do not
 merge near locations, clip the scale or substitute the zero-half-life law.
 Each panel uses the standard **ten-point Gauss–Legendre** nodes and positive
@@ -323,9 +323,12 @@ acceptance states differ. [D]
 Twenty bisection steps shrink every bracket by $2^{-20}\approx9.54\times10^{-7}$.
 Even on the outermost finite interval $[t_M,1]$ of initial width
 $\approx10^{-6}$, the final step width is $\approx9.5\times10^{-13}\gg\epsilon$,
-avoiding binary64 stagnation and resolving finite transitions to roughly 6–7
-significant digits in $h$. An unresolved numerical point, nonfinite midpoint, or
-unmet accuracy condition produces incomplete-search behavior below. [D]
+avoiding binary64 midpoint stagnation on the specified initial cells. Twenty
+bisection steps reduce each transition bracket's width in $t$ by $2^{-20}$.
+The mapped half-life bounds describe the achieved precision; no uniform
+absolute or relative half-life precision is implied. An unresolved numerical
+point, nonfinite midpoint, or unmet accuracy condition produces incomplete-search
+behavior below. [D]
 
 Construct components from the located acceptance changes. Round a lower
 component endpoint down to the rejected-side lower bracket bound and an upper
@@ -377,19 +380,25 @@ values with the stateless point-null operation and explicit draws. [D]
 
 ## 6. Half-life result and reuse contract
 
-A completed result must include the following, with conventions shared across
-host languages. These are semantic requirements; adapters may use idiomatic
-container types without changing their meaning. [D]
+A completed result must provide the following semantic information, with
+conventions shared across host languages. Implementations SHOULD store canonical
+underlying facts once (for example, exceedance count and draw count determining
+$p$, normalized half-lives and diameter determining physical units, and located
+components determining any hull) and derive presentation views without
+duplicating independent state, while preserving non-derivable flags
+(`exact_inf_accepted`, `upper_bound_is_inf`, exact zero membership, and exact
+finite requested $h_0$). Adapters may use idiomatic container types without
+changing meaning. [D]
 
 | Result information | Required meaning |
 | --- | --- |
 | Sample and geometry | Observation identities, metric, physical units, sample diameter, $q$, and validated positive-rank/block information; a verified lower rank bound with unknown total rank is permitted after a partial eigensolve |
 | Simulation and score | Methods/profile version, requested level, actual draw use and identity metadata, and quadrature policy and actual node count where computed |
-| Set | Every detected component, optional separate hull, explicit empty/full state, numeric outer bounds and endpoint membership, and whether the set comes from heuristic inversion or a conservative full-domain fallback |
+| Set | Every detected component, optional derived hull, explicit empty/full state, numeric outer bounds and endpoint membership, and whether the set comes from heuristic inversion or a conservative full-domain fallback |
 | Endpoint experiments | Evaluations at exact zero and infinity in a completed heuristic search, or an explicit bypass reason for an analytic/policy full-domain result; `exact_inf_accepted` and `upper_bound_is_inf` are separate, with the corresponding zero-endpoint distinction and any resolution limit |
 | Full evaluation mesh | **Every distinct point test actually evaluated**, including endpoint, interior grid, and bisection points: $t$, normalized and requested-unit half-life, actual count/draw count if simulated, p-value and its source, acceptance, stage, and evaluation status |
 | Transition brackets | Initial and final bracket endpoints, endpoint acceptance states, bisection depth, mapped half-life bounds, and outward-rounding information |
-| Search diagnostics | `heuristic_complete`, structural uninformative, `uninformative_within_profile`, unattainable-rank-level full domain, or `incomplete`; evaluation counts, applicable limits, and any failure reason |
+| Search diagnostics | `heuristic_complete`, `uninformative_within_profile`, `structural_uninformative` (optional), unattainable-rank-level full domain, or `incomplete`; evaluation counts, applicable limits, and any failure reason |
 
 The exposed mesh must be sufficient to audit the actual reported components.
 Returning only the initial grid under an unqualified “grid/p-values” label is

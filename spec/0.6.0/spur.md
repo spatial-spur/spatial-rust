@@ -302,11 +302,10 @@ p_0(z)=\sup_{c\in\mathcal C_0}
 $$
 
 **[D]** Version 0.6.0's default computation uses the single shared bounded decay
-mesh in [the numerical profile](numerics.md) at $\rho_0=0.03$: one uniform
-log-rate grid at step ratio at most $1.10$ from $c_{0.03}$ to
-$c_{\mathrm{end}}=\max(c_{0.03},36/d_{\min})$, together with the exact
-infinite-decay limit $K(\infty)$. Exceeding the declared step budget ($512$)
-produces an explicit preflight error rather than silently coarsening the mesh.
+mesh defined normatively in [the numerical profile](numerics.md#5-i0-covariance-mesh)
+at $\rho_0=0.03$, together with the exact infinite-decay limit $K(\infty)$.
+Exceeding the declared mesh step cap produces an explicit preflight error rather
+than silently coarsening the mesh.
 
 For the evaluated mesh $\mathcal G_0$, return
 
@@ -421,12 +420,12 @@ final composite-test power.
 
 Report the selected strength and its diagnostic-specific meaning, target 0.5,
 reference size 0.05, achieved estimate, tuning draw count, number of evaluated
-candidates and
-tuning status. Emit a single low-power advisory per operation when an achieved
-estimate is below 0.45, naming the affected diagnostic. Always expose a missed
-tolerance or budget status even when the estimate is above that warning
-threshold. An uninformative result has its own status and no purported
-50%-power parameter.
+candidates and tuning status. The shared core classifies and emits a single
+low-power advisory code per operation when an achieved estimate is below 0.45,
+naming the affected diagnostic; host adapters format that advisory consistently.
+Always expose a missed tolerance or budget status even when the estimate is
+above that warning threshold. An uninformative result has its own status and no
+purported 50%-power parameter.
 
 ## 6. Simulation, p-values, and critical values
 
@@ -444,14 +443,16 @@ $B+B_{\rm tune}$ generated columns in total.
 Each block must have independent isotropic standard Gaussian directions, or
 equivalently independent directions uniform on the unit sphere. Both blocks
 must be independent of the observed outcomes, and the inference block must be
-independent of the tuning block. The host RNG/seed policy is fixed in
-[the overview](README.md). Equal seeds in different RNG implementations are not
-a cross-host identity guarantee. Identical supplied blocks compare realized host
-outputs directly when retained bases agree; under an orthogonal basis change
-$R_{\mathrm{new}}=R_{\mathrm{old}}O$, rotating base draws once by
-$E_{\mathrm{new}}=O^\top E_{\mathrm{old}}$ gives an exact coupled comparison across
-**all** covariances simultaneously under symmetric $\Omega^{1/2}$ coloring,
-preserving the exact joint finite-simulation distribution. **[D, I]**
+independent of the tuning block. Ordinary seeded draws are generated in the
+shared core under [the overview](README.md#7-result-contract-and-reproducibility),
+eliminating separate host RNG implementations. Hosts sharing the same compiled
+core and seed reproduce identical draws; cross-version or custom-generator
+comparisons supply explicit draw blocks. Identical supplied blocks compare
+realized host outputs directly when retained bases agree; under an orthogonal
+basis change $R_{\mathrm{new}}=R_{\mathrm{old}}O$, rotating base draws once by
+$E_{\mathrm{new}}=O^\top E_{\mathrm{old}}$ gives an exact coupled comparison
+across **all** covariances simultaneously under symmetric $\Omega^{1/2}$
+coloring, preserving the exact joint finite-simulation distribution. **[D, I]**
 
 **[I, D]** Multiplying each column by any nonzero scalar preserves these
 homogeneous ratio calculations. Normalize finite nonzero columns by their
@@ -491,9 +492,9 @@ $+\infty$ otherwise. Reject **strictly above** that cutoff. For the default
 1%, 5% and 10% levels, calculate the ranks by checked integer division:
 $\lfloor(B+1)/100\rfloor$, $\lfloor(B+1)/20\rfloor$, and
 $\lfloor(B+1)/10\rfloor$, respectively. Floating-point multiplication by
-the displayed decimal must not shift a rank at equality. The package's default
-decision flags use these exact rational levels and integer counts; displayed
-p-values are their numeric representation, not a separate rounding rule.
+the displayed decimal must not shift a rank at equality. The core computes and returns these default decision flags using exact rational
+levels and integer counts; hosts must display them rather than recomputing
+rejections from rounded displayed p-values.
 
 **[I]** For the same simulated statistics these definitions agree, including
 ties:

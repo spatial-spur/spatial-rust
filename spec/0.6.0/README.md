@@ -226,10 +226,12 @@ These are logical boundaries, not a requirement for a public cache object,
 an extensive class hierarchy or a particular internal module layout. **[D]**
 
 The ordinary interface should expose the scientific choices and a small set
-of accuracy/workload controls. The recorded profile owns its internal constants;
-do not turn every implementation tolerance into a public tuning option.
-Provide structured diagnostics without forcing users to parse a solver trace
-for a routine result.
+of accuracy/workload controls. The shared core owns the numerical profile,
+ordinary simulation RNG, factual advisory classification, and exact binary
+decision flags under the declared boundary convention; host adapters format
+those results and advisories without duplicating inference math or recomputing
+decisions from rounded displayed p-values. Do not force users to parse a solver
+trace for a routine result.
 
 ## 5. Spatial sites and distance geometry
 
@@ -275,11 +277,18 @@ pole. The metric is the **great-circle arc** on a sphere of radius
 and use a stable great-circle formula. Chordal distance is not an alternative
 within this profile. **[A, D]**
 
+Covariance operations (SCPC, SPUR, and half-life) normalize pairwise distances
+internally by the positive sample diameter Delta (`d = D / Delta`, with
+`d_max = 1`) and convert reported decay rates and half-lives to the declared
+external physical units at the public API boundary. Standalone local
+transformations (nearest-neighbor and ISO) compute pairwise distances directly
+in physical units without requiring an all-pairs diameter calculation.
+
 | Operation | Working/reporting distance convention |
 | --- | --- |
-| Geographic SCPC | Arc distance divided by Earth circumference |
-| Euclidean SCPC | Input units, or an explicitly recorded common working scale |
-| SPUR covariance/basis | Distance divided by the sample diameter Delta |
+| Geographic SCPC | Arc distance in meters (`d = D / Delta` internally; reported decay rates in inverse meters) |
+| Euclidean SCPC | Input coordinate units (`d = D / Delta` internally; reported decay rates in inverse input units) |
+| SPUR covariance/basis | Distance divided by the sample diameter Delta (`d = D / Delta`) |
 | Normalized half-life | Fraction of the sample diameter |
 | Unnormalized Euclidean half-life | Input coordinate units |
 | Unnormalized geographic half-life | Meters |
@@ -287,8 +296,8 @@ within this profile. **[A, D]**
 | Euclidean ISO radius | Input coordinate units |
 
 If d_work=d_input/s, then c_input=c_work/s and h_input=s*h_work.
-Return the scale and units with any public decay parameter; a Nyström working
-rate is not interchangeable with an unscaled input-coordinate rate.
+Return the scale and units with any public decay parameter; a Nyström or
+unit-diameter internal rate is not interchangeable with a physical-unit rate.
 
 Normalizing by diameter does not make arc and chordal geometries equivalent.
 Spherical Gaussian benchmark calculations also do not automatically inherit
@@ -346,22 +355,29 @@ applicable to the operation**:
 7. Calibration/search status, relevant meshes, convergence/error diagnostics,
    and uninformative or incomplete status.
 
-These are logical fields. Host-native names and containers may differ if their
-mapping is documented and no information is lost. The core mathematical result
-must be available without parsing printed text. Bounds may be infinite; do not
-replace true infinity with a finite display sentinel.
+These are logical fields. Implementations SHOULD store canonical underlying
+facts once (such as exceedance counts and draw count, normalized half-lives and
+diameter, or component intervals) and derive presentation views rather than
+maintaining duplicate independent state, while preserving non-derivable flags
+such as exact endpoint acceptance vs. infinite outer bounds and exact finite
+requested values. Host-native names and containers may differ if their mapping
+is documented and no information is lost. The core mathematical result must be
+available without parsing printed text. Bounds may be infinite; do not replace
+true infinity with a finite display sentinel.
 
 Default simulation seed is 42; default Nyström landmark seed is 1, with a
-uint32 landmark seed domain. Generated simulations use an explicit integer seed
-and local RNG state; they MUST NOT alter the caller's global RNG state.
-An implicit unseeded host mode such as R seed=NULL is not part of 0.6.0 support.
-Reject it with a message to supply an integer seed or explicit draw blocks.
-A caller wanting to consume a host RNG can generate those blocks explicitly
-before the call. No save/restore or global-state compatibility path is required
-inside the numerical methods. **[D]**
+uint32 landmark seed domain. Ordinary seeded simulations (both tuning and
+inference blocks) and Nyström landmark subsets are generated in the shared core
+using one maintained, versioned RNG and sampler; they MUST NOT touch caller
+global RNG state in any host language. Implicit unseeded host modes such as R
+seed=NULL are not part of 0.6.0 support; reject them with a message to supply
+an integer seed or explicit draw blocks. Callers needing a custom host RNG can
+generate draw blocks externally and supply them explicitly. **[D]**
 
-A seed alone does not promise cross-language or cross-version bitwise equality.
-Record the RNG/sampler identity and version. Supplied, identical valid base
+Hosts sharing the same compiled core binary and seed reproduce the same
+generated draws and landmark subsets; a seed alone does not promise bitwise
+equality across different core versions or custom external generators. Record
+the core RNG/sampler identity and version. Supplied, identical valid base
 draws compare realized host results directly when retained bases agree.
 Because SPUR and half-life color draws with the unique symmetric square root
 `Omega^{1/2}`, any orthogonal change of retained basis `R_new = R_old O` is
