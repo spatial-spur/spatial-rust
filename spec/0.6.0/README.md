@@ -361,10 +361,13 @@ before the call. No save/restore or global-state compatibility path is required
 inside the numerical methods. **[D]**
 
 A seed alone does not promise cross-language or cross-version bitwise equality.
-Record the RNG/sampler identity and version. Supplied, identical valid draws
-compare realized host results when the retained basis and covariance coloring
-are aligned. Otherwise the requirement is distributional agreement, with
-coupled colored draws available for exact algebraic comparisons. **[D, I]**
+Record the RNG/sampler identity and version. Supplied, identical valid base
+draws compare realized host results directly when retained bases agree.
+Because SPUR and half-life color draws with the unique symmetric square root
+`Omega^{1/2}`, any orthogonal change of retained basis `R_new = R_old O` is
+coupled across **every** covariance simultaneously by rotating supplied base
+draws once via `E_new = O' E_old`, preserving exact joint finite-simulation
+distributions. **[D, I]**
 
 Distributional invariance under an orthogonal basis rotation differs from
 fixed-draw reproducibility. Complete-block and projector checks in numerics.md
@@ -386,8 +389,9 @@ Historical MATLAB/Stata output matching is a provenance check, not an override
 of this specification. Do not add production compatibility modes for reversed
 projections, finite infinity sentinels, old Brownian proxies, the undeclared
 Student floor, type-7 tuning quantiles, raw author-code statistic normalizations,
-the custom landmark LCG, or implicit global-RNG consumption. Preserve archived
-fixtures with explanations of intended changes.
+the custom landmark LCG, lower-triangular Cholesky draw coloring, two-zone
+`cmax` decay grids, stitched 3-part half-life grids, or implicit global-RNG
+consumption. Preserve archived fixtures with explanations of intended changes.
 
 Until the [migration gates](verification.md) pass, spec/VERSION, core
 SPEC_VERSION and host compatibility checks MUST continue to identify the

@@ -97,7 +97,7 @@ $$
 
 where the outer sum ranges over distinct coordinates. Replacing this expression by $W^\top W$ when coordinates coincide changes the benchmark.
 
-**[D]** The practical finite mesh $\mathcal C$, including its interior points, all required finite-tail points, and $\infty$, is defined by [numerics.md](numerics.md). The same full-site geometry and mesh must serve exact and Nyström calculations, every candidate $q$, every coefficient, every reported significance level, and every p-value. Full-site decay limits and the mesh are computed once per operation, outside component expansion.
+**[D]** The practical finite mesh $\mathcal C$, consisting of the single uniform log-rate grid from $c_0$ to $c_{\rm end}$ and the exact limit $K(\infty)$, is defined by [numerics.md](numerics.md). The same full-site geometry and mesh must serve exact and Nyström calculations, every candidate $q$, every coefficient, every reported significance level, and every p-value. Full-site decay limits and the mesh are computed once per operation, outside component expansion.
 
 ## 3. Working spatial basis and statistic
 
@@ -258,9 +258,9 @@ $$
 
 **[D] No inherited Student floor.** A Student-$t_q$ quantile may initialize a search, but must not impose an extra lower bound. Bracketing must be allowed downward when required. With distinct site coordinates the IID location benchmark is already $K(\infty)$. With duplicate coordinates it is not an additional member of the adopted family. Neither critical values nor p-values may silently add IID, a nugget, or a historical compatibility floor.
 
-Every interior point, added finite-tail point, and exact endpoint required by [numerics.md](numerics.md) enters both the cutoff and p-value calculations. Conditional intervals use the larger cutoff required by the two families; conditional p-values use their common worst-case tail definition. Reporting a location-only p-value beside a conditional interval is not this method.
+Every point in the single finite-rate mesh and exact endpoint required by [numerics.md](numerics.md) enters both the cutoff and p-value calculations. Conditional intervals use the larger cutoff required by the two families; conditional p-values use their common worst-case tail definition. Reporting a location-only p-value beside a conditional interval is not this method.
 
-**[P/D] Continuous target versus shipped approximation.** The paper target replaces the finite maximum by a supremum over all $c\ge c_0$, with the stated limit. Methods 0.6.0 adopts the bounded finite-mesh procedure and accuracy status in [numerics.md](numerics.md). Its additional tail points address the demonstrated omitted-tail case; they do not certify the entire continuum. “Exact SCPC” means full spatial geometry and eigenspace calculation, not exact continuous nuisance maximization. The returned numerical status must preserve this distinction.
+**[P/D] Continuous target versus shipped approximation.** The paper target replaces the finite maximum by a supremum over all $c\ge c_0$, with the stated limit. Methods 0.6.0 adopts the single bounded log-mesh procedure and accuracy status in [numerics.md](numerics.md). Extending the mesh across short-scale correlations to $36/d_{\min}$ addresses the demonstrated omitted-tail case without certifying the entire continuum. “Exact SCPC” means full spatial geometry and eigenspace calculation, not exact continuous nuisance maximization. The returned numerical status must preserve this distinction.
 
 ## 6. Choosing the component count
 
@@ -275,7 +275,7 @@ This is proportional to expected interval length under a separate Gaussian IID s
 
 Using the 5% selection level and retaining the same $q$ for all reported confidence levels and p-values follows [Müller and Watson (2022), equation (6) and Remark 2.6](https://www.princeton.edu/~mwatson/papers/ECTA19465.pdf). Conditional calibration is performed after this choice. It must not reselect $q$ separately for whichever coefficient or null happens to produce a preferred result.
 
-**[A/D] Finite candidate search.** The initial working prefix is 10 for $\mathrm{avc}\ge0.05$, 20 for $0.01\le\mathrm{avc}<0.05$, 60 for $0.005\le\mathrm{avc}<0.01$, and 120 for $f<\mathrm{avc}<0.005$. Cap this by the available geometry/landmark dimension. Extend a working prefix when it splits a positive eigenvalue block, or when its largest available candidate wins and more positive directions are available. The exact expansion and tie rules are in [numerics.md](numerics.md). A single Nyström sample does not disable expansion.
+**[A/D] Finite candidate search.** Start with initial working prefix $k=\min(\mathrm{limit},20)$, where $\mathrm{limit}$ is the available geometry or landmark dimension. Extend by doubling $k\leftarrow\min(\mathrm{limit},2k)$ whenever a prefix splits a positive eigenvalue block, or whenever its largest available candidate wins and more positive directions remain available. The exact expansion and tie rules are in [numerics.md](numerics.md). A single Nyström sample does not disable expansion.
 
 Stopping at an interior winner is an inherited computational heuristic, not proof of the global minimum over every positive dimension. A nonoptimal $q$ affects efficiency; calibration must still use the actual chosen weights and common covariance family. This specification does not require an exhaustive search merely to preserve an unwarranted optimality claim.
 
@@ -293,7 +293,7 @@ The complete full-site geometry determines $c_0$, the finite mesh limits, and $\
 
 ### 7.2 Embedded and pooled operator
 
-**[D/I]** For subset $S_r$ of size $\ell$, obtain complete leading positive blocks $U_r$ of its centered covariance $C_\ell K_{S_r,S_r}(c_0)C_\ell$ at the common $c_0$, where $C_\ell=I_\ell-\mathbf1_\ell\mathbf1_\ell^\top/\ell$. Apply the unscaled-centered-$K$ SCPC rank and block-gap rules to this local matrix. The separately normalized pooled operator below uses its own pooled rule; the two scales must not be interchanged. Let $\bar\Lambda_r$ replace the eigenvalues in each numerical tie block by their block mean. Define
+**[D/I]** For subset $S_r$ of size $\ell$, obtain complete leading positive blocks $U_r$ of its centered covariance $C_\ell K_{S_r,S_r}(c_0)C_\ell$ at the common $c_0$, where $C_\ell=I_\ell-\mathbf1_\ell\mathbf1_\ell^\top/\ell$. Apply the unified spatial rank and block-gap rule in [numerics.md](numerics.md#21-rank-and-eigenvalue-blocks) using operator size $\ell$ and this local matrix's own $\lambda_{\max}$; the pooled operator below uses operator size $m$ and its own $\lambda_{\max}$, so the two scales are not interchanged. Let $\bar\Lambda_r$ replace the eigenvalues in each numerical tie block by their block mean. Define
 
 $$
 E_r=C_mK_{:,S_r}(c_0)U_r\bar\Lambda_r^{-1/2},
@@ -331,6 +331,6 @@ Decay rates must have recorded units. If Euclidean conditioning uses $D_{\rm wor
 
 The primary result contains coefficient identity and estimate, $SE_j$, zero-null $T_j$, the combined two-sided p-value, the 95% marginal interval, and its effective coefficient-specific critical value. Optional critical values correspond to two-sided sizes 32%, 10%, 5%, and 1% (coverages 68%, 90%, 95%, and 99%) using the same selected $q$. A separately exposed location-only cutoff must be labeled as such and must not replace the coefficient-specific cutoff in conditional intervals.
 
-Result metadata identifies observation/site counts and order, membership, coordinate units and scale, $\mathrm{avc}$, co-location fraction, $c_0$, the interior/tail endpoints and evaluated mesh status, $q$, complete-block/tie status, inference mode, approximation settings, numerical tolerances/status, and methods version. Finite calibration over the selected mesh must not be labeled a certified continuous-family guarantee.
+Result metadata identifies observation/site counts and order, membership, coordinate units and scale, $\mathrm{avc}$, co-location fraction, $c_0$, $c_{\rm end}$ and the evaluated mesh status, $q$, complete-block/tie status, inference mode, approximation settings, numerical tolerances/status, and methods version. Finite calibration over the selected mesh must not be labeled a certified continuous-family guarantee.
 
 The required identities and regression examples are specified in [verification.md](verification.md). They include duplicate-site p-value/interval consistency after removing the Student floor, genuine-atom inclusive tails or the declared degeneracy error, zero-standard-error handling, conditional-tail calibration, OLS/IV equivalence, unit changes, site aggregation, and exact/full-landmark subspace agreement. Atom checks must distinguish a strict cutoff rejection probability from the inclusive observed p-value rather than asserting that those two quantities are always identical.

@@ -139,11 +139,11 @@ level, and numerical status. A simulated point test additionally returns its
 actual exceedance and draw counts. Analytic or conservative-policy results
 identify their source and do not fabricate simulation counts. [D]
 
-For a fixed null, generate $Z_b=L_{h_0}\xi_b$, where
-$L_{h_0}$ is the positive-diagonal lower Cholesky factor of the chosen
-positive covariance representative in the retained basis used by the operation, following
-the fixed-draw convention in [SPUR](spur.md#62-ranks-cutoffs-and-equality).
-The columns
+For a fixed null, generate $Z_b=\Omega_{h_0}^{1/2}\xi_b$, where
+$\Omega_{h_0}^{1/2}=V\Lambda^{1/2}V^\top$ is the unique symmetric
+positive-definite square root of the chosen positive covariance representative
+in the retained basis used by the operation, following the draw-coloring
+convention in [SPUR](spur.md#62-ranks-cutoffs-and-equality). The columns
 $\xi_b$ obey the distribution and independence contract in [SPUR](spur.md).
 Use the same deterministic statistic for the observation and each simulation.
 With $B_{\mathrm{MC}}$ inference draws, define
@@ -285,86 +285,47 @@ has been located**. Output from that search is labelled a *detected numerical
 confidence set*. Missing an accepted island can remove accepted parameters;
 missing a rejection gap can enlarge the reported set. [P, I, D]
 
-The version-0.6 profile retains the following current finite recipe, rather
-than asserting an unvalidated simpler or certified alternative. Constants
-below are package search policies. They are not specified by the paper and
-do not establish a probability-error bound. [D]
+The version-0.6 profile uses a single log-spaced initial half-life grid bounded by
+the §4 quadrature cap and refined by fixed-depth bisection at sign changes.
+Constants below are package search policies. They are not specified by the
+paper and do not establish a probability-error bound. [D]
 
 ### 5.2 Initial grid
 
-Use $t=h/(1+h)$, with $t=1$ representing $h=\infty$.
-Construct and sort the union of the following points. [D]
+Use compactified coordinate $t=h/(1+h)$, with $t=0$ representing $h=0$ and
+$t=1$ representing $h=\infty$. Given the smallest strictly positive normalized
+inter-site distance $d_{\min}\in(0,1]$ (with §4 preflight requiring
+$d_{\min}\ge2^{-58}$), set $h_{\min}=d_{\min}/32$ and $h_{\max}=10^6$. [D]
 
-1. The exact endpoints $t=0,1$ and regular points $t=i/256$ for
-   $i=1,\ldots,255$.
-2. Short-scale points: initialize $h=1/255$; while
-   $h>\max(d_{\min}/32,\nu)$, replace $h$ by $2^{-1/8}h$ and
-   insert $h/(1+h)$. There are eight probes per doubling in half-life.
-   Because the §4 preflight cap of 64 quadrature panels already requires
-   $r\ge2^{-63}$ ($d_{\min}\ge2^{-58}$), every geometry passing quadrature
-   preflight generates at most **441 short-scale probes**; no separate
-   secondary short-probe cap is needed, and excess short-scale work fails
-   at §4 preflight before simulation.
-3. Long-scale points: define
+1. Include the exact endpoints $h=0$ ($t=0$) and $h=\infty$ ($t=1$).
+2. Evaluate one uniform log-spaced interior grid from $h_{\min}$ to $h_{\max}$
+   at **8 probes per doubling**:
    $$
-   h_{\max}=\min\{10^8,\max\{1024,1/(10^{-4}d_{\min})\}\}.
+   M=\left\lceil 8\log_2\!\left(\frac{h_{\max}}{h_{\min}}\right)\right\rceil,\qquad
+   h_k=h_{\min}\left(\frac{h_{\max}}{h_{\min}}\right)^{k/M},\quad k=0,1,\ldots,M,
    $$
-   Initialize $h=255\,2^{1/4}$; while $h<h_{\max}$, insert
-   $h/(1+h)$ and replace $h$ by $2^{1/4}h$. There are four probes
-   per doubling. Compute the bound without avoidable floating-point overflow.
+   mapped to $t_k=h_k/(1+h_k)\in(0,1)$ with exact endpoints
+   $h_0=h_{\min}$ and $h_M=h_{\max}$. Because §4's 64-panel preflight cap
+   requires $d_{\min}\ge2^{-58}$, we always have $h_{\min}\ge2^{-63}$, giving
+   $M\le664$ and at most **667 initial evaluations** ($\approx256$ on ordinary
+   geometries). Every interior point is distinct and strictly increasing in $t$.
 
-During sorted deduplication, retain a new point $t$ after previous retained
-point $s$ only when $t-s>10^{-12}\min(t,1-s)$. Preserve both exact
-endpoints, including $t=1$. The finite upper probe bound and the explicit
-infinite endpoint are different objects. [D]
+### 5.3 Transition brackets, endpoint bounds, and finite budgets
 
-### 5.3 Midpoint refinement
+Evaluate rank counts on the sorted initial grid $\{0,t_0,\ldots,t_M,1\}$.
+Identify every adjacent pair $(t_a,t_b)$ whose endpoint acceptance states differ.
+Run **20 steps of bisection in $t=h/(1+h)$** on each transition bracket: at
+each step evaluate the midpoint $t_{\mathrm{mid}}=(t_a+t_b)/2$ (with
+corresponding $h_{\mathrm{mid}}=t_{\mathrm{mid}}/(1-t_{\mathrm{mid}})$, reusing
+any cached evaluation count) and keep the half-interval whose endpoint
+acceptance states differ. [D]
 
-Evaluate rank counts on the initial grid. Apply at most **three** refinement
-rounds. In each round, operate on the currently sorted grid, using its current
-point counts and acceptance states, and collect all proposed midpoints before
-evaluating them as a batch. [D]
-
-For adjacent points $t_i<t_{i+1}$, define
-$e_i=\min(t_i,1-t_{i+1})$ and the minimum eligible width
-
-$$
- w_i=
- \begin{cases}
- 10^{-4}e_i,&e_i>0,\\
- 10^{-12}\max\{\min(t_{i+1},1-t_i),\nu\},&e_i=0.
- \end{cases}
-$$
-
-Skip midpoint refinement when the interval width is at most $w_i$, or
-when its endpoint acceptance states differ. For same-state endpoints, insert
-the midpoint if either applicable condition holds: [D]
-
-| Endpoint state | Level condition | Additional local-shape condition |
-| --- | --- | --- |
-| Both accepted | $\min(p_i,p_{i+1})\le\max(6\alpha,\alpha+0.05)$ | Both outer neighbors exist, $p_i<p_{i-1}$, and $p_{i+1}<p_{i+2}$ |
-| Both rejected | $\max(p_i,p_{i+1})\ge0.2\alpha$ | Both outer neighbors exist, $p_i>p_{i-1}$, and $p_{i+1}>p_{i+2}$ |
-
-Merge evaluated midpoints with existing points and apply the same sorted
-deduplication rule. Stop early if a round proposes no points. These thresholds
-are broad search triggers; in particular, the accepted-cell threshold at 95%
-confidence is 0.30. They must not be described as a tight statistical or
-numerical definition of “borderline.” [D]
-
-### 5.4 Transition brackets, endpoint bounds, and finite budgets
-
-After midpoint rounds, identify every adjacent pair with different acceptance
-states. Bisect each such bracket until its width in $t$ is at most
-
-$$
- \tau_t=\min(10^{-7},10^{-5}\Delta t_{\mathrm{initial}}),
-$$
-
-where $\Delta t_{\mathrm{initial}}$ is the width of that transition
-bracket at the start of bisection. A midpoint that has already been evaluated
-reuses its cached count. Retain the acceptance state at both final bracket
-ends. An unresolved numerical point, midpoint stagnation, or unmet accuracy
-condition produces incomplete-search behavior below. [D]
+Twenty bisection steps shrink every bracket by $2^{-20}\approx9.54\times10^{-7}$.
+Even on the outermost finite interval $[t_M,1]$ of initial width
+$\approx10^{-6}$, the final step width is $\approx9.5\times10^{-13}\gg\epsilon$,
+avoiding binary64 stagnation and resolving finite transitions to roughly 6–7
+significant digits in $h$. An unresolved numerical point, nonfinite midpoint, or
+unmet accuracy condition produces incomplete-search behavior below. [D]
 
 Construct components from the located acceptance changes. Round a lower
 component endpoint down to the rejected-side lower bracket bound and an upper
@@ -381,10 +342,10 @@ is not a replacement for those components or their endpoint-membership flags.
 
 For every finite transition return both bounds in $t$, both bounds mapped
 to normalized $h=t/(1-t)$, and both bounds in requested output units.
-Since $dh/dt=(1+h)^2$, $\tau_t$ is not a uniform absolute or relative
-precision claim in half-life units. An upper enclosure may be infinite when
-the rejected side is **exactly $t=1$**, or when conversion of a finite
-$t<1$ overflows in the requested output units. Record which occurred. If
+Since $dh/dt=(1+h)^2$, fixed bisection depth in $t$ is not a uniform absolute
+or relative precision claim in half-life units. An upper enclosure may be
+infinite when the rejected side is **exactly $t=1$**, or when conversion of a
+finite $t<1$ overflows in the requested output units. Record which occurred. If
 the exact infinite-half-life test rejected, do not print an interval closed
 at infinity or describe the unit-root point as accepted: show the infinite
 outer enclosure with an excluded infinite endpoint and an endpoint-resolution
@@ -395,9 +356,9 @@ rejected: display an open zero endpoint and preserve that rejected endpoint
 test. An infinite numeric bound or a zero outer bound alone never determines
 endpoint-test membership. [I, D]
 
-The quadrature panel cap, long-tail cap, deduplication tolerance, three
-midpoint rounds, and transition precision define this profile's finite search
-budget. There is no additional universal evaluation-count cutoff in the
+The 64-panel quadrature cap, 8-probes-per-doubling interior grid ($h_{\min}$ to
+$h_{\max}=10^6$), and 20-step bracket bisection define this profile's finite
+search budget. There is no additional universal evaluation-count cutoff in the
 method definition. Implementations may reject an operation at resource
 preflight or impose an explicitly reported resource limit. Resource rejection,
 interruption, or failure to meet a required point/bracket accuracy condition
@@ -426,17 +387,16 @@ container types without changing their meaning. [D]
 | Simulation and score | Methods/profile version, requested level, actual draw use and identity metadata, and quadrature policy and actual node count where computed |
 | Set | Every detected component, optional separate hull, explicit empty/full state, numeric outer bounds and endpoint membership, and whether the set comes from heuristic inversion or a conservative full-domain fallback |
 | Endpoint experiments | Evaluations at exact zero and infinity in a completed heuristic search, or an explicit bypass reason for an analytic/policy full-domain result; `exact_inf_accepted` and `upper_bound_is_inf` are separate, with the corresponding zero-endpoint distinction and any resolution limit |
-| Full evaluation mesh | **Every distinct point test actually evaluated**, including initial, tail, midpoint and bisection points: $t$, normalized and requested-unit half-life, actual count/draw count if simulated, p-value and its source, acceptance, stage/round, and evaluation status |
-| Transition brackets | Initial and final bracket endpoints, endpoint acceptance states, stopping tolerance, mapped half-life bounds, and outward-rounding information |
-| Search diagnostics | `heuristic_complete`, structural uninformative, `uninformative_within_profile`, unattainable-rank-level full domain, or `incomplete`; number of rounds/evaluations, applicable limits, and any failure reason |
+| Full evaluation mesh | **Every distinct point test actually evaluated**, including endpoint, interior grid, and bisection points: $t$, normalized and requested-unit half-life, actual count/draw count if simulated, p-value and its source, acceptance, stage, and evaluation status |
+| Transition brackets | Initial and final bracket endpoints, endpoint acceptance states, bisection depth, mapped half-life bounds, and outward-rounding information |
+| Search diagnostics | `heuristic_complete`, structural uninformative, `uninformative_within_profile`, unattainable-rank-level full domain, or `incomplete`; evaluation counts, applicable limits, and any failure reason |
 
 The exposed mesh must be sufficient to audit the actual reported components.
 Returning only the initial grid under an unqualified “grid/p-values” label is
-not conforming. All evaluated points remain in the diagnostic trace even if
-deduplication excludes a point from the active search mesh. A shortcut result
-records only actual work, identifies unevaluated endpoint experiments and their
-bypass reasons, and may have an empty trace. Do not fabricate counts or perform
-otherwise unnecessary simulations, quadrature construction, or a full
+not conforming. All evaluated points remain in the diagnostic trace. A shortcut
+result records only actual work, identifies unevaluated endpoint experiments
+and their bypass reasons, and may have an empty trace. Do not fabricate counts
+or perform otherwise unnecessary simulations, quadrature construction, or a full
 eigendecomposition merely to populate metadata. [D]
 
 Within a prepared operation, reuse normalized geometry, the retained basis,
@@ -532,13 +492,15 @@ $$
 Evaluate the comparison without avoidable overflow or loss of a positive
 distance. This pure distance-relative tolerance is invariant under exact
 Euclidean coordinate translations (and requires no coordinate-origin ULP
-calculation), while remaining wide enough to preserve ties on ordinary decimal
-geographic grids (such as $0.1^\circ$ and $0.01^\circ$ rasters whose binary64
-degree differences vary by $\sim 10^{-13}$–$10^{-12}$ relative to the grid
-step) and narrow enough to separate distinct near-neighbors. Supplied
-coordinates define the geometry; intended ties lost when source coordinates
-suffered larger precision loss (for example, rotating unit-spaced coordinates
-around an origin of magnitude $10^6$) are not reconstructed silently. [D]
+calculation), while remaining wide enough to resolve intended ties on
+ordinary decimal geographic grids (such as $0.1^\circ$ grids at relative
+variation $\sim1.4\times10^{-13}$ and $0.01^\circ$ grids at $\sim1.4\times10^{-12}$,
+whereas a $0.001^\circ$ grid reaches $\sim1.4\times10^{-11}$ and exceeds the
+$10^{-11}$ tolerance) and narrow enough to separate distinct near-neighbors.
+Supplied coordinates define the geometry; intended ties whose relative distance
+discrepancy in the supplied coordinates exceeds $10^{-11}$ (for example,
+unit-spaced coordinates rotated around an origin of magnitude $10^6$) are not
+reconstructed silently. [D]
 
 Apply this tolerance only to the nearest-distance comparison. It must not
 merge distinct coordinates into co-location groups or change the strict ISO
@@ -643,13 +605,13 @@ behavior; and constant, response-scale, distance-unit, row-order and
 within-subspace rotation invariances with the distinctions in
 [the common reproducibility contract](README.md#7-result-contract-and-reproducibility).
 Mathematical operators and retained projectors have their stated deterministic
-invariances; angular inference has distributional invariance under a change
-of retained basis. Fixed-draw comparison requires the same basis and coloring
-convention, or the corresponding rotation of the **colored simulated
-realizations**. Reusing identical white-normal arrays with a newly oriented
-basis and its new Cholesky factor does not provide that coupling. An
-implementation may use a deterministic basis convention without a shared
-bespoke anchoring algorithm. Indistinguishable duplicate-row
+invariances; angular inference has exact joint finite-simulation invariance under
+an orthogonal change of retained basis $R_{\mathrm{new}}=R_{\mathrm{old}}O$
+because symmetric $\Omega^{1/2}$ draw coloring couples every half-life covariance
+simultaneously via one orthogonal rotation $E_{\mathrm{new}}=O^\top E_{\mathrm{old}}$
+of the base draws. Fixed-draw comparison without rotating supplied base draws
+requires the same retained basis. An implementation may use a deterministic basis
+convention without a shared bespoke anchoring algorithm. Indistinguishable duplicate-row
 symmetries are checked through projectors and inference, without inventing
 row identifiers or promising bitwise equality. Include actual likelihood
 fixtures in addition to synthetic search-function tests. [D]

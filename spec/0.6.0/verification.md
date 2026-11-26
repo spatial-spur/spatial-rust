@@ -27,14 +27,14 @@ the implemented-method identifier.
 | Area | Required change relative to the reviewed baseline | Completion evidence |
 | --- | --- | --- |
 | SCPC Student floor and degenerate benchmark | Permit downward bracketing; no undeclared IID addition; detect identically zero benchmark denominator before finite-root search | V01, V02 |
-| Shared decay mesh (SCPC & I(0)) | Use one two-solve 1.05-interior (<=1,024 steps) + 1.20-tail (<=256 steps) + K(inf) mesh generator for both SCPC and I(0); replace I(0) 79-solve hybrid grid and coarsened tail fallback with declared preflight budget errors | V03, V04 |
+| Shared decay mesh (SCPC & I(0)) | Use one single-solve uniform log-rate grid (ratio <=1.10 up to max(c0,36/d_min), N<=512) + K(inf) for both SCPC and I(0); remove cmax, the I(0) 79-solve hybrid grid, and coarsened tail fallback; validate full I(0) performance/accuracy | V03, V04, V11 |
 | Probability convergence | Separate depth/iteration exhaustion from satisfied accuracy; error-aware bracket checks | V02, V05 |
-| Decay/root and numerical metadata | Report attained criterion/bracket; no silent looser fallback | V05 |
+| Decay/root and numerical metadata | Report attained criterion/bracket and c0/c_end; no silent looser fallback | V05 |
 | Fitted-state support | Reject unsupported estimator subclasses and missing/misaligned fitted state | V10 |
-| SPUR diagnostics | Unit-trace statistics, contrast-scaled I(1) and mixture I(0) bounded strength search, shared tuning/inference rank cutoff, separate draw counts and reference_tuning_power | V06 |
+| SPUR diagnostics | Unit-trace statistics, symmetric Omega^{1/2} draw coloring, contrast-scaled I(1) and mixture I(0) bounded strength search, shared tuning/inference rank cutoff, separate draw counts and reference_tuning_power | V06 |
 | Uninformative cases | Conservative p=1/full-domain outputs for valid nonzero contrasts under the profile; no substitution for failure | V07 |
-| Half-life output and preparation | Direct finite-h kernels; single 64-panel short-scale preflight cap; all actual evaluations/counts; endpoint membership separate from outer brackets; error-by-default failure / optional incomplete diagnostics | V08 |
-| Randomness and basis conventions | Maintained unbiased landmark sampler; seeded local RNG or explicit draws; projector invariance without bespoke eigenvector anchoring | V06, V09, V10 |
+| Half-life output and preparation | Direct finite-h kernels; single 64-panel preflight cap; single uniform log-h grid + 20-step t-bisection; all actual evaluations/counts; endpoint membership separate from outer brackets; error-by-default failure / optional incomplete diagnostics | V08 |
+| Randomness and basis conventions | Unified 64 eps m_op spatial rank/gap rule; maintained unbiased landmark sampler; seeded local RNG or explicit draws; exact joint rotation invariance via Omega^{1/2} without bespoke eigenvector anchoring | V06, V09, V10 |
 | Nearest neighbors | Replace absolute-coordinate-ULP tie allowances with the distance-relative rule | V09 |
 | Efficiency | Reuse geometry/decay limits through q expansion and geometry/factors/point evaluations within half-life | V11 |
 | Combined workflow | Require separable constant column; preserve one sample and identifiable transformed slopes | V10 |
@@ -102,23 +102,23 @@ by the recorded t bracket or assessed probability uncertainty.
 ### V03. Mesh, co-location and omitted-tail regression
 
 Verify that exact and Nyström calls use full-site decay limits and that every
-q candidate, cutoff, p-value and confidence level includes all prescribed
-finite points plus K(infinity). Check the algebraic co-location endpoint
-against summed-row outer products.
+q candidate (starting at prefix 20 and doubling 2k), cutoff, p-value and
+confidence level includes all points of the single log-rate mesh plus K(infinity).
+Check the algebraic co-location endpoint against summed-row outer products.
 
 Retain the previous n=500/q=8 concentrated-leverage fixture as a diagnostic.
 At the baseline, one omitted decay 44603.48665508749 had rejection probability
-0.05098875005198544 at the returned cutoff 4.090183822704166. The new finite
-tail must extend across that previously omitted scale range. Independently
-verify its evaluated-family calibration and report the probability at that
-off-mesh probe and additional nearby probes.
+0.05098875005198544 at the returned cutoff 4.090183822704166. The single log-rate
+mesh up to max(c0,36/d_min) must cover that previously omitted scale range.
+Independently verify its evaluated-family calibration and report the probability
+at that off-mesh probe and additional nearby probes.
 
 Report any remaining off-mesh difference explicitly; this verification does
 not transform a finite mesh into a continuum certificate. Do not relabel
 an off-mesh diagnostic as a formal uniform bound. Lower-leverage controls
 help distinguish a targeted fixture from a claim about common default behavior.
 
-### V04. Correlation-floor and mesh-budget cases
+### V04. Correlation-floor, mesh-budget and I(0) grid validation
 
 Check the mathematical avc domain f<avc<1, including admissible requests
 below 0.001 and above 0.99. Actual precision/rank/resource limitations may
@@ -127,12 +127,16 @@ For I(0), verify f<0.03, exact f=0.03 limit-only inference, and f>0.03
 infeasibility. Exercise the .001 reference-correlation fallback to K(infinity).
 
 Verify that both SCPC (at avc) and I(0) (at 0.03) construct the identical
-two-solve §4 decay mesh: endpoints c0 and cmax included once, interior 1.05
-steps, 1.20 tail up to max(cmax,36/d_min), and K(infinity). Check log-domain
-generation when a direct rate ratio overflows. When more than 1,024 interior
-steps, more than 256 tail intervals, or an unrepresentable endpoint is
-required, assert the documented preflight error. There must be no silent
+single-solve §4 log-rate mesh: exact endpoints c0 and c_end=max(c0,36/d_min),
+uniform log spacing at ratio at most 1.10, and K(infinity). Check log-domain
+generation when a direct rate ratio overflows. When N>512 or c_end is
+unrepresentable, assert the documented preflight error. There must be no silent
 truncation, coarsening, jitter or hidden fallback.
+
+Before locking the I(0) mesh constants, run a full I(0) validation gate at
+B=100,000 across ordinary, clustered, close-pair, and Chetty geometries,
+comparing point count, simulated p-values/cutoffs, denser-grid sensitivity
+(e.g., ratio 1.05), and runtime/memory against the baseline.
 
 ### V05. Accuracy and numerical failure
 
@@ -161,25 +165,31 @@ p-values. Verify direct endpoint alternatives instead of substituting infinity
 into a finite-rate conversion. The new tuning search may choose a different
 alternative; that intentional profile change is separate from normalization.
 
-Use fixed supplied independent draw blocks with aligned bases and coloring to compare hosts. Verify inclusive
-plus-one p-values, strict cutoffs, exact integer order-statistic ranks and ties,
-including B too small to reject at a requested size. Check reference-tuning
-status and the meaning of achieved power; the final composite cutoff must
-not be confused with the reference cutoff.
+Use fixed supplied independent draw blocks with aligned bases to compare
+hosts, and verify exact joint finite-B invariance under orthogonal basis
+rotation R_new=R_old O using symmetric Omega^{1/2} coloring and one base-draw
+rotation E_new=O' E_old across I(1), I(0) composite max, tuning, and half-life.
+Verify inclusive plus-one p-values, strict cutoffs, exact integer order-statistic
+ranks and ties, including B too small to reject at a requested size. Check
+reference-tuning status and the meaning of achieved power; the final composite
+cutoff must not be confused with the reference cutoff.
 
 The tuning cutoff uses the same rank helper as inference. Exercise unequal
 B_tune and B, B_tune=19, smaller invalid tuning blocks, exact limiting shapes,
 the bounded search and selected-candidate tie rule. Zero strength is only a
 weak bracket anchor, never a selected nontrivial alternative. Include the
-outlier-absorbed residual I(1) regression fixture (59 points in [0,1e-6]^2 plus
-1 outlier at (1,0) absorbed by an indicator regressor, q=15) to verify that
-the contrast-scale anchor c_ref=n/(2 tr(Omega_B)) reaches the 50% power target
-cleanly within the 20-interior-candidate budget (rather than stalling at
-c<=2^20-1), and verify uniform site-duplication invariance of c_ref. Check that
-a missed target is reported without a false convergence or global-power claim.
-Compare achieved reference power and workload on ordinary, clustered and
-Chetty geometries before release; numerical order/validity does not by itself
-establish equal power to the older search.
+deterministic outlier-absorbed residual I(1) regression fixture: n=60 sites
+consisting of the first 59 points of an 8x8 uniform grid on [0,1e-6]^2 in
+row-major order ((i*1e-6/7, j*1e-6/7) for i,j in 0..7) plus 1 outlier at
+(1,0), with X having an intercept and an indicator for observation 60, and q=15
+(tr(Omega_B)~1.466e-5, c_ref~2.046e6, relative block gap ~1.54e-3). Verify
+that the contrast-scale anchor c_ref=n/(2 tr(Omega_B)) reaches the 50% power
+target cleanly inside the 20-interior-candidate budget (rather than remaining
+near 5% size at c<=2^20-1), and verify uniform site-duplication invariance of
+c_ref. Check that a missed target is reported without a false convergence or
+global-power claim. Compare achieved reference power and workload on ordinary,
+clustered and Chetty geometries before release; numerical order/validity does
+not by itself establish equal power to the older search.
 
 The specification review included an independent prototype with n=60,
 q=15 and B_tune=5000 on ordinary, clustered, exact-duplicate and line
@@ -229,42 +239,45 @@ retained order; they are not a uniform bound on every geometry or endpoint.
 Check point-null acceptance p>alpha under the declared represented-level
 boundary convention, all detected components, empty sets,
 unbounded components and separately labelled hulls. Verify every actually
-evaluated grid/refinement/bisection point and its count is available, with
-phase labels and no invented counts for bypassed work. Check mapped endpoint
-brackets and outward rounding.
+evaluated endpoint, initial log-h grid, and 20-step bisection point and its
+count is available, with stage labels and no invented counts for bypassed work.
+Check mapped endpoint brackets and outward rounding.
 
 Include the transition bracket [t_acc,1] with accepted finite endpoint and
 rejected exact infinity: its infinite outer enclosure must not display an
 accepted unit root. Check the analogous rejected zero case and requested-unit
 overflow. Verify exact_inf_accepted independently of upper_bound_is_inf.
-Exercise the single 64-panel/640-node short-scale preparation cap (triggering
-at d_min<=2^-59, which also bounds generated short-scale probes to <=441);
-excess work must give the declared error before costly simulation, never
-silently clip the supported scale range.
+Exercise the single 64-panel/640-node short-scale preparation cap (admitting
+d_min>=2^-58 with <=667 initial log-h points and rejecting d_min<2^-58 before
+simulation); excess work must give the declared error before costly
+simulation, never silently clip the supported scale range.
 
-Synthetic narrow gaps/islands may test search mechanics, but must not be cited
-as a proof of actual-likelihood completeness. Check that all component results
-carry heuristic scope and incomplete searches do not masquerade as completed
-confidence sets.
+Synthetic narrow gaps/islands (e.g., narrow gaps/islands of width ~0.06–0.08
+in t) may test uniform log-h probe detection and 20-step bisection mechanics,
+but must not be cited as a proof of actual-likelihood completeness. Check that
+all component results carry heuristic scope and incomplete searches do not
+masquerade as completed confidence sets.
 
 ### V09. Subspaces, geometry and transformations
 
-Verify complete-block behavior under simple and tied eigenvalues, using
-projectors for orientation-independent comparisons. Test row permutations,
-translations and common unit changes within representable input precision.
-For finite supplied simulations, distinguish aligned fixed-draw comparisons
-from arbitrary rotated-basis distributional invariance. Couple colored
-realizations for exact rotation checks; blindly rotating/reusing base normals
-under a new Cholesky factor is not the same test fixture. Verify rotation
+Verify unified 64 eps m_op spatial rank and complete-block behavior under
+simple and tied eigenvalues across SCPC, local Nyström, pooled Nyström, and
+SPUR Brownian operators, using projectors for orientation-independent
+comparisons. Test row permutations, translations and common unit changes
+within representable input precision. With symmetric Omega^{1/2} coloring,
+verify both aligned fixed-draw host parity and exact joint finite-B invariance
+across I(1), I(0), tuning, and half-life under orthogonal basis rotation
+R_new=R_old O with single base-draw rotation E_new=O' E_old. Verify rotation
 invariance of the Frobenius trace-shape criterion. Do not require custom
 canonical eigenspace anchors or an error on non-unique orientation.
 
 Check full-landmark/exact subspace agreement and recorded seed/subset reuse
 through q expansion. Verify pooled Frobenius weighting and post-Gram
 orthogonality, without demanding a full eigensolve solely for diagnostics.
-Local landmark blocks use their own unscaled centered-K rule. Verify uniform
-without-replacement sampling with the chosen maintained sampler and record
-its version; cross-implementation fixtures align actual landmark indices.
+Local landmark blocks use the unified 64 eps l rule with their own l and
+lambda_max. Verify uniform without-replacement sampling with the chosen
+maintained sampler and record its version; cross-implementation fixtures align
+actual landmark indices.
 
 For transformations check Brownian pseudoinverse and constant annihilation,
 the inherited strict whitening threshold, nearest positive distance and tied
@@ -276,12 +289,14 @@ For the nearest-neighbor regressions under the distance-relative 1e-11 rule:
 10^15 to all coordinates preserves the query point's distances 1 and 9/8 and
 its unique nearest neighbor, so its transformed value must remain 1 (the old
 origin-dependent allowance included both neighbors and changed it to -1);
-(b) verify that standard 0.1-degree and 0.01-degree geographic longitude grids
-(e.g., lat=0, lon=-120.0,-119.9,-119.8,-119.7) preserve exact two-sided ties,
-while distinct pairs differing by 1e-6 or 1e-2 remain separated. Large-origin
-rotated Euclidean grids losing >11 digits of coordinate precision (such as the
-archived 0.5.0 UTM 4.5e6 unit-square fixture) are intentionally not
-reconstructed.
+(b) verify that standard 0.1-degree (~1.4e-13 relative noise) and 0.01-degree
+(~1.4e-12 relative noise) geographic longitude grids (e.g., lat=0,
+lon=-120.0,-119.9,-119.8,-119.7) preserve intended two-sided ties under the
+1e-11 rule (while noting that 0.001-degree grids reach ~1.4e-11 and exceed
+1e-11), and that distinct pairs differing by 1e-6 or 1e-2 remain separated.
+Large-origin rotated Euclidean grids whose relative distance discrepancy
+exceeds 1e-11 (such as the archived 0.5.0 UTM 4.5e6 unit-square fixture) are
+intentionally not reconstructed.
 
 ### V10. Host/sample contract and Chetty comparison
 
@@ -301,7 +316,8 @@ intercept. A full-indicator design without a separable constant receives the
 documented error; residual diagnostics can still accept its constant span.
 
 Run the Chetty example across supported hosts with common supplied draws,
-aligned retained bases/coloring, landmark subsets and coordinate conventions.
+aligned retained bases (or coupled draws E_new=O' E_old via symmetric
+Omega^{1/2}), landmark subsets and coordinate conventions.
 Compare point estimates, q, SEs, cutoffs, p-values,
 half-life components and transformation output. Explain intended differences
 from author/main fixtures due to corrected projections, exact Brownian
@@ -315,11 +331,12 @@ Instrument geometry/decay preparation and half-life point evaluation to verify
 per-call reuse. A repeated q expansion must not recompute full-site decay roots;
 repeated half-life points must not rerun their whole simulation.
 
-Record representative exact/Nyström and half-life time and peak memory against
-the prior implementation and main. Specify B explicitly: a 1,000-draw run
-does not describe the 100,000-draw default. Track output differences alongside
-speed. The auto threshold is evaluated as a memory/runtime policy, not assumed
-to be a universal crossover.
+Record representative exact/Nyström, full I(0) (`B=100,000` over the single
+1.10 log-rate mesh), symmetric square-root coloring vs. baseline Cholesky, and
+half-life time and peak memory against the prior implementation and main.
+Specify B explicitly: a 1,000-draw run does not describe the 100,000-draw
+default. Track output differences alongside speed. The auto threshold is
+evaluated as a memory/runtime policy, not assumed to be a universal crossover.
 
 No universal speedup or bitwise-provider requirement is imposed. Broaden
 benchmarking only to resolve a concrete remaining performance risk.

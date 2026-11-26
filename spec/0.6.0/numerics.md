@@ -77,24 +77,33 @@ that adjustment must be available in diagnostics. Larger negativity is an
 error. **[D]**
 
 SCPC admits valid singular Gaussian covariance laws when their ratio statistic
-is defined; see scpc.md for atom/tie behavior. SPUR angular densities and
-Cholesky factors require positive definiteness on the retained contrast space.
+is defined; see scpc.md for atom/tie behavior. SPUR/half-life angular densities,
+symmetric square-root draw coloring $\Omega^{1/2}$, and quadratic-form solves
+require positive definiteness on the retained contrast space.
 Do not add jitter, a ridge, or silently remove requested contrasts to obtain
 a factorization. Zero/failed response projections and unsupported singular
 angular laws require a clear error.
 
 ### 2.1 Rank and eigenvalue blocks
 
-The following dimension decisions are part of this profile:
+The following dimension decisions are part of this profile. For any
+$m_{\mathrm{op}}\times m_{\mathrm{op}}$ spatial operator (unscaled centered SCPC
+$H_0$ with $m_{\mathrm{op}}=m$, local Nyström $H_r$ with $m_{\mathrm{op}}=\ell$,
+Frobenius-normalized pooled Nyström $H_{\mathrm{pool}}$ with $m_{\mathrm{op}}=m$,
+or unit-diameter SPUR Brownian $B_X$ with $m_{\mathrm{op}}=n$), define the
+unified construction floor
+
+$$
+\tau_{\mathrm{floor}}=64\epsilon m_{\mathrm{op}},
+\qquad \epsilon=2^{-52}.
+$$
 
 | Quantity | Rule |
 | --- | --- |
 | Fitted-design estimability | Scale columns safely, use a rank-revealing decomposition, and compare singular values relative to the leading singular value at 1e-10 |
-| Leading spatial eigenvalue eligibility | Require lambda_max>1.6e-11 for SCPC and the normalized Nyström pooled operator; require lambda_max>8 epsilon n for the unit-diameter SPUR Brownian construction |
-| Spatial positive eigenvalues | Retain lambda > 1e-12 lambda_max, provided the leading value is above the applicable construction floor |
-| SCPC eigenvalue-block gap | A block ends only at a gap greater than max(1.6e-11, 1.6e-11 abs(lambda_max)) for the unscaled centered K matrix, including each local Nyström landmark covariance |
-| Nyström pooled eigenvalue-block gap | The same max(1.6e-11, 1.6e-11 abs(lambda_max)) rule on H_pool=EE' as defined in scpc.md, after each sample has unit Frobenius norm; use its own leading eigenvalue |
-| SPUR eigenvalue-block gap | A block ends only at a gap greater than max(8 epsilon n, 1.6e-11 abs(lambda_max)) for the unit-diameter Brownian construction |
+| Leading spatial eigenvalue eligibility | Require $\lambda_{\max}>\tau_{\mathrm{floor}}$ using the operator's own size $m_{\mathrm{op}}$ |
+| Spatial positive eigenvalues | Retain $\lambda>\max(\tau_{\mathrm{floor}},\ 10^{-12}\lambda_{\max})$ |
+| Spatial eigenvalue-block gap | A block ends only at a gap $\lambda_k-\lambda_{k+1}>\max(\tau_{\mathrm{floor}},\ 10^{-11}\lambda_{\max})$, using each operator's own $m_{\mathrm{op}}$ and $\lambda_{\max}$ |
 | Brownian whitening rank | Strict lambda > 1e-10 at unit diameter; defined further in half-life-and-transforms.md |
 | Covariance shape equivalence | Frobenius norm of the difference of trace-normalized matrices <=1e-12, after finite positive traces and valid factors are established |
 
@@ -170,16 +179,20 @@ construction or unique orientation of a tied eigenspace is required. Validate
 the complete retained projector, eigen residuals and orthogonality; do not
 use the tested response to orient or select directions. **[D]**
 
-Identical supplied base Gaussian draws compare realized host outputs only when
-their retained bases and coloring conventions agree. For a deliberate basis
-change R_new=R_old O, an exact coupled comparison uses colored contrasts
-G_new=O' G_old. With Cholesky factors for one covariance Omega, equivalent base
-draws are Z_new=L_new^{-1} O' L_old Z_old, not generally O' Z_old. The map is
-orthogonal for positive-definite covariances, but because Cholesky factors are
-not rotation-equivariant, this map depends on Omega; multi-covariance
-operations (such as the I(0) composite mesh or half-life search) therefore
-require aligned retained bases R for identical finite-draw comparisons, or
-distributional invariance checks otherwise. **[I]**
+Identical supplied base Gaussian draws compare realized host outputs when their
+retained bases agree. For any orthogonal change of retained basis
+$R_{\mathrm{new}}=R_{\mathrm{old}}O$, SPUR and half-life color draws with the
+unique symmetric positive-definite square root
+$S(\Omega)=\Omega^{1/2}=V\Lambda^{1/2}V^\top$. Because
+$(O^\top\Omega O)^{1/2}=O^\top\Omega^{1/2}O$, rotating the base draws once by
+$E_{\mathrm{new}}=O^\top E_{\mathrm{old}}$ gives an exact coupled comparison
+$S(\Omega_{\mathrm{new}})E_{\mathrm{new}}=O^\top S(\Omega_{\mathrm{old}})E_{\mathrm{old}}$
+simultaneously for **every** covariance $\Omega$. Consequently, both single-covariance
+and multi-covariance operations (I(1), the I(0) composite maximum, multi-candidate
+tuning, and the jointly searched half-life confidence set) have exact joint
+finite-$B$ distributional invariance under orthogonal basis rotations without
+any $\Omega$-dependent draw transformation. Cholesky or triangular solves MAY still
+be used for invariant quadratic forms and log-determinants. **[I, D]**
 
 Repeated indistinguishable coordinate rows do not create an intrinsic order
 among themselves. Do not invent persistent row identifiers, report an error
@@ -188,14 +201,13 @@ fixed-seed ranks under every row permutation/backend change.
 
 ### 2.3 SCPC candidate expansion and landmark sampler
 
-The initial working dimension is 10 for avc>=0.05, 20 for
-0.01<=avc<0.05, 60 for 0.005<=avc<0.01, and 120 otherwise in the supported
-domain. The dimension limit is m-1 in exact mode and min(m,landmarks)-1 in
-Nyström mode. Cap each requested prefix at that limit.
+The initial working dimension is $\min(\mathrm{limit},20)$ across all supported
+$\mathrm{avc}$ values, where $\mathrm{limit}$ is $m-1$ in exact mode and
+$\min(m,\mathrm{landmarks})-1$ in Nyström mode.
 
 If a prefix splits a positive block, or its largest candidate wins while more
-positive directions remain available, increase the prefix to
-min(limit,k+ceil(k/2)) and recompute candidates. A single landmark sample
+positive directions remain available, double the prefix to $\min(\mathrm{limit},2k)$
+and recompute candidates. A single landmark sample
 does not disable this rule. Stop at an interior winner, exhaustion of positive
 directions or the declared dimension limit, provided the selected prefix ends
 at a complete block. If a required block cannot be resolved within the limit,
@@ -255,61 +267,41 @@ these quantities. Streaming pairs saves memory, not their quadratic time.
 
 ## 4. Shared covariance mesh
 
-One bounded decay-rate mesh generator serves both SCPC (at caller $\rho_0=\mathrm{avc}$)
-and I(0) (at $\rho_0=0.03$), solving only the two boundary rates rather than
-running a separate root solve for every interior point. **[D]**
+One single-solve uniform log-rate mesh generator serves both SCPC (at caller
+$\rho_0=\mathrm{avc}$) and I(0) (at $\rho_0=0.03$), eliminating separate interior
+vs. tail zones and second root solves. **[D]**
 
-### 4.1 Interior and finite endpoint
+### 4.1 Single bounded log-rate construction
 
-For an attainable target $\rho_0\in(f,1)$, let $c_0$ solve $\rho(c_0)=\rho_0$
-and let $c_{\max}$ solve
-
-$$
-\rho(c_{\max})=
-f+\min\{(1-f)10^{-5},\ 0.1(\rho_0-f)\}.
-$$
-
-cmax is the upper endpoint of the **interior** mesh; it is not the largest
-finite rate evaluated after tail augmentation. Report both cmax and c_tail.
-The formula ensures a lower correlation target than $\rho_0$ when representable;
-if a strictly positive span cannot be represented, return a clear calibration
-error. **[D]**
-
-The interior set is c0, all c0*1.05^k strictly between c0 and cmax, and cmax.
-Use log-domain generation when necessary and include the actual endpoints
-exactly once. Do not overshoot cmax merely to force a minimum point count.
-**The interior mesh MUST NOT exceed 1,024 steps** (requiring
-$\lfloor(\log c_{\max}-\log c_0)/\log 1.05\rfloor\le 1{,}024$); if an extreme
-$\rho_0$ near $1$ or multiscale geometry exceeds this budget, fail at preflight
-with an explicit mesh-budget error naming the span and limit rather than
-coarsening silently. The 1.05 spacing is a retained numerical choice, not an
-accuracy certificate.
-
-### 4.2 Shared bounded tail construction
-
-Let d_min be the smallest strictly positive full-site distance in the same
-working units as c. From $a=c_{\max}>0$, define
+For an attainable target $\rho_0\in(f,1)$, solve $\rho(c_0)=\rho_0$ for $c_0>0$.
+Let $d_{\min}$ be the smallest strictly positive full-site distance in the same
+working units as $c$, and define
 
 $$
-b=\max\{a,\ 36/d_{\min}\},\qquad
-N=\left\lceil\frac{\log b-\log a}{\log 1.2}\right\rceil.
+c_{\mathrm{end}}=\max\{c_0,\ 36/d_{\min}\}.
 $$
 
-If b=a, the tail contributes no new finite points. Otherwise include
+If $c_{\mathrm{end}}=c_0$, the finite mesh is $\{c_0\}$ ($N=0$, 1 finite point).
+Otherwise ($c_{\mathrm{end}}>c_0$), set
 
 $$
-c_k=\exp\{\log a+(k/N)(\log b-\log a)\},\quad k=1,\ldots,N,
+N=\left\lceil\frac{\log c_{\mathrm{end}}-\log c_0}{\log 1.10}\right\rceil,\qquad
+c_k=\exp\!\left(\log c_0+\frac{k}{N}(\log c_{\mathrm{end}}-\log c_0)\right),\quad k=0,1,\ldots,N,
 $$
 
-with c_N assigned exactly b. Require finite, strictly increasing representable
-rates. **N must not exceed 256.** If b is unrepresentable, N exceeds 256, or
-progress is lost, return an explicit tail-calibration/resource error naming
-the distance range and required budget. Do not cap b silently, coarsen the
-grid, or switch to an undocumented dense-window fallback.
+with exact endpoints $c_0$ and $c_N=c_{\mathrm{end}}$ ($N+1$ finite points).
+Require finite, strictly increasing representable rates. **$N$ MUST NOT exceed
+512** (covering a $1.10^{512}\approx1.5\times10^{21}$ decay span). If
+$c_{\mathrm{end}}$ is unrepresentable, $N>512$, or numerical progress is lost,
+reject at preflight with an actionable mesh-size error reporting $c_0$,
+$c_{\mathrm{end}}$, $d_{\min}$, required $N$, and cap `512`. Do not cap
+$c_{\mathrm{end}}$ silently, coarsen the grid, or switch to an undocumented
+dense-window fallback.
 
-Add every tail point and K(infinity), using the true co-location block
-covariance. The finite mesh depends only on geometry and $\rho_0$, and MUST NOT
-depend on the tested response. For SCPC, use this identical set for:
+Add the exact co-location limit $K(\infty)$ ($N+2$ total covariance points when
+$c_{\mathrm{end}}>c_0$), using the true co-location block covariance. The mesh
+depends only on geometry and $\rho_0$, and MUST NOT depend on the tested
+response. For SCPC, use this identical set for:
 
 1. Every q candidate's location-only objective.
 2. Every reported location and conditional critical value.
@@ -319,39 +311,39 @@ The full-site projected family, including the same limit, also applies when
 the basis is Nyström. A cached covariance may be reused or tiled rather than
 stored, but it must not be omitted from any of those calculations.
 
-At 36/d_min all positive-distance kernel entries are at most exp(-36).
+At $36/d_{\min}$ all positive-distance kernel entries are at most $\exp(-36)\approx2.3\times10^{-16}$.
 That is an entrywise kernel observation. It does **not** bound projected
 probability error under ill-conditioning or prove that a finite interior
-maximum has been located. **[I, D]**
+maximum has been located. The `1.10` step ratio is a retained practical
+numerical choice, not a continuous accuracy certificate. **[I, D]**
 
-### 4.3 Reporting and refinement
+### 4.2 Reporting and refinement
 
-Return calibration_status=finite_grid, the actual finite rate mesh, units,
-c0/cmax/c_tail, f, and inclusion of the exact limit. Record the maximizing
-evaluated covariance for each reported probability/cutoff. The standard
-profile does not promise a continuous calibration error bound.
+Return `calibration_status=finite_grid`, the actual finite rate mesh, units,
+$c_0$, $c_{\mathrm{end}}$, $f$, and inclusion of the exact limit $K(\infty)$.
+Record the maximizing evaluated covariance for each reported probability/cutoff.
+The standard profile does not promise a continuous calibration error bound.
 
-A diagnostic sensitivity run may add midpoint/tail points and report changes.
-It must not silently change the production family, select points from the
-response without declaration, or be presented as a global certificate.
-Promoting a different production mesh requires a new profile record.
+A diagnostic sensitivity run may evaluate a finer grid (e.g., ratio `1.05` or
+closer) and report changes. It must not silently change the production family,
+select points from the response without declaration, or be presented as a global
+certificate. Promoting a different production mesh requires a new profile record.
 
 ## 5. I(0) covariance mesh
 
-Use the SPUR unit-diameter geometry. If f>0.03 the specified null family is
-infeasible: return the error defined in spur.md. If f=0.03, the null consists
-only of K(infinity); evaluate that exact limit and do not construct a finite
-rate grid or tail.
+Use the SPUR unit-diameter geometry. If $f>0.03$ the specified null family is
+infeasible: return the error defined in spur.md. If $f=0.03$, the null consists
+only of $K(\infty)$; evaluate that exact limit and do not construct a finite
+rate grid.
 
-For f<0.03, construct the I(0) nuisance mesh with the **same §4 bounded decay
-mesh** at $\rho_0=0.03$: solve only $c_{0.03}$ and $c_{\max}$ (for
-$\rho(c_{\max})=f+\min\{(1-f)10^{-5},\ 0.1(0.03-f)\}$), generate the 1.05
-interior mesh (`<= 1,024` steps), append the 1.20 tail up to
-$b=\max(c_{\max},36/d_{\min})$ (`<= 256` steps), and include K(infinity).
-This unifies SCPC and I(0) on one two-solve decay-mesh implementation instead
-of maintaining a separate ~79-solve hybrid correlation grid and deduplication
-pass, while keeping interior rate ratios at most 1.05 and enforcing the same
-preflight budget errors. **[D]**
+For $f<0.03$, construct the I(0) nuisance mesh with the **same §4 single
+log-rate mesh** at $\rho_0=0.03$: solve $c_{0.03}$, set
+$c_{\mathrm{end}}=\max(c_{0.03},36/d_{\min})$, generate the single
+log-rate grid at step ratio at most `1.10` (`N <= 512`), and include
+$K(\infty)$. This unifies SCPC and I(0) on one single-solve decay-mesh
+generator instead of maintaining a separate ~79-solve hybrid grid or a stitched
+two-zone mesh, while enforcing the same preflight budget error and full I(0)
+validation checks in verification.md. **[D]**
 
 The identical nuisance set MUST determine I(0) rank p-values and every
 reported cutoff. Tuning has its own fixed reference-null experiment as
@@ -421,8 +413,10 @@ B_tune, also defaulting to 100000; the counts need not match. Require B>=1
 and B_tune>=19, so the 5% tuning test can have a finite rank cutoff.
 Half-life uses one inference block because its alternative is geometry-only.
 Reuse the same base Gaussian vectors across parameter points and recolor them
-separately by each null covariance's specified Cholesky factor. A radial rescaling
-of each column does not change the homogeneous statistics. **[D, I]**
+separately by each null covariance's unique symmetric positive-definite square
+root $\Omega^{1/2}$ (so orthogonal basis rotations preserve the joint finite-$B$
+simulation distribution across all parameter points). A radial rescaling of
+each column does not change the homogeneous statistics. **[D, I]**
 
 Accept user-supplied blocks only after checking dimensions, finite entries, and
 strictly positive norms. State the required probabilistic generation and
@@ -446,21 +440,21 @@ profile in its own right; do not label its p-values exact deterministic Gaussian
 probabilities. Common seeds across different host RNGs do not imply common
 draws.
 
-The ten-node geometry-dependent composite half-life quadrature and complete
-bounded search recipe are defined in half-life-and-transforms.md, governed by
-the single 64-panel (640-node) short-scale preflight cap (which also bounds
-generated short-scale search probes to at most 441). That chapter owns their
-constants. This profile retains them because independent convergence
-checks supported ten-node integration; it does not increase orders or rounds
-without evidence of a material remaining error.
+The ten-node geometry-dependent composite half-life quadrature and bounded
+uniform log-h search recipe (at most 667 initial points under the single
+64-panel preflight cap $d_{\min}\ge2^{-58}$, plus 20-step bracket bisection) are
+defined in half-life-and-transforms.md. That chapter owns their constants. This
+profile retains ten-node quadrature because independent convergence checks
+supported it; it does not increase integration orders without evidence of a
+material remaining error.
 
 The bounded reference-tuning search is fully defined in spur.md. It uses
 unit-trace covariance shapes, a strength parameter in [0,1], exact endpoint
-laws, and the same rank-cutoff helper as inference. There are no type-7
-quantiles, unbounded multiplier searches, author-code starting constants or
-floating-point-underflow stopping rules. Failure to reach the target is
-reported with achieved estimated power and status; it must not be advertised
-as final-test power or global optimum.
+laws, symmetric square-root coloring, and the same rank-cutoff helper as
+inference. There are no type-7 quantiles, unbounded multiplier searches,
+author-code starting constants or floating-point-underflow stopping rules. Failure
+to reach the target is reported with achieved estimated power and status; it must
+not be advertised as final-test power or global optimum.
 
 ## 8. Efficiency and resource contract
 
@@ -479,10 +473,11 @@ full-site covariance mesh; it is not a secret fallback after failed exact
 inference.
 
 The SCPC finite meshes are constructed before outcome inference and are finite
-by the above rules. Half-life's fixed probes, refinement rounds and boundary
-budget are its explicit algorithmic limits. A host may enforce a tighter
-resource budget, but must reject before work or return an incomplete diagnostic
-result; it must not report normal completed inference.
+by the above rules. Half-life's uniform log-h grid and 20-step bisection are its
+explicit algorithmic limits. A host may enforce a tighter resource budget and
+fail with an actionable error at preflight or during execution. It MAY return an
+explicitly incomplete diagnostic result; it must not report normal completed
+inference.
 
 Performance changes should preserve this contract. In particular:
 

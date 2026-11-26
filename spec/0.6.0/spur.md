@@ -181,8 +181,9 @@ requiring no average-correlation root solve at any tuning candidate. Because
 $\operatorname{tr}(\Omega_B)/n$ is invariant under orthogonal basis changes and
 uniform site duplication, and scales linearly with contrast-subspace distance
 (including residual geometries where $X$ absorbs distant outliers), $c_{\mathrm{ref}}$
-keeps the 50%-power decay well inside the interior of $(0,1)$ across arbitrary
-spatial scales. Define the exact endpoints $H_{1,a}(0)=H_B$ and
+provides a practical geometry- and contrast-adapted tuning anchor heuristic (not
+a general theorem guaranteeing that a 50%-power decay lies comfortably inside
+the search interval across arbitrary spatial scales). Define the exact endpoints $H_{1,a}(0)=H_B$ and
 $H_{1,a}(1)=H_K(\infty)$. The weak endpoint is the projected exponential
 shape limit as $c\downarrow0$; it is not the zero contrast covariance
 $M\mathbf1\mathbf1^\top M$. The strong endpoint uses the exact co-location
@@ -300,12 +301,12 @@ p_0(z)=\sup_{c\in\mathcal C_0}
  P_c\{T_0(Z)\ge T_0(z)\}.
 $$
 
-**[D]** Version 0.6.0's default computation uses the shared bounded decay mesh
-in [the numerical profile](numerics.md) at $\rho_0=0.03$: the 1.05 interior
-decay mesh from $c_{0.03}$ to $c_{\max}$, its 1.20 finite decay-tail probes up
-to $\max(c_{\max},36/d_{\min})$, and the exact infinite-decay limit $K(\infty)$.
-Exceeding the declared interior or tail budget produces an explicit preflight
-error rather than silently coarsening the mesh.
+**[D]** Version 0.6.0's default computation uses the single shared bounded decay
+mesh in [the numerical profile](numerics.md) at $\rho_0=0.03$: one uniform
+log-rate grid at step ratio at most $1.10$ from $c_{0.03}$ to
+$c_{\mathrm{end}}=\max(c_{0.03},36/d_{\min})$, together with the exact
+infinite-decay limit $K(\infty)$. Exceeding the declared step budget ($512$)
+produces an explicit preflight error rather than silently coarsening the mesh.
 
 For the evaluated mesh $\mathcal G_0$, return
 
@@ -336,17 +337,15 @@ attainable. A smaller requested tuning block is an input error explaining that
 minimum. Do not use the observed response to choose the alternative.
 
 For reference shape $H_0$, candidate $H_a$, and common tuning directions
-$e_b$, form null draws $L_0e_b$ and alternative draws $L_ae_b$, where
-$L_0L_0^\top=H_0$ and $L_aL_a^\top=H_a$. For these simulations, use the
-positive-diagonal lower-triangular Cholesky factors in the implementation's
-retained basis.
-Equivalent algebra may reuse factors and quadratic forms if it preserves the
-specified colored vectors for supplied draws. Evaluate the candidate's same
-quadratic-form ratio on both sets. The tuning cutoff uses the same rank rule
-as final inference in §6: the $k$-th largest null statistic, with
-$k=\lfloor(B_{\rm tune}+1)/20\rfloor$, calculated by checked integer
-division. The estimated reference power is the fraction of alternative
-statistics **strictly above** that cutoff.
+$e_b$, form null draws $H_0^{1/2}e_b$ and alternative draws $H_a^{1/2}e_b$,
+using the unique symmetric positive-definite square root $S(H)=H^{1/2}$ from the
+symmetric eigendecomposition in the implementation's retained basis. Equivalent
+algebra may reuse factors and quadratic forms if it preserves the specified
+colored vectors. Evaluate the candidate's same quadratic-form ratio on both sets.
+The tuning cutoff uses the same rank rule as final inference in §6: the $k$-th
+largest null statistic, with $k=\lfloor(B_{\rm tune}+1)/20\rfloor$, calculated by
+checked integer division. The estimated reference power is the fraction of
+alternative statistics **strictly above** that cutoff.
 
 **[D]** This reference calculation chooses the statistic; it does not supply
 the final inference draws or replace the final composite-null calibration.
@@ -447,11 +446,12 @@ equivalently independent directions uniform on the unit sphere. Both blocks
 must be independent of the observed outcomes, and the inference block must be
 independent of the tuning block. The host RNG/seed policy is fixed in
 [the overview](README.md). Equal seeds in different RNG implementations are not
-a cross-host identity guarantee. Identical supplied blocks support numerical
-parity comparisons when the retained bases and coloring coordinates are also
-aligned. Otherwise orthogonal basis changes preserve the simulation law, not
-necessarily the realized Monte Carlo p-value; compare invariant quantities
-and assess simulation variation as specified in [verification](verification.md).
+a cross-host identity guarantee. Identical supplied blocks compare realized host
+outputs directly when retained bases agree; under an orthogonal basis change
+$R_{\mathrm{new}}=R_{\mathrm{old}}O$, rotating base draws once by
+$E_{\mathrm{new}}=O^\top E_{\mathrm{old}}$ gives an exact coupled comparison across
+**all** covariances simultaneously under symmetric $\Omega^{1/2}$ coloring,
+preserving the exact joint finite-simulation distribution. **[D, I]**
 
 **[I, D]** Multiplying each column by any nonzero scalar preserves these
 homogeneous ratio calculations. Normalize finite nonzero columns by their
@@ -475,8 +475,8 @@ license reusing inference columns as tuning columns.
 
 **[D, I]** At one null covariance $\Omega$, let $T_b$ be the statistic on
 the recolored inference draw and $T_{\mathrm{obs}}$ the statistic on the
-observed response. Recolor with the positive-diagonal lower Cholesky factor,
-using the same factor convention as tuning. Return
+observed response. Recolor with the unique symmetric positive-definite square
+root $\Omega^{1/2}$, using the same factor convention as tuning. Return
 
 $$
 \widehat p_\Omega
@@ -640,13 +640,13 @@ decay/correlation when applicable,
 `reference_tuning_power`, tuning status, numerical calibration status, draw
 counts and reproducibility metadata.
 
-For I(0), expose the actual evaluated nuisance mesh with its decay parameters,
-achieved average correlations and exact-limit markers, together with the
-point-null p-values and cutoffs. Average correlations alone are insufficient
-to identify tail evaluations that round to the co-location floor. The returned
-mesh size varies with geometry and co-location floor; do not claim a fixed
-point count. Shared execution and accuracy fields follow
-[the numerical profile](numerics.md).
+For I(0), expose the actual evaluated nuisance mesh with $c_{0.03}$,
+$c_{\mathrm{end}}$, the decay parameters, achieved average correlations and
+exact-limit markers, together with the point-null p-values and cutoffs. Average
+correlations alone are insufficient to identify short-scale evaluations that
+round to the co-location floor. The returned mesh size varies with geometry and
+co-location floor; do not claim a fixed point count. Shared execution and
+accuracy fields follow [the numerical profile](numerics.md).
 
 ### 9.2 Deterministic quadratic-form evaluation
 
