@@ -1,10 +1,18 @@
 # SCPC and SPUR methods specification
 
-[Version 0.5.0](0.5.0/README.md) is the current method and supported-use specification.
-The earlier editions record historical algorithms and verification references.
+[Version 0.6.0](0.6.0/README.md) is the adopted complete specification and next
+implementation target. Its chapter map defines all normative material without
+implicit inheritance from historical editions.
+
+[Version 0.5.0](0.5.0/README.md) remains the implemented baseline identified by
+spec/VERSION, the core and host compatibility guards. Those markers must advance
+together only after the [0.6.0 conformance gates](0.6.0/verification.md) pass.
+Adding the new specification alone does not claim a 0.6.0 implementation.
+Earlier editions preserve historical algorithms and verification references.
 
 | Document | Contents |
 | --- | --- |
+| [Version 0.6.0](0.6.0/README.md) | Complete normative scope and formulas; paper/replication/package provenance; analytic decay bracket, unified spatial rank rule, single no-cmax SCPC/I(0) decay grid, inverse-meter geographic decay, shared core RNG, symmetric square-root draw coloring with exact joint rotation invariance, and single uniform log-h half-life search. |
 | [Version 0.5.0](0.5.0/README.md) | Finer SCPC/I(0) grids, 10-point GL & adaptive half-life search, full-site Nyström decay, aligned formulas, no adjusted intercept, R C-API & Stata normal-equation guards. |
 | [Version 0.4.0](0.4.0/README.md) | Unified fitted-state, geometry, calibration, results, and execution contracts. |
 | [Version 0.3.9](0.3.9/README.md) | ISO neighborhoods, centered LBM-GLS, conditional IV, and SPUR dimensions and tuning. |
@@ -26,9 +34,10 @@ The earlier editions record historical algorithms and verification references.
 
 ## Use and versioning
 
-- Apply the [conditional OLS projection order](0.1.0/scpc-conditional-ols.md#required-projection-order) in every package and backend, including the shared Rust core and host-language fallbacks.
+- Implementing 0.6.0 requires the complete incorporated chapter set, including its [SCPC projection definitions](0.6.0/scpc.md) and [numerical profile](0.6.0/numerics.md).
 - Cite the version and method section in implementation changes and tests. Compare a mathematical identity against the reference calculations and a release result against the corresponding compatibility fixture.
-- Give result-changing updates to a method definition or adopted finite convention a new spec version. Retain prior version directories and record the source, rationale, affected fixtures, and method review with the change. A new solver, factorization, or storage layout can satisfy the same specification.
-- Resolve choices marked open in [Conventions and decisions](0.1.0/conventions.md) before changing production defaults. Package parity remains tied to its named source revision. A disagreement with the published method belongs in the convention record with a reproducer and a decision.
+- Record result-changing method or numerical-profile updates with source, rationale, affected fixtures and verification. An equivalent solver, factorization or storage layout can satisfy the same specification.
+- The [0.6.0 decision register](0.6.0/decisions.md) resolves its adopted defaults and supersedes earlier open-choice lists for that target. Historical output equality does not override corrected mathematical definitions.
+- Keep implemented method markers honest while a specification is ahead of the code. The [migration plan](0.6.0/verification.md) records required changes and distinguishes them from documentation completion.
 
 Version 0.1.0 records the paper definitions and audits the profiles that inform implementation. It leaves product defaults open where author and package profiles differ. Clustered, weighted, absorbed-FE, and IV SCPC, Nyström SCPC, SPUR diagnostic tests, and transformations are outside this version.
