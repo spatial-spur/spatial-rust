@@ -147,7 +147,7 @@ regions is not implied by supporting the 2SLS fit.
 
 SCPC accepts an identified supported regression with or without an intercept.
 Residual SPUR requires that the full projected OLS design span the constant
-vector. This makes the Brownian representation -M_X D M_X/2 valid after
+vector. This makes the Brownian representation -M_X d M_X/2 valid after
 projection by cancelling origin terms. **[I, D]** The requirement MUST be checked
 on the actual design space, not merely by finding a column named "Intercept".
 It is a package support restriction, not a claim that every alternative
@@ -365,14 +365,18 @@ is documented and no information is lost. The core mathematical result must be
 available without parsing printed text. Bounds may be infinite; do not replace
 true infinity with a finite display sentinel.
 
-Default simulation seed is 42; default Nyström landmark seed is 1, with a
-uint32 landmark seed domain. Ordinary seeded simulations (both tuning and
-inference blocks) and Nyström landmark subsets are generated in the shared core
-using one maintained, versioned RNG and sampler; they MUST NOT touch caller
-global RNG state in any host language. Implicit unseeded host modes such as R
-seed=NULL are not part of 0.6.0 support; reject them with a message to supply
-an integer seed or explicit draw blocks. Callers needing a custom host RNG can
-generate draw blocks externally and supply them explicitly. **[D]**
+Both the ordinary simulation seed (default 42) and the Nyström landmark seed
+(default 1) use the **`uint32`** domain (`0` to $2^{32}-1$). Every host MUST
+validate exact non-negative integer values in $[0, 2^{32}-1]$—accepting exact
+integer-valued numeric scalars where host signed integers cap below $2^{32}-1$
+(such as R)—and consistently reject fractional, negative, or out-of-range
+values. Ordinary seeded simulations (both tuning and inference blocks) and
+Nyström landmark subsets are generated in the shared core using one maintained,
+versioned RNG and sampler; they MUST NOT touch caller global RNG state in any
+host language. Implicit unseeded host modes such as R seed=NULL are not part of
+0.6.0 support; reject them with a message to supply a `uint32` seed or explicit
+draw blocks. Callers needing a custom host RNG can generate draw blocks
+externally and supply them explicitly. **[D]**
 
 Hosts sharing the same compiled core binary and seed reproduce the same
 generated draws and landmark subsets; a seed alone does not promise bitwise

@@ -138,13 +138,12 @@ make old outputs 0.6.0 outputs.
 
 ## 6. Follow-up review and design decisions
 
-The follow-up review of the initial 0.6.0 draft identified the following gaps.
-They are resolved in the normative chapters, not left as additional optional
-compatibility modes.
-The reviewed draft was
-[d979f7d](https://github.com/spatial-spur/spatial-rust/commit/d979f7d00bea5f726bb126b8b7e1f5ee4aa4ed0a);
-these revisions change the unimplemented target, not an already released
-0.6.0 runtime.
+The follow-up reviews of the 0.6.0 draft (starting from
+[d979f7d](https://github.com/spatial-spur/spatial-rust/commit/d979f7d00bea5f726bb126b8b7e1f5ee4aa4ed0a)
+through final pre-implementation freeze) identified the following gaps and
+simplifications. They are resolved in the normative chapters, not left as
+additional optional compatibility modes; these revisions change the
+unimplemented target, not an already released 0.6.0 runtime.
 
 | Review item | Assessment and resolution |
 | --- | --- |

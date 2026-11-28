@@ -161,8 +161,11 @@ any spectral quadratic-form/log-det reuse on ill-conditioned covariances against
 a stable triangular/Cholesky solve.
 
 Verify the analytic decay bracket `[L/d_max, L/d_min]` (unit-diameter
-`[L, L/d_min]`), exact closed-form root when `d_min = d_max`, endpoint residual
-checks, and bounded solver convergence within 128 iterations. Force
+`[L, L/d_min]`), conditioned evaluation of $L$ (`-log(a)` for `a <= 0.5` vs.
+`-log1p((rho_target-1)/(1-f))` for `a > 0.5`), separate positive-pair residual
+evaluation near $f$, `expm1` deficit evaluation near $1$, the residual accuracy
+check on the closed-form root when `d_min = d_max`, endpoint residual checks,
+and bounded solver convergence within 128 iterations. Force
 integration/root budget exhaustion in a controlled fixture and verify accuracy
 failure rather than successful status. Test scale-aware PSD checks,
 especially a materially indefinite small-variance block hidden beside a large
@@ -203,14 +206,16 @@ deterministic outlier-absorbed residual I(1) regression fixture: n=60 sites
 consisting of the first 59 points of an 8x8 uniform grid on [0,1e-6]^2 in
 row-major order ((i*1e-6/7, j*1e-6/7) for i,j in 0..7) plus 1 outlier at
 (1,0), with X having an intercept and an indicator for observation 60, and q=15
-(tr(Omega_B)~1.466e-5, c_ref~2.046e6, relative block gap ~1.54e-3). Verify
-that the contrast-scale anchor c_ref=n/(2 tr(Omega_B)) reaches the 50% power
-target cleanly inside the 20-interior-candidate budget (rather than remaining
-near 5% size at c<=2^20-1), and verify uniform site-duplication invariance of
-c_ref. Check that a missed target is reported without a false convergence or
-global-power claim. Compare achieved reference power and workload on ordinary,
-clustered and Chetty geometries before release; numerical order/validity does
-not by itself establish equal power to the older search.
+(tr(Omega_B)~1.466e-5, c_ref~2.046e6, relative block gap ~1.54e-3). Verify that the contrast-scale anchor c_ref=n/(2 tr(Omega_B)) reaches the 50%
+reference-power target cleanly inside the 20-interior-candidate budget (whereas
+the unscaled parameterization fails to attain the target within the finite-candidate
+budget—its last finite candidate c=2^20-1 attains ~9.7% reference power, forcing
+selection of the exact strong endpoint at ~87.3%), and verify uniform
+site-duplication invariance of c_ref. Check that a missed target is reported
+without a false convergence or global-power claim. Compare achieved reference
+power and workload on ordinary, clustered and Chetty geometries before release;
+numerical order/validity does not by itself establish equal power to the older
+search.
 
 The specification review included an independent prototype with n=60,
 q=15 and B_tune=5000 on ordinary, clustered, exact-duplicate and line
@@ -275,14 +280,16 @@ must give the declared error before costly simulation, never silently clip the
 supported scale range.
 
 Before freezing the uniform log-h grid density, run an actual-likelihood
-comparison gate at default B=100,000 against the previous 0.5.0 search and a
-substantially denser independent search, using common draws and the same
-mixture statistic, across ordinary, clustered, close-pair, and Chetty geometries
-(including likelihood surfaces near acceptance boundaries). Report detected
-components, omitted accepted probes, missed rejection gaps, mapped boundary
-brackets, evaluation counts, and runtime. If 8 probes per doubling shows a
-material loss, measure a modestly denser single log-h grid before considering
-any multi-round refinement.
+comparison gate at default B=100,000 comparing the previous 0.5.0 search
+schedule, the new uniform log-h schedule, and a substantially denser independent
+search schedule through the **same prepared point-null evaluator** (holding
+basis, quadrature, symmetric-root coloring, draws, and boundary convention fixed
+so differences isolate the search schedule rather than coloring changes), across
+ordinary, clustered, close-pair, and Chetty geometries (including likelihood
+surfaces near acceptance boundaries). Report detected components, omitted
+accepted probes, missed rejection gaps, mapped boundary brackets, evaluation
+counts, and runtime. If 8 probes per doubling shows a material loss, measure a
+modestly denser single log-h grid before considering any multi-round refinement.
 
 Synthetic narrow gaps/islands (e.g., narrow gaps/islands of width ~0.06–0.08
 in t) may test uniform log-h probe detection and 20-step bisection mechanics,

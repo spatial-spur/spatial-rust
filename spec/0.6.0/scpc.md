@@ -60,19 +60,19 @@ This is a sum of observation influences within a declared site, not an average. 
 
 ## 2. Spatial benchmark and exact endpoint
 
-**[P]** For the site distance matrix $D$ defined in [README.md](README.md), let
+**[P]** For the physical site distance matrix $D$ and positive sample diameter $\Delta=\max_{g,h}D_{gh}$ defined in [README.md](README.md#52-metrics-and-units), define normalized site distances $d=D/\Delta\in[0,1]$ and
 
 $$
-K(c)_{gh}=\exp(-cD_{gh}),\qquad
+K(c)_{gh}=\exp(-c d_{gh}),\qquad
 \bar\rho(c)=\frac{1}{m(m-1)}\sum_{g\ne h}K(c)_{gh}.
 $$
 
-The correlation bound is $\mathrm{avc}$, and $c_0$ solves $\bar\rho(c_0)=\mathrm{avc}$. The default (`0.03`) and calibration rules are fixed in [numerics.md](numerics.md). The public domain is the mathematical attainability interval below; there is no separate historical `0.001`/`0.99` cutoff. The exponential benchmark and calibration by average pairwise correlation follow [Müller and Watson (2022), §2 and Remark 2.3](https://www.princeton.edu/~mwatson/papers/ECTA19465.pdf).
+Internal decay rates $c$ ($c_0$, $c_{\rm end}$, and mesh points) multiply normalized distances $d$; public physical-rate views convert via $c_{\rm physical}=c/\Delta$ as stated in §8. The correlation bound is $\mathrm{avc}$, and $c_0$ solves $\bar\rho(c_0)=\mathrm{avc}$. The default (`0.03`) and calibration rules are fixed in [numerics.md](numerics.md). The public domain is the mathematical attainability interval below; there is no separate historical `0.001`/`0.99` cutoff. The exponential benchmark and calibration by average pairwise correlation follow [Müller and Watson (2022), §2 and Remark 2.3](https://www.princeton.edu/~mwatson/papers/ECTA19465.pdf).
 
 **[I/D]** Define the co-location matrix $J$ and off-diagonal co-location fraction $f$ by
 
 $$
-J_{gh}=\mathbf1\{D_{gh}=0\},\qquad
+J_{gh}=\mathbf1\{d_{gh}=0\},\qquad
 f=\frac{1}{m(m-1)}\sum_{g\ne h}J_{gh}.
 $$
 

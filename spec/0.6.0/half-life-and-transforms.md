@@ -26,11 +26,11 @@ for a subsequent regression. [P, D]
 ## 2. Half-life geometry, experiment, and eligibility
 
 Let the analysis sample contain $n$ observations at locations $s_i$, with
-distance matrix $D$, positive diameter
-$d_{\max}=\max_{i,j}D_{ij}$, and
+physical distance matrix $D$, positive sample diameter
+$\Delta=\max_{i,j}D_{ij}$, and
 $M=I-\mathbf1\mathbf1^\top/n$. Distances, exact co-location, geographic arc
 units, and input ordering follow [the common specification](README.md) and
-[SPUR geometry](spur.md). Define normalized distances $d=D/d_{\max}$ and
+[SPUR geometry](spur.md). Define normalized distances $d=D/\Delta$ and
 
 $$
  B=-\tfrac12 M d M.
@@ -52,7 +52,7 @@ Retaining high frequencies or all available positive directions requires the
 advisories specified in [SPUR](spur.md). [R, D]
 
 Write normalized half-life as $h$, with physical half-life
-$H=d_{\max}h$. For $0<h<\infty$, set $c=\log(2)/h$ and use the
+$H=\Delta h$. For $0<h<\infty$, set $c=\log(2)/h$ and use the
 projected covariance shape
 
 $$
@@ -112,7 +112,7 @@ $$
 It does not average covariance matrices and is not uniform in decay $c$.
 Null values $h_0$ range over $[0,\infty]$; the alternative's support does
 not truncate the null domain. In physical units the same mixture has measure
-$dH/d_{\max}$ on $[0,d_{\max}]$. This is the equation-(20) target of
+$dH/\Delta$ on $[0,\Delta]$. This is the equation-(20) target of
 Müller and Watson (2024), §4.4, with constants that do not affect a calibrated
 point-null test included in the ratio. [P, I]
 
@@ -320,15 +320,14 @@ corresponding $h_{\mathrm{mid}}=t_{\mathrm{mid}}/(1-t_{\mathrm{mid}})$, reusing
 any cached evaluation count) and keep the half-interval whose endpoint
 acceptance states differ. [D]
 
-Twenty bisection steps shrink every bracket by $2^{-20}\approx9.54\times10^{-7}$.
-Even on the outermost finite interval $[t_M,1]$ of initial width
-$\approx10^{-6}$, the final step width is $\approx9.5\times10^{-13}\gg\epsilon$,
-avoiding binary64 midpoint stagnation on the specified initial cells. Twenty
-bisection steps reduce each transition bracket's width in $t$ by $2^{-20}$.
-The mapped half-life bounds describe the achieved precision; no uniform
-absolute or relative half-life precision is implied. An unresolved numerical
-point, nonfinite midpoint, or unmet accuracy condition produces incomplete-search
-behavior below. [D]
+Twenty bisection steps reduce each transition bracket's width in $t$ by
+$2^{-20}\approx9.54\times10^{-7}$. Even on the outermost finite interval
+$[t_M,1]$ of initial width $\approx10^{-6}$, the final step width is
+$\approx9.5\times10^{-13}\gg\epsilon$, avoiding binary64 midpoint stagnation on
+the specified initial cells. The mapped half-life bounds describe the achieved
+precision; no uniform absolute or relative half-life precision is implied. An
+unresolved numerical point, nonfinite midpoint, or unmet accuracy condition
+produces incomplete-search behavior below. [D]
 
 Construct components from the located acceptance changes. Round a lower
 component endpoint down to the rejected-side lower bracket bound and an upper

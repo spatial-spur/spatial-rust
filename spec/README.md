@@ -12,7 +12,7 @@ Earlier editions preserve historical algorithms and verification references.
 
 | Document | Contents |
 | --- | --- |
-| [Version 0.6.0](0.6.0/README.md) | Complete normative scope and formulas; paper/replication/package provenance; unified spatial rank rule, single no-cmax SCPC/I(0) decay grid, symmetric square-root SPUR draw coloring with exact joint rotation invariance, and single uniform log-h half-life search. |
+| [Version 0.6.0](0.6.0/README.md) | Complete normative scope and formulas; paper/replication/package provenance; analytic decay bracket, unified spatial rank rule, single no-cmax SCPC/I(0) decay grid, inverse-meter geographic decay, shared core RNG, symmetric square-root draw coloring with exact joint rotation invariance, and single uniform log-h half-life search. |
 | [Version 0.5.0](0.5.0/README.md) | Finer SCPC/I(0) grids, 10-point GL & adaptive half-life search, full-site Nyström decay, aligned formulas, no adjusted intercept, R C-API & Stata normal-equation guards. |
 | [Version 0.4.0](0.4.0/README.md) | Unified fitted-state, geometry, calibration, results, and execution contracts. |
 | [Version 0.3.9](0.3.9/README.md) | ISO neighborhoods, centered LBM-GLS, conditional IV, and SPUR dimensions and tuning. |

@@ -257,14 +257,30 @@ defining
 
 $$
 a=\frac{\rho_{\mathrm{target}}-f}{1-f},\qquad
-L=-\log a=-\operatorname{log1p}\!\left(\frac{\rho_{\mathrm{target}}-1}{1-f}\right)
+L=\begin{cases}
+-\log(a), & a\le\tfrac12,\\
+-\operatorname{log1p}\!\left(\dfrac{\rho_{\mathrm{target}}-1}{1-f}\right), & a>\tfrac12,
+\end{cases}
 $$
 
-gives the exact analytic bracket $L/d_{\max}\le c_0\le L/d_{\min}$ (which under
-unit-diameter normalization $d_{\max}=1$ is simply $L\le c_0\le L/d_{\min}$).
-If $d_{\min}=d_{\max}$, $c_0=L/d_{\max}$ holds in closed form. Otherwise validate
-that both bracket endpoints are finite and representable, check the residual
-criterion at the endpoints (in case floating-point roundoff places the root on
+gives the exact mathematical analytic bounds $L/d_{\max}\le c_0\le L/d_{\min}$
+(which under unit-diameter normalization $d_{\max}=1$ simplify to
+$L\le c_0\le L/d_{\min}$). Using $-\log(a)$ for $a\le\tfrac12$ avoids
+cancellation near the co-location floor $f$, while $-\operatorname{log1p}$ for
+$a>\tfrac12$ avoids cancellation near correlation $1$.
+
+When evaluating residuals $\rho(c)-\rho_{\mathrm{target}}$:
+
+- Near the co-location floor $f$, evaluate the positive-distance contribution
+  separately as $\frac{1}{m(m-1)}\sum_{d_{ij}>0}\exp(-c d_{ij})-(\rho_{\mathrm{target}}-f)$
+  rather than adding $f$ and subtracting $\rho_{\mathrm{target}}$.
+- Near correlation $1$, evaluate correlation deficits using
+  $\operatorname{expm1}(-c d_{ij})$ rather than forming $1-\exp(-c d_{ij})$.
+
+If $d_{\min}=d_{\max}$, $c_0=L/d_{\max}$ holds in closed form and MUST still be
+checked against the residual accuracy criterion below. Otherwise validate that
+both analytic bracket endpoints are finite and representable, check the residual
+criterion at both endpoints (in case floating-point roundoff places the root on
 an endpoint), and run one safeguarded Newton/Brent/bisection scalar solver
 inside that bracket using the following reference profile:
 
@@ -278,10 +294,12 @@ inside that bracket using the following reference profile:
   return a calibration accuracy error. A looser residual fallback MUST NOT be
   silently labelled converged.
 
-The bracket is a bound for the numerically evaluated monotone function. It is
-not an independent theorem about exact real-arithmetic evaluation. Detect
+The analytic bounds $[L/d_{\max},L/d_{\min}]$ hold identically in exact real
+arithmetic; by contrast, the rounded, numerically verified sign bracket returned
+by the solver bounds only the numerically evaluated monotone function and is not
+an independent theorem about exact real-arithmetic evaluation. Detect
 stagnation, nonfinite rates and failure to separate target from the floor.
-Report the attained residual and bracket in diagnostic metadata.
+Report the attained residual and final numerical bracket in diagnostic metadata.
 
 Geometry summaries, f, positive minimum distance, and requested decay limits
 MUST be computed once per geometry/parameter request and reused through q

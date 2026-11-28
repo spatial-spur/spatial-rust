@@ -57,24 +57,24 @@ not receive a uniform post-selection coverage guarantee from this chapter.
 
 **[P, D]** Let there be $n$ analysis observations on the common retained sample.
 Use the declared metric and exact co-location rule in [the overview](README.md).
-Let $D$ be the pairwise distance matrix divided by the sample diameter, so
-$0\le D_{ij}\le1$. The diameter must be positive and finite. For SPUR
-diagnostics, repeated observations are retained unless the caller has explicitly
-prepared another analysis unit; no implicit averaging, jitter or nugget is
-introduced.
+Let $D$ be the physical pairwise distance matrix, $\Delta=\max_{i,j}D_{ij}>0$
+the finite positive sample diameter, and $d=D/\Delta$ the normalized pairwise
+distance matrix ($0\le d_{ij}\le1$). For SPUR diagnostics, repeated
+observations are retained unless the caller has explicitly prepared another
+analysis unit; no implicit averaging, jitter or nugget is introduced.
 
 Define
 
 $$
-K(c)_{ij}=\exp(-cD_{ij}),\qquad
-K(\infty)_{ij}=\mathbf 1\{D_{ij}=0\},
+K(c)_{ij}=\exp(-c d_{ij}),\qquad
+K(\infty)_{ij}=\mathbf 1\{d_{ij}=0\},
 $$
 
 and
 
 $$
-f=\frac{1}{n(n-1)}\sum_{i\ne j}\mathbf 1\{D_{ij}=0\},\qquad
-\bar\rho(c)=\frac{1}{n(n-1)}\sum_{i\ne j}\exp(-cD_{ij}).
+f=\frac{1}{n(n-1)}\sum_{i\ne j}\mathbf 1\{d_{ij}=0\},\qquad
+\bar\rho(c)=\frac{1}{n(n-1)}\sum_{i\ne j}\exp(-c d_{ij}).
 $$
 
 **[I]** Distinct observations at identical coordinates have unit covariance in
@@ -101,7 +101,7 @@ not columns reconstructed under different knots, contrasts or sample selection.
 **[P, I]** Define the projected Brownian matrix
 
 $$
-B_X=-\tfrac12 MDM.
+B_X=-\tfrac12 M d M.
 $$
 
 Let $R\in\mathbb R^{n\times q}$ have unit-norm orthogonal columns spanning its
@@ -223,13 +223,18 @@ stand on their own; no finite-rate conversion is asserted at $c=\infty$.
 There is no separate legacy-normalization production mode.
 
 **[D]** Report the selected `alternative_strength` $w_a$ with meaning
-`scaled_compact_decay`, its contrast-scale anchor $c_{\mathrm{ref}}$, its
-achieved average correlation, and $c_a$ with its units, using an exact-limit
-marker when $w_a=1$. A finite $c_a$ multiplies diameter-normalized distance;
-for absolute diameter $L$, its decay per absolute distance unit is $c_a/L$.
-These are statistic-tuning parameters, not estimates of the observed response's
-persistence. Selection depends on geometry, the eligible design and tuning
-draws, not on $z$.
+`scaled_compact_decay`, its achieved average correlation, and the public
+physical decay parameters $c_{a,\mathrm{physical}}=c_a/\Delta$ and
+$c_{\mathrm{ref,physical}}=c_{\mathrm{ref}}/\Delta$ with their units (inverse
+meters for geographic coordinates, inverse input units for Euclidean
+coordinates) under [the common units contract](README.md#52-metrics-and-units),
+using an exact-limit marker when $w_a=1$. Store the underlying normalized rates
+($c_a$, $c_{\mathrm{ref}}$, and the I(0) mesh rates $c_{0.03},c_{\mathrm{end}},c_k$)
+once and derive physical views by dividing by $\Delta$; any intentionally
+exposed normalized decay field MUST carry an explicitly normalized name and
+unit label. These are statistic-tuning parameters, not estimates of the
+observed response's persistence. Selection depends on geometry, the eligible
+design and tuning draws, not on $z$.
 
 ## 4. I(0) statistic and composite null
 
@@ -653,7 +658,8 @@ accuracy fields follow [the numerical profile](numerics.md).
 
 **[I, D]** Monte Carlo is the adopted default in 0.6.0, not a mathematical
 necessity of LFUR or LFST. For a fixed statistic
-$T(z)=(z^\top A_0z)/(z^\top A_az)$ and $z=L\xi$, its upper tail is the
+$T(z)=(z^\top A_0z)/(z^\top A_az)$ and $z=L\xi$ (for any factor $L$ satisfying
+$LL^\top=\Omega$, such as $\Omega^{1/2}$), its upper tail is the
 Gaussian quadratic-form event
 
 $$
